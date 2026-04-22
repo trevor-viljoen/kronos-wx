@@ -5,6 +5,8 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-Research%20%2F%20Alpha-orange)
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-0070ba?logo=paypal)](https://paypal.me/trevorviljoen)
+[![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?logo=github-sponsors)](https://github.com/sponsors/trevor-viljoen)
 
 KRONOS-WX is a research-grade data system for studying why some Oklahoma severe
 weather setups produce tornado outbreaks while identical-looking setups produce
@@ -479,6 +481,16 @@ Full bibliography in `docs/whitepaper.md`.  Foundational references:
 ## License
 
 MIT License. See `LICENSE` for details.
+
+---
+
+## Support This Project
+
+KRONOS-WX is independent research. If you find it useful or want to help fund
+data storage, compute time, and continued development:
+
+- **PayPal:** [paypal.me/trevorviljoen](https://paypal.me/trevorviljoen)
+- **GitHub Sponsors:** [github.com/sponsors/trevor-viljoen](https://github.com/sponsors/trevor-viljoen)
 
 ---
 
