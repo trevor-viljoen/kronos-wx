@@ -33,8 +33,10 @@ from ..models import (
 
 logger = logging.getLogger(__name__)
 
-WYOMING_BASE = "https://weather.uwyo.edu/cgi-bin/sounding.py"
+WYOMING_BASE = "https://weather.uwyo.edu/wsgi/sounding"
 REQUEST_DELAY = 2.0  # seconds — Wyoming server is lightly resourced
+
+MPS_TO_KNOTS = 1.94384  # m/s → knots (new API returns m/s)
 
 # WMO station numbers for our four stations
 STATION_WMO = {
@@ -71,10 +73,10 @@ class SoundingClient:
         wait=wait_exponential(multiplier=2, min=4, max=60),
         retry=retry_if_exception_type((httpx.TimeoutException, httpx.TransportError)),
     )
-    def _fetch_html(self, params: dict) -> str:
+    def _fetch_raw(self, url: str) -> str:
         self._rate_limit()
-        logger.debug("Fetching Wyoming sounding: %s", params)
-        response = self._http.get(WYOMING_BASE, params=params)
+        logger.debug("Fetching Wyoming sounding: %s", url)
+        response = self._http.get(url)
         response.raise_for_status()
         return response.text
 
@@ -99,17 +101,16 @@ class SoundingClient:
             raise ValueError(f"hour must be 0 or 12, got {hour}")
 
         wmo_id = STATION_WMO[station]
-        params = {
-            "TYPE": "TEXT%3ALIST",
-            "YEAR": sounding_date.year,
-            "MONTH": f"{sounding_date.month:02d}",
-            "FROM": f"{sounding_date.day:02d}{hour:02d}",
-            "TO": f"{sounding_date.day:02d}{hour:02d}",
-            "STNM": wmo_id,
-        }
+        url = (
+            f"{WYOMING_BASE}"
+            f"?datetime={sounding_date.year}-{sounding_date.month:02d}-{sounding_date.day:02d}+{hour:02d}%3A00%3A00"
+            f"&type=TEXT%3ALIST"
+            f"&id={wmo_id}"
+            f"&src=UNKNOWN"
+        )
 
         try:
-            html = self._fetch_html(params)
+            html = self._fetch_raw(url)
         except httpx.HTTPStatusError as exc:
             logger.warning(
                 "HTTP error fetching sounding %s %s %02dZ: %s",
@@ -221,26 +222,39 @@ def _parse_sounding_table(text: str) -> list[SoundingLevel]:
     """
     Parse the fixed-width data table from Wyoming sounding text.
 
-    Expected columns (1-indexed, fixed width):
-        PRES   HGHT   TEMP   DWPT   RELH   MIXR   DRCT   SKNT   THTA   THTE   THTV
+    Column order: PRES HGHT TEMP DWPT RELH MIXR DRCT SPED THTA THTE THTV
+    (new API: SPED in m/s — converted to knots on ingest)
+    (legacy API used SKNT in knots — both handled)
 
-    Only PRES, HGHT, TEMP, DWPT, DRCT, SKNT are extracted.
+    Only PRES, HGHT, TEMP, DWPT, DRCT, speed are extracted.
     """
     lines = text.strip().split("\n")
     levels: list[SoundingLevel] = []
 
-    # Skip header lines — data starts after the dashed separator
+    # Detect whether wind speed column is m/s (SPED) or knots (SKNT)
+    speed_in_mps = False
+    for line in lines:
+        if "SPED" in line:
+            speed_in_mps = True
+            break
+        if "SKNT" in line:
+            break
+
+    # Skip header lines — data starts after the second dashed separator
+    dash_count = 0
     in_data = False
     for line in lines:
-        if re.match(r"^[-]+", line.strip()):
-            in_data = True
+        stripped = line.strip()
+        if re.match(r"^[-]+", stripped):
+            dash_count += 1
+            if dash_count >= 2:
+                in_data = True
             continue
 
         if not in_data:
             continue
 
-        # Empty line or non-numeric marks end of data
-        stripped = line.strip()
+        # Empty line marks end of data
         if not stripped:
             break
 
@@ -254,7 +268,7 @@ def _parse_sounding_table(text: str) -> list[SoundingLevel]:
             temp = float(parts[2])
             dwpt = float(parts[3])
             drct = float(parts[6])
-            sknt = float(parts[7])
+            spd  = float(parts[7])
         except (ValueError, IndexError):
             continue
 
@@ -264,6 +278,8 @@ def _parse_sounding_table(text: str) -> list[SoundingLevel]:
         if pres <= 0:
             continue
 
+        wind_speed_kt = spd * MPS_TO_KNOTS if speed_in_mps else spd
+
         levels.append(
             SoundingLevel(
                 pressure=pres,
@@ -271,7 +287,7 @@ def _parse_sounding_table(text: str) -> list[SoundingLevel]:
                 temperature=temp,
                 dewpoint=dwpt,
                 wind_direction=drct % 360,
-                wind_speed=sknt,
+                wind_speed=round(wind_speed_kt, 1),
             )
         )
 

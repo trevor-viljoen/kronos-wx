@@ -354,7 +354,9 @@ def _compute_cap_strength(
             return 0.0
 
         # Temperature excess = environment minus parcel (positive = cap exists)
-        temp_excess = (temperature.magnitude[mask] - parcel_path.magnitude[mask])
+        # parcel_path is in Kelvin from MetPy; convert to °C for comparison
+        parcel_c = parcel_path[mask].to("degC").magnitude
+        temp_excess = temperature.magnitude[mask] - parcel_c
         max_excess = float(temp_excess.max())
         return max(max_excess, 0.0)
 
