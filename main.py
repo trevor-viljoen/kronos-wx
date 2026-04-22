@@ -232,6 +232,7 @@ def enrich_case(case_ref: str, force: bool):
             logger.exception("Mesonet pull failed for %s", case_id)
 
     # ── Save enriched case ───────────────────────────────────────────────────
+    case.recompute_completeness()
     db.save_case(case)
     console.print(
         f"\n[bold green]Case {case_id} saved. "
@@ -276,26 +277,44 @@ def enrich_all(start_year: int, end_year: int, force: bool):
         f"Enriching {len(to_enrich)} (skipping {len(cases) - len(to_enrich)} already enriched)."
     )
 
-    errors = []
-    for case in track(to_enrich, description="Enriching cases..."):
-        try:
-            from click.testing import CliRunner
-            runner = CliRunner()
-            result = runner.invoke(enrich_case, [case.case_id])
-            if result.exit_code != 0:
-                errors.append((case.case_id, str(result.exception)))
-        except Exception as exc:
-            errors.append((case.case_id, str(exc)))
-            logger.exception("Enrichment failed for %s", case.case_id)
+    from ok_weather_model.ingestion import SoundingClient
+    from ok_weather_model.processing import compute_thermodynamic_indices, compute_kinematic_profile
 
+    errors = []
+    enriched = 0
+
+    with SoundingClient() as sc:
+        for case in track(to_enrich, description="Enriching cases..."):
+            try:
+                profile = sc.get_sounding(OklahomaSoundingStation.OUN, case.date, 12)
+                if profile is None:
+                    logger.debug("No sounding for %s", case.case_id)
+                    continue
+
+                db.save_sounding(profile)
+                indices    = compute_thermodynamic_indices(profile)
+                kinematics = compute_kinematic_profile(profile, indices)
+
+                case.sounding_12Z          = indices
+                case.kinematics_12Z        = kinematics
+                case.sounding_data_available = True
+                case.recompute_completeness()
+                db.save_case(case)
+                enriched += 1
+
+            except Exception as exc:
+                errors.append((case.case_id, str(exc)))
+                logger.exception("Enrichment failed for %s", case.case_id)
+
+    console.print(f"\n[bold green]Enriched: {enriched}[/bold green]  "
+                  f"No sounding: {len(to_enrich) - enriched - len(errors)}  "
+                  f"Errors: {len(errors)}")
     if errors:
-        console.print(f"\n[red]{len(errors)} cases failed:[/red]")
+        console.print(f"\n[red]Failures:[/red]")
         for case_id, err in errors[:10]:
             console.print(f"  {case_id}: {err}")
         if len(errors) > 10:
             console.print(f"  ... and {len(errors) - 10} more (see log)")
-    else:
-        console.print(f"\n[bold green]All {len(to_enrich)} cases enriched successfully.[/bold green]")
 
 
 # ── analyze-cap-behavior ──────────────────────────────────────────────────────

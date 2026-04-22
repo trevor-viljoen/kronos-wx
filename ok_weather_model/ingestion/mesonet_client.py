@@ -57,7 +57,7 @@ class MesonetClient:
         self._last_request_time = time_module.monotonic()
 
     @retry(
-        stop=stop_after_attempt(4),
+        stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=30),
         retry=retry_if_exception_type((httpx.TimeoutException, httpx.TransportError)),
     )
@@ -65,6 +65,9 @@ class MesonetClient:
         self._rate_limit()
         logger.debug("GET %s params=%s", url, params)
         response = self._http.get(url, params=params)
+        # Don't retry client errors (4xx) — fail fast
+        if 400 <= response.status_code < 500:
+            response.raise_for_status()
         response.raise_for_status()
         return response.json()
 

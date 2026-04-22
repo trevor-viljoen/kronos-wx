@@ -96,8 +96,8 @@ class SPCClient:
         """
         df = self._load_tornado_csv()
 
-        # Oklahoma FIPS = 40; SPC 'st' column is state FIPS
-        ok_mask = df["st"].astype(int) == OKLAHOMA_STATE_FIPS
+        # SPC 'st' column is the two-letter state abbreviation
+        ok_mask = df["st"] == OKLAHOMA_STATE_ABBR
         date_mask = (df["event_date"] >= start_date) & (df["event_date"] <= end_date)
 
         result = df[ok_mask & date_mask].copy()

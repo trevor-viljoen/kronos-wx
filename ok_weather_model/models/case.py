@@ -158,7 +158,19 @@ class HistoricalCase(BaseModel):
 
     def recompute_completeness(self) -> float:
         """Re-run completeness calculation after incremental enrichment."""
-        self.model_validate(self.model_dump())
+        checks = [
+            self.sounding_12Z is not None,
+            self.kinematics_12Z is not None,
+            self.EML_12Z is not None,
+            self.mesonet_data_available,
+            self.sounding_data_available,
+            self.convective_temp_gap_12Z is not None,
+            self.convective_temp_gap_15Z is not None,
+            self.convective_temp_gap_18Z is not None,
+            self.cap_erosion_time is not None,
+            self.cap_behavior is not None,
+        ]
+        self.data_completeness_score = sum(checks) / len(checks)
         return self.data_completeness_score
 
     @classmethod
