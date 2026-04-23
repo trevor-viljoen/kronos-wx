@@ -56,10 +56,18 @@ class HistoricalCase(BaseModel):
     surface_low_lon: Optional[float] = None
     LLJ_strength_12Z: Optional[float] = None         # knots
 
-    # ── Morning thermodynamics (12Z OUN unless noted) ─────────────────────────
+    # ── Sounding thermodynamics ───────────────────────────────────────────────
+    # 00Z: overnight sounding (previous evening state of the cap)
+    sounding_00Z: Optional[ThermodynamicIndices] = None
+    kinematics_00Z: Optional[KinematicProfile] = None
+    # 12Z: morning pre-convective sounding — primary input for cap diagnostics
     sounding_12Z: Optional[ThermodynamicIndices] = None
     kinematics_12Z: Optional[KinematicProfile] = None
     EML_12Z: Optional[EMLCharacteristics] = None
+    # 18Z: afternoon sounding during the convective initiation window —
+    # used to verify CES predictions and observe cap evolution
+    sounding_18Z: Optional[ThermodynamicIndices] = None
+    kinematics_18Z: Optional[KinematicProfile] = None
 
     # ── Cap evolution ─────────────────────────────────────────────────────────
     convective_temp_gap_12Z: Optional[float] = None  # °F — Tc minus 12Z surface temp
@@ -145,6 +153,8 @@ class HistoricalCase(BaseModel):
             self.sounding_12Z is not None,
             self.kinematics_12Z is not None,
             self.EML_12Z is not None,
+            self.sounding_00Z is not None,
+            self.sounding_18Z is not None,
             self.mesonet_data_available,
             self.sounding_data_available,
             self.convective_temp_gap_12Z is not None,
@@ -162,6 +172,8 @@ class HistoricalCase(BaseModel):
             self.sounding_12Z is not None,
             self.kinematics_12Z is not None,
             self.EML_12Z is not None,
+            self.sounding_00Z is not None,
+            self.sounding_18Z is not None,
             self.mesonet_data_available,
             self.sounding_data_available,
             self.convective_temp_gap_12Z is not None,

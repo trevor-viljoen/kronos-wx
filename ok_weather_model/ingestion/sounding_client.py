@@ -80,11 +80,14 @@ class SoundingClient:
         response.raise_for_status()
         return response.text
 
+    # Standard launch hours supported by the Wyoming archive
+    STANDARD_HOURS = (0, 3, 6, 9, 12, 15, 18, 21)
+
     def get_sounding(
         self,
         station: OklahomaSoundingStation,
         sounding_date: date,
-        hour: int,  # 0 or 12 (UTC)
+        hour: int,
     ) -> Optional[SoundingProfile]:
         """
         Retrieve a single rawinsonde sounding.
@@ -92,13 +95,16 @@ class SoundingClient:
         Args:
             station: OklahomaSoundingStation enum member
             sounding_date: date of the sounding
-            hour: 0 or 12 (UTC)
+            hour: UTC hour — one of 0, 3, 6, 9, 12, 15, 18, 21.
+                  00Z and 12Z are the routine twice-daily launches; other
+                  hours are special soundings launched during significant
+                  weather events (not available for every date).
 
         Returns:
             SoundingProfile or None if the sounding is missing in the archive.
         """
-        if hour not in (0, 12):
-            raise ValueError(f"hour must be 0 or 12, got {hour}")
+        if hour not in self.STANDARD_HOURS:
+            raise ValueError(f"hour must be one of {self.STANDARD_HOURS}, got {hour}")
 
         wmo_id = STATION_WMO[station]
         url = (
@@ -175,6 +181,36 @@ class SoundingClient:
             "No sounding found at any station for %s %02dZ", sounding_date, hour
         )
         return None
+
+    def get_all_soundings_for_date(
+        self,
+        station: OklahomaSoundingStation,
+        sounding_date: date,
+    ) -> dict[int, SoundingProfile]:
+        """
+        Retrieve all available soundings for a given date at one station.
+
+        Tries all 8 standard hours (00Z, 03Z, 06Z, 09Z, 12Z, 15Z, 18Z, 21Z)
+        and returns every one that Wyoming has on file.
+
+        00Z and 12Z are routine launches present on most dates.  03Z, 06Z,
+        09Z, 15Z, 18Z, and 21Z are special soundings launched only during
+        significant weather events — valuable for tracking cap evolution
+        through a tornado day.
+
+        Returns:
+            dict mapping UTC hour → SoundingProfile for each available launch.
+        """
+        results: dict[int, SoundingProfile] = {}
+        for hour in self.STANDARD_HOURS:
+            profile = self.get_sounding(station, sounding_date, hour)
+            if profile is not None:
+                results[hour] = profile
+                logger.info(
+                    "Retrieved %s %s %02dZ (%d levels)",
+                    station.value, sounding_date, hour, len(profile.levels),
+                )
+        return results
 
     def get_sounding_range(
         self,

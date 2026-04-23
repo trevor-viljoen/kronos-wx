@@ -283,23 +283,50 @@ def enrich_all(start_year: int, end_year: int, force: bool):
     errors = []
     enriched = 0
 
+    # Maps the UTC hour → (case field name for indices, field name for kinematics)
+    _HOUR_FIELDS = {
+        0:  ("sounding_00Z", "kinematics_00Z"),
+        12: ("sounding_12Z", "kinematics_12Z"),
+        18: ("sounding_18Z", "kinematics_18Z"),
+    }
+
     with SoundingClient() as sc:
         for case in track(to_enrich, description="Enriching cases..."):
             try:
-                profile = sc.get_sounding_with_fallback(
-                    OklahomaSoundingStation.OUN, case.date, 12
+                # Fetch all available soundings for this date (all 8 standard hours)
+                all_profiles = sc.get_all_soundings_for_date(
+                    OklahomaSoundingStation.OUN, case.date
                 )
-                if profile is None:
-                    logger.debug("No sounding at any station for %s", case.case_id)
+
+                # For hours with no OUN data, try adjacent stations
+                for hour in SoundingClient.STANDARD_HOURS:
+                    if hour not in all_profiles:
+                        fallback = sc.get_sounding_with_fallback(
+                            OklahomaSoundingStation.OUN, case.date, hour
+                        )
+                        if fallback is not None:
+                            all_profiles[hour] = fallback
+
+                if not all_profiles:
+                    logger.debug("No sounding at any station or hour for %s", case.case_id)
                     continue
 
-                db.save_sounding(profile)
-                indices    = compute_thermodynamic_indices(profile)
-                kinematics = compute_kinematic_profile(profile, indices)
+                # Persist every profile to the sounding store
+                for profile in all_profiles.values():
+                    db.save_sounding(profile)
 
-                case.sounding_12Z          = indices
-                case.kinematics_12Z        = kinematics
-                case.sounding_data_available = True
+                # Compute indices for named hours and populate case fields
+                for hour, (idx_field, kin_field) in _HOUR_FIELDS.items():
+                    if hour in all_profiles:
+                        profile = all_profiles[hour]
+                        indices    = compute_thermodynamic_indices(profile)
+                        kinematics = compute_kinematic_profile(profile, indices)
+                        setattr(case, idx_field, indices)
+                        setattr(case, kin_field, kinematics)
+
+                if case.sounding_12Z is not None:
+                    case.sounding_data_available = True
+
                 case.recompute_completeness()
                 db.save_case(case)
                 enriched += 1
