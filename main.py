@@ -560,36 +560,137 @@ def analyze_cap_behavior(case_ref: str, forcing_window_hours: int):
 
     db.save_case(case)
 
+    # ── Color helpers ────────────────────────────────────────────────────────
+    def _cape_color(v: float) -> str:
+        if v >= 3000: return "bright_red"
+        if v >= 2000: return "red"
+        if v >= 1000: return "yellow"
+        if v >= 500:  return "green"
+        return "white"
+
+    def _cin_color(v: float) -> str:
+        """Higher CIN = more red (stronger cap)."""
+        if v >= 200:  return "bright_red"
+        if v >= 100:  return "red"
+        if v >= 50:   return "yellow"
+        if v >= 20:   return "bright_yellow"
+        return "green"
+
+    def _cap_strength_color(v: float) -> str:
+        if v >= 4.0:  return "bright_red"
+        if v >= 2.0:  return "red"
+        if v >= 1.0:  return "yellow"
+        return "green"
+
+    def _tc_gap_color(v: float) -> str:
+        """Positive Tc gap = surface below Tc (cap intact, red). Negative = broken."""
+        if v >= 20:   return "bright_red"
+        if v >= 10:   return "red"
+        if v >= 3:    return "yellow"
+        if v >= -3:   return "bright_yellow"
+        return "green"
+
+    def _bust_risk_color(v: float) -> str:
+        if v >= 0.7:  return "bright_red"
+        if v >= 0.5:  return "red"
+        if v >= 0.3:  return "yellow"
+        if v >= 0.15: return "bright_yellow"
+        return "green"
+
+    def _cap_behavior_color(cb) -> str:
+        mapping = {
+            "CLEAN_EROSION":   "bright_green",
+            "EARLY_EROSION":   "green",
+            "LATE_EROSION":    "yellow",
+            "NO_EROSION":      "red",
+            "BOUNDARY_FORCED": "cyan",
+            "RECONSTITUTED":   "magenta",
+        }
+        return mapping.get(cb.value if hasattr(cb, "value") else cb, "white")
+
+    def _event_class_color(ec) -> str:
+        mapping = {
+            "SIGNIFICANT_OUTBREAK": "bright_red",
+            "ISOLATED_SIGNIFICANT": "red",
+            "MARGINAL_EVENT":       "yellow",
+            "NULL_BUST":            "bright_blue",
+            "ACTIVE_NULL":          "blue",
+        }
+        return mapping.get(ec.value if hasattr(ec, "value") else ec, "white")
+
+    def _net_tendency_color(v: float) -> str:
+        if v <= -15:  return "bright_green"
+        if v <= -5:   return "green"
+        if v <= 0:    return "bright_yellow"
+        return "red"
+
+    def _cin_cell_color(v: float) -> str:
+        if v >= 150: return "bright_red"
+        if v >= 75:  return "red"
+        if v >= 30:  return "yellow"
+        if v >= 10:  return "bright_yellow"
+        return "green"
+
+    def _hrs_color(v) -> str:
+        if v is None:  return "red"
+        if v <= 2:     return "bright_green"
+        if v <= 6:     return "green"
+        if v <= 12:    return "yellow"
+        return "red"
+
     # ── Print summary report ─────────────────────────────────────────────────
     table = Table(title=f"Cap Erosion Report — {case_id}", show_lines=True)
     table.add_column("Metric", style="cyan")
-    table.add_column("Value", style="green")
+    table.add_column("Value")
 
-    table.add_row("Event Class", case.event_class.value)
-    table.add_row("Cap Behavior", cap_behavior.value)
+    ec_color = _event_class_color(case.event_class)
+    cb_color = _cap_behavior_color(cap_behavior)
+
+    table.add_row("Event Class",
+                  f"[{ec_color}]{case.event_class.value}[/{ec_color}]")
+    table.add_row("Cap Behavior",
+                  f"[{cb_color}]{cap_behavior.value}[/{cb_color}]")
     table.add_row("Primary Mechanism", trajectory.primary_mechanism.value)
-    table.add_row("Erosion Achieved", "YES" if trajectory.erosion_achieved else "NO")
+    table.add_row("Erosion Achieved",
+                  "[bright_green]YES[/bright_green]" if trajectory.erosion_achieved
+                  else "[red]NO[/red]")
     table.add_row(
         "Erosion Time",
-        trajectory.erosion_time.strftime("%H:%M UTC") if trajectory.erosion_time else "—"
+        trajectory.erosion_time.strftime("%H:%M UTC") if trajectory.erosion_time else "[dim]—[/dim]"
     )
-    table.add_row("Bust Risk Score", f"{trajectory.bust_risk_score:.2f}")
-    table.add_row("12Z MLCAPE", f"{case.sounding_12Z.MLCAPE:.0f} J/kg")
-    table.add_row("12Z MLCIN", f"{case.sounding_12Z.MLCIN:.0f} J/kg")
-    table.add_row("12Z Cap Strength", f"{case.sounding_12Z.cap_strength:.1f}°C")
+    br = trajectory.bust_risk_score
+    br_color = _bust_risk_color(br)
+    table.add_row("Bust Risk Score", f"[{br_color}]{br:.2f}[/{br_color}]")
+
+    cape = case.sounding_12Z.MLCAPE
+    cin  = case.sounding_12Z.MLCIN
+    cap  = case.sounding_12Z.cap_strength
+    table.add_row("12Z MLCAPE",
+                  f"[{_cape_color(cape)}]{cape:.0f} J/kg[/{_cape_color(cape)}]")
+    table.add_row("12Z MLCIN",
+                  f"[{_cin_color(cin)}]{cin:.0f} J/kg[/{_cin_color(cin)}]")
+    table.add_row("12Z Cap Strength",
+                  f"[{_cap_strength_color(cap)}]{cap:.1f}°C[/{_cap_strength_color(cap)}]")
     if case.convective_temp_gap_12Z is not None:
-        table.add_row("12Z Tc Gap", f"{case.convective_temp_gap_12Z:+.1f}°F")
+        g = case.convective_temp_gap_12Z
+        table.add_row("12Z Tc Gap",
+                      f"[{_tc_gap_color(g)}]{g:+.1f}°F[/{_tc_gap_color(g)}]")
     if case.convective_temp_gap_15Z is not None:
-        table.add_row("15Z Tc Gap", f"{case.convective_temp_gap_15Z:+.1f}°F")
+        g = case.convective_temp_gap_15Z
+        table.add_row("15Z Tc Gap",
+                      f"[{_tc_gap_color(g)}]{g:+.1f}°F[/{_tc_gap_color(g)}]")
     if case.convective_temp_gap_18Z is not None:
-        table.add_row("18Z Tc Gap", f"{case.convective_temp_gap_18Z:+.1f}°F")
-    table.add_row("Forcing Window Close", forcing_window_close.strftime("%H:%M UTC"))
+        g = case.convective_temp_gap_18Z
+        table.add_row("18Z Tc Gap",
+                      f"[{_tc_gap_color(g)}]{g:+.1f}°F[/{_tc_gap_color(g)}]")
+    table.add_row("Forcing Window Close",
+                  forcing_window_close.strftime("%H:%M UTC"))
 
     console.print(table)
 
     # Budget timeline
     budget_table = Table(title="Cap Erosion Budget Timeline", show_lines=True)
-    budget_table.add_column("Time")
+    budget_table.add_column("Time", style="cyan")
     budget_table.add_column("CIN (J/kg)", justify="right")
     budget_table.add_column("Heating", justify="right")
     budget_table.add_column("Dynamic", justify="right")
@@ -598,13 +699,24 @@ def analyze_cap_behavior(case_ref: str, forcing_window_hours: int):
 
     for b in trajectory.budget_history:
         hrs = b.hours_to_erosion
+        cin_c  = _cin_cell_color(b.current_CIN)
+        net_c  = _net_tendency_color(b.net_tendency)
+        hrs_c  = _hrs_color(hrs)
+        # Heating/dynamic: green when eroding (negative), dim when near zero
+        def _forcing_str(v: float) -> str:
+            if v <= -5:  return f"[green]{v:+.1f}[/green]"
+            if v < 0:    return f"[bright_yellow]{v:+.1f}[/bright_yellow]"
+            if v > 5:    return f"[red]{v:+.1f}[/red]"
+            return f"[dim]{v:+.1f}[/dim]"
+
         budget_table.add_row(
             b.valid_time.strftime("%H:%M Z"),
-            f"{b.current_CIN:.0f}",
-            f"{b.heating_forcing:+.1f}",
-            f"{b.dynamic_forcing:+.1f}",
-            f"[red]{b.net_tendency:+.1f}[/red]" if b.net_tendency < -10 else f"{b.net_tendency:+.1f}",
-            f"{hrs:.1f}" if hrs is not None else "∞",
+            f"[{cin_c}]{b.current_CIN:.0f}[/{cin_c}]",
+            _forcing_str(b.heating_forcing),
+            _forcing_str(b.dynamic_forcing),
+            f"[{net_c}]{b.net_tendency:+.1f}[/{net_c}]",
+            f"[{hrs_c}]{hrs:.1f}[/{hrs_c}]" if hrs is not None
+            else f"[{hrs_c}]∞[/{hrs_c}]",
         )
 
     console.print(budget_table)
