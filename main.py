@@ -1163,8 +1163,6 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
                 compute_dryline_surge_rate(prev_dryline, current_dryline)
                 if prev_dryline is not None else None
             )
-            mean_lon = sum(current_dryline.position_lon) / len(current_dryline.position_lon)
-
             dl_tbl = Table(
                 title=f"Dryline — detected {current_snap.strftime('%H:%MZ')}",
                 show_lines=True,
@@ -1172,7 +1170,14 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
             dl_tbl.add_column("Parameter", style="cyan")
             dl_tbl.add_column("Value")
 
-            dl_tbl.add_row("Position (mean lon)", f"{mean_lon:.1f}°W")
+            # Polyline: one row per point, labelled S→N
+            pts = list(zip(current_dryline.position_lat, current_dryline.position_lon))
+            labels = ["S endpoint", "central", "N endpoint"]
+            if len(pts) == 2:
+                labels = ["S endpoint", "N endpoint"]
+            for i, (lat, lon) in enumerate(pts):
+                label = labels[i] if i < len(labels) else f"pt {i+1}"
+                dl_tbl.add_row(f"Polyline ({label})", f"{lat:.1f}°N, {lon:.1f}°W")
             dl_tbl.add_row(
                 "Confidence",
                 f"[{'green' if current_dryline.confidence >= 0.6 else 'yellow' if current_dryline.confidence >= 0.35 else 'red'}]"
