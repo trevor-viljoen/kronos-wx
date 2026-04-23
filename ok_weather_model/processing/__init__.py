@@ -16,6 +16,11 @@ from .era5_diagnostics import (
     compute_synoptic_cap_forcing,
     extract_virtual_sounding,
 )
+from .dryline_detector import (
+    detect_dryline,
+    compute_dryline_surge_rate,
+    analyze_dryline_from_mesonet,
+)
 
 __all__ = [
     "compute_thermodynamic_indices",
@@ -30,4 +35,7 @@ __all__ = [
     "compute_thermal_advection",
     "compute_synoptic_cap_forcing",
     "extract_virtual_sounding",
+    "detect_dryline",
+    "compute_dryline_surge_rate",
+    "analyze_dryline_from_mesonet",
 ]

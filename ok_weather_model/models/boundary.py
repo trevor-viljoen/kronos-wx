@@ -70,7 +70,7 @@ class BoundaryObservation(BaseModel):
     @field_validator("detected_by")
     @classmethod
     def valid_detector(cls, v: str) -> str:
-        allowed = {"mesonet_windshift", "radar", "satellite", "manual"}
+        allowed = {"mesonet_windshift", "mesonet_td_gradient", "radar", "satellite", "manual"}
         if v not in allowed:
             raise ValueError(f"detected_by must be one of {allowed}, got '{v}'")
         return v

@@ -227,6 +227,36 @@ def enrich_case(case_ref: str, force: bool):
                     except Exception as exc:
                         logger.warning("Could not compute %s Tc-gap: %s", label, exc)
 
+            # ── Dryline detection ──────────────────────────────────────────────
+            with console.status("Detecting dryline..."):
+                try:
+                    from ok_weather_model.processing import analyze_dryline_from_mesonet
+                    dryline_result = analyze_dryline_from_mesonet(station_data, case_date)
+                    case.boundaries = [
+                        *case.boundaries,
+                        *dryline_result["boundaries"],
+                    ]
+                    if dryline_result["dryline_lon_18Z"] is not None:
+                        case.dryline_longitude_18Z = dryline_result["dryline_lon_18Z"]
+                    if dryline_result["surge_rate_mph"] is not None:
+                        case.dryline_surge_rate_mph = dryline_result["surge_rate_mph"]
+
+                    n = len(dryline_result["boundaries"])
+                    if n:
+                        lon = dryline_result["dryline_lon_18Z"]
+                        surge = dryline_result["surge_rate_mph"]
+                        lon_str = f"{lon:.1f}°W" if lon is not None else "—"
+                        surge_str = f"{surge:+.1f} mph" if surge is not None else "—"
+                        console.print(
+                            f"[green]Dryline: {n} snapshot(s) detected  "
+                            f"18Z lon={lon_str}  surge={surge_str}[/green]"
+                        )
+                    else:
+                        console.print("[dim]Dryline: not detected[/dim]")
+                except Exception as exc:
+                    console.print(f"[yellow]Dryline detection failed: {exc}[/yellow]")
+                    logger.warning("Dryline detection failed for %s: %s", case_id, exc)
+
         except Exception as exc:
             console.print(f"[red]Mesonet pull failed: {exc}[/red]")
             logger.exception("Mesonet pull failed for %s", case_id)
