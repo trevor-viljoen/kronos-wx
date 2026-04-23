@@ -1092,31 +1092,110 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
 
     console.print(snd_tbl)
 
-    # ── CES projection ────────────────────────────────────────────────────────
-    # Get current surface temperature from Mesonet for CES (or use sounding surface level)
+    # ── Mesonet: surface temp + dryline detection ────────────────────────────────
+    # Fetch the current snapshot plus snapshots 1 hr and 2 hrs ago so that the
+    # dryline detector has enough temporal spread to compute a surge rate.
+    # Each fetch retries up to 3 earlier 5-min boundaries to handle archive lag.
+    from ok_weather_model.models import OklahomaCounty
+    from ok_weather_model.models.mesonet import MesonetTimeSeries as _MTS
+    from ok_weather_model.processing import detect_dryline, compute_dryline_surge_rate
+    from datetime import timedelta as _td
+
     surface_temp_c = profile.levels[0].temperature if profile.levels else None
     ces: dict | None = None
 
-    # Try to grab live Mesonet surface temp for a more accurate CES.
-    # The MDF archive can lag by ~10 minutes, so retry up to 3 earlier 5-min snapshots.
-    from ok_weather_model.models import OklahomaCounty
-    from datetime import timedelta as _td
-    with MesonetClient() as mc:
-        for _lookback in range(4):
-            _snap_time = now_utc - _td(minutes=5 * _lookback)
-            try:
-                snap_obs = mc.get_snapshot_observations(_snap_time)
-                norm_obs = [o for o in snap_obs if o.county == OklahomaCounty.CLEVELAND]
-                if norm_obs:
-                    surface_temp_c = (norm_obs[0].temperature - 32) * 5 / 9
-                    console.print(
-                        f"[dim]Surface temp from Mesonet (NRMN, "
-                        f"{_snap_time.strftime('%H:%MZ')}): "
-                        f"{norm_obs[0].temperature:.1f}°F ({surface_temp_c:.1f}°C)[/dim]"
+    station_series: dict[str, _MTS] = {}
+    snap_times_fetched: list[datetime] = []
+
+    with console.status("Fetching Mesonet observations..."), MesonetClient() as mc:
+        for hrs_back in (0, 1, 2):
+            target = now_utc - _td(hours=hrs_back)
+            for lb in range(4):
+                snap_time = target - _td(minutes=5 * lb)
+                try:
+                    snap_obs = mc.get_snapshot_observations(snap_time)
+                except Exception:
+                    continue
+                for o in snap_obs:
+                    stid = o.station_id
+                    if stid not in station_series:
+                        station_series[stid] = _MTS(
+                            station_id=stid,
+                            county=o.county,
+                            start_time=snap_time,
+                            end_time=snap_time,
+                            observations=[],
+                        )
+                    station_series[stid].observations.append(o)
+                    station_series[stid].end_time = max(
+                        station_series[stid].end_time, snap_time
                     )
-                    break
-            except Exception:
-                continue  # try an earlier snapshot
+                snap_times_fetched.append(snap_time)
+                break  # got this hour's snapshot; move to the next hrs_back
+
+    # Surface temp for CES: nearest Cleveland county observation to now
+    if snap_times_fetched:
+        current_snap = snap_times_fetched[0]
+        for ts in station_series.values():
+            if ts.county == OklahomaCounty.CLEVELAND:
+                for o in ts.observations:
+                    if abs((o.valid_time - current_snap).total_seconds()) <= 7 * 60:
+                        surface_temp_c = (o.temperature - 32) * 5 / 9
+                        console.print(
+                            f"[dim]Surface temp from Mesonet (NRMN, "
+                            f"{current_snap.strftime('%H:%MZ')}): "
+                            f"{o.temperature:.1f}°F ({surface_temp_c:.1f}°C)[/dim]"
+                        )
+                        break
+                break
+
+    # ── Dryline detection ─────────────────────────────────────────────────────
+    if snap_times_fetched:
+        current_snap = snap_times_fetched[0]
+        current_dryline = detect_dryline(station_series, current_snap)
+
+        prev_dryline = None
+        if len(snap_times_fetched) >= 2:
+            prev_dryline = detect_dryline(station_series, snap_times_fetched[-1])
+
+        if current_dryline is not None:
+            surge = (
+                compute_dryline_surge_rate(prev_dryline, current_dryline)
+                if prev_dryline is not None else None
+            )
+            mean_lon = sum(current_dryline.position_lon) / len(current_dryline.position_lon)
+
+            dl_tbl = Table(
+                title=f"Dryline — detected {current_snap.strftime('%H:%MZ')}",
+                show_lines=True,
+            )
+            dl_tbl.add_column("Parameter", style="cyan")
+            dl_tbl.add_column("Value")
+
+            dl_tbl.add_row("Position (mean lon)", f"{mean_lon:.1f}°W")
+            dl_tbl.add_row(
+                "Confidence",
+                f"[{'green' if current_dryline.confidence >= 0.6 else 'yellow' if current_dryline.confidence >= 0.35 else 'red'}]"
+                f"{current_dryline.confidence:.2f}[/]",
+            )
+            if surge is not None:
+                surge_dir = "eastward" if surge > 0 else "retrograding"
+                surge_color = "red" if surge > 15 else "yellow" if surge > 5 else "green"
+                dl_tbl.add_row(
+                    "Surge rate",
+                    f"[{surge_color}]{surge:+.1f} mph ({surge_dir})[/{surge_color}]",
+                )
+            if current_dryline.counties_intersected:
+                county_names = ", ".join(
+                    c.name for c in current_dryline.counties_intersected[:6]
+                )
+                if len(current_dryline.counties_intersected) > 6:
+                    county_names += f" +{len(current_dryline.counties_intersected) - 6} more"
+                dl_tbl.add_row("Counties intersected", county_names)
+
+            console.print(dl_tbl)
+        else:
+            console.print("[dim]Dryline: not detected in current Mesonet network.[/dim]")
 
     if fetched_hour == 12 and surface_temp_c is not None:
         ces = compute_ces_from_sounding(indices, surface_temp_c, today)
