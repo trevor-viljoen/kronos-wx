@@ -221,11 +221,19 @@ def estimate_erosion_trajectory(
             break
 
     if not erosion_achieved:
-        # Use the earliest projected erosion time from any budget snapshot
+        # Use the earliest projected erosion time from any budget snapshot,
+        # but only projections that fall within the convective window:
+        # same calendar day through 03Z of the following day.
+        case_date = budgets[0].valid_time.date()
+        window_end = datetime(
+            case_date.year, case_date.month, case_date.day, 3, 0,
+            tzinfo=budgets[0].valid_time.tzinfo
+        ) + timedelta(days=1)   # 03Z next day
         projected_times: list[datetime] = [
             b.projected_erosion_time
             for b in budgets
             if b.projected_erosion_time is not None
+            and b.projected_erosion_time <= window_end
         ]
         if projected_times:
             erosion_achieved = True

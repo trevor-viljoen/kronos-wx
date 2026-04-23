@@ -864,21 +864,29 @@ def _classify_cap_behavior(
     if not trajectory.erosion_achieved:
         return CapBehavior.NO_EROSION
 
-    erosion_hour = trajectory.erosion_time.hour if trajectory.erosion_time else 23
+    if trajectory.erosion_time is None:
+        return CapBehavior.NO_EROSION
 
     # Check if boundary forcing drove erosion
     if trajectory.primary_mechanism.value == "BOUNDARY":
         return CapBehavior.BOUNDARY_FORCED
 
+    # Convert erosion datetime to hours-since-midnight UTC for the case date
+    # so that next-day projections (e.g. 10Z+1) don't misclassify as EARLY.
+    case_midnight = datetime(
+        case_date.year, case_date.month, case_date.day, 0, 0, tzinfo=timezone.utc
+    )
+    erosion_hours = (trajectory.erosion_time - case_midnight).total_seconds() / 3600.0
+
     # Timing-based classification (Oklahoma climatology reference times)
-    if erosion_hour <= 18:  # before 18Z (1pm CDT)
+    if erosion_hours <= 18:  # before 18Z (1pm CDT)
         return CapBehavior.EARLY_EROSION
-    elif erosion_hour <= 21:  # 18Z–21Z (1–4pm CDT)
+    elif erosion_hours <= 21:  # 18Z–21Z (1–4pm CDT)
         return CapBehavior.CLEAN_EROSION
-    elif erosion_hour <= 23:  # 21Z–23Z (4–6pm CDT)
+    elif erosion_hours <= 26:  # 21Z–02Z (4pm–9pm CDT) — late or nocturnal
         return CapBehavior.LATE_EROSION
     else:
-        return CapBehavior.LATE_EROSION
+        return CapBehavior.NO_EROSION
 
 
 if __name__ == "__main__":

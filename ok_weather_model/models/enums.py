@@ -195,10 +195,14 @@ class OklahomaCounty(Enum):
 
     @classmethod
     def from_mesonet_station(cls, station_id: str) -> "OklahomaCounty":
-        """Look up county by Mesonet station ID."""
+        """Look up county by Mesonet station ID, including historical aliases."""
         for member in cls:
             if member.mesonet_station_id == station_id:
                 return member
+        # Fall back to alias table for stations renamed over Mesonet history
+        alias_name = _OK_STATION_ALIASES.get(station_id)
+        if alias_name:
+            return cls[alias_name]
         raise ValueError(f"No county found for Mesonet station: {station_id}")
 
     @classmethod
@@ -246,3 +250,16 @@ class OklahomaCounty(Enum):
                 info_arg=False,
             ),
         )
+
+
+# ── Mesonet station alias table ────────────────────────────────────────────────
+# Stations that were renamed or relocated over the Mesonet's operational history.
+# Maps alternate/current station IDs → OklahomaCounty enum name.
+# This lives outside the Enum class to avoid being interpreted as a member.
+#
+# To add an alias: confirm the county by cross-referencing the station
+# coordinates against the county centroid in the OklahomaCounty enum.
+_OK_STATION_ALIASES: dict[str, str] = {
+    "NRMN": "CLEVELAND",    # Norman — NORM renamed to NRMN ~2002
+    # Add confirmed renames here. Do not add guesses based on station name.
+}
