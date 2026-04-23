@@ -458,6 +458,12 @@ def analyze_cap_behavior(case_ref: str, forcing_window_hours: int):
             console.print(f"[yellow]Live Mesonet fetch failed: {exc}[/yellow]")
             logger.warning("Live Mesonet fetch failed for %s: %s", case_id, exc)
 
+    # Load the full convective day (12Z–22Z) for the county so tendency
+    # computation can compare across snapshots (e.g. 12Z→18Z heating rate).
+    day_start = datetime(case_date.year, case_date.month, case_date.day, 11, 45, tzinfo=timezone.utc)
+    day_end = datetime(case_date.year, case_date.month, case_date.day, 22, 15, tzinfo=timezone.utc)
+    county_ts_day = db.load_mesonet_timeseries(county, day_start, day_end)
+
     with MesonetClient() as mc:
         for label, hour in [("12Z", 12), ("15Z", 15), ("18Z", 18), ("21Z", 21)]:
             valid_time = datetime(
@@ -465,18 +471,13 @@ def analyze_cap_behavior(case_ref: str, forcing_window_hours: int):
                 tzinfo=timezone.utc
             )
 
-            # Prefer DB; fall back to the live data we just fetched
-            mesonet_ts = db.load_mesonet_timeseries(
-                county,
-                valid_time - timedelta(minutes=15),
-                valid_time + timedelta(minutes=15),
-            )
-
-            if (mesonet_ts is None or not mesonet_ts.observations) and live_station_data:
+            # Prefer full-day DB load (provides prior snapshots for tendency);
+            # fall back to the in-memory live data if DB had nothing.
+            if county_ts_day is not None and county_ts_day.observations:
+                surface_state = mc.compute_county_surface_state(county, valid_time, [county_ts_day])
+            elif live_station_data:
                 county_series = [ts for ts in live_station_data.values() if ts.county == county]
                 surface_state = mc.compute_county_surface_state(county, valid_time, county_series)
-            elif mesonet_ts is not None and mesonet_ts.observations:
-                surface_state = mc.compute_county_surface_state(county, valid_time, [mesonet_ts])
             else:
                 surface_state = None
 

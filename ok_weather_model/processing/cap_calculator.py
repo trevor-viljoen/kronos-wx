@@ -208,6 +208,9 @@ def estimate_erosion_trajectory(
     analysis_time = budgets[0].valid_time
 
     # ── Check for erosion achievement ─────────────────────────────────────────
+    # Primary: CIN has dropped to/below MARGINAL_CAP in an observed sounding.
+    # Secondary: a budget snapshot projects erosion within the analysis window
+    # (current_CIN / |net_tendency| < remaining hours in forcing window).
     erosion_achieved = False
     erosion_time: Optional[datetime] = None
 
@@ -216,6 +219,17 @@ def estimate_erosion_trajectory(
             erosion_achieved = True
             erosion_time = budget.valid_time
             break
+
+    if not erosion_achieved:
+        # Use the earliest projected erosion time from any budget snapshot
+        projected_times: list[datetime] = [
+            b.projected_erosion_time
+            for b in budgets
+            if b.projected_erosion_time is not None
+        ]
+        if projected_times:
+            erosion_achieved = True
+            erosion_time = min(projected_times)
 
     # Update forcing_window_close flags in budgets
     for budget in budgets:

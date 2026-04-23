@@ -271,7 +271,7 @@ class MesonetClient:
     ) -> Optional[CountySurfaceState]:
         """
         Average all county station observations nearest to valid_time to produce
-        a CountySurfaceState.  Returns None if no observations are available.
+        a CountySurfaceState with heating tendency.  Returns None if no data.
         """
         window = timedelta(minutes=7)
         obs_at_time: list[MesonetObservation] = []
@@ -300,6 +300,25 @@ class MesonetClient:
         # DQS: 1 station is adequate for a county; cap at 1.0
         dqs = min(float(n), 1.0)
 
+        # Heating rate: compare against most recent prior snapshot (within 4 hrs)
+        heating_rate_1hr: Optional[float] = None
+        dewpoint_tendency_1hr: Optional[float] = None
+        for lookback_hrs in (1, 2, 3, 4, 5, 6, 7):
+            prev_time = valid_time - timedelta(hours=lookback_hrs)
+            prev_obs: list[MesonetObservation] = []
+            for ts in station_series:
+                if ts.county != county:
+                    continue
+                for ob in ts.observations:
+                    if abs((ob.valid_time - prev_time).total_seconds()) <= window.total_seconds():
+                        prev_obs.append(ob)
+            if prev_obs:
+                prev_temp = sum(o.temperature for o in prev_obs) / len(prev_obs)
+                prev_dew = sum(o.dewpoint for o in prev_obs) / len(prev_obs)
+                heating_rate_1hr = (mean_temp - prev_temp) / lookback_hrs
+                dewpoint_tendency_1hr = (mean_dew - prev_dew) / lookback_hrs
+                break
+
         return CountySurfaceState(
             county=county,
             valid_time=valid_time,
@@ -309,6 +328,8 @@ class MesonetClient:
             dominant_wind_direction=dom_dir,
             mean_wind_speed=mean_wspd,
             data_quality_score=dqs,
+            heating_rate_1hr=heating_rate_1hr,
+            dewpoint_tendency_1hr=dewpoint_tendency_1hr,
         )
 
     def get_station_metadata(self) -> list[MesonetStation]:
