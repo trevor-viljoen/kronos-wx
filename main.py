@@ -722,6 +722,440 @@ def analyze_cap_behavior(case_ref: str, forcing_window_hours: int):
     console.print(budget_table)
 
 
+# ── Shared analogue helpers ────────────────────────────────────────────────────
+
+def _feature_vector(
+    indices,
+    kinematics,
+    tc_gap_12z: float | None,
+    mode: str,
+) -> list[float] | None:
+    """
+    Build a normalized, weighted feature vector for analogue distance scoring.
+
+    Returns None if required fields are missing.
+    All components are already multiplied by their weight so that
+    Euclidean distance reflects relative importance directly.
+    """
+    if indices is None:
+        return None
+
+    # Normalize to [0, 1] using domain-typical Oklahoma ranges
+    def _norm(v, lo, hi):
+        return max(0.0, min(1.0, (v - lo) / (hi - lo)))
+
+    mlcin    = _norm(indices.MLCIN,            0,   350)   # J/kg
+    cap      = _norm(indices.cap_strength,     0,   7.0)   # °C
+    cape     = _norm(indices.MLCAPE,           0,  5000)   # J/kg
+    lapse    = _norm(indices.lapse_rate_700_500, 5.0, 10.0)# °C/km
+    tc_gap   = _norm(tc_gap_12z if tc_gap_12z is not None else 20, -15, 70)
+
+    if mode == "cap":
+        weights = [0.30, 0.28, 0.20, 0.12, 0.10]
+        raw     = [mlcin, cap, tc_gap, cape, lapse]
+    else:  # full — add kinematics
+        srh    = _norm(kinematics.SRH_0_3km if kinematics else 0,    0, 600)
+        shear  = _norm(kinematics.BWD_0_6km if kinematics else 0,    0,  80)
+        stp    = _norm((kinematics.STP or 0) if kinematics else 0,   0,   8)
+        weights = [0.22, 0.20, 0.14, 0.12, 0.08, 0.12, 0.08, 0.04]
+        raw     = [mlcin, cap, tc_gap, cape, lapse, srh, shear, stp]
+
+    return [w * v for w, v in zip(weights, raw)]
+
+
+def _analogue_distance(a: list[float], b: list[float]) -> float:
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def _print_analogues(
+    console,
+    target_id: str,
+    analogues: list[tuple[float, object]],  # (dist, HistoricalCase)
+) -> None:
+    from ok_weather_model.models import CapBehavior
+
+    def _cb_color(cb):
+        return {
+            "CLEAN_EROSION":   "bright_green",
+            "EARLY_EROSION":   "green",
+            "LATE_EROSION":    "yellow",
+            "NO_EROSION":      "red",
+            "BOUNDARY_FORCED": "cyan",
+        }.get(cb.value if cb else "", "white")
+
+    def _ec_color(ec):
+        return {
+            "SIGNIFICANT_OUTBREAK": "bright_red",
+            "ISOLATED_SIGNIFICANT": "red",
+            "MARGINAL_EVENT":       "yellow",
+            "NULL_BUST":            "bright_blue",
+            "ACTIVE_NULL":          "blue",
+        }.get(ec.value if ec else "", "white")
+
+    tbl = Table(
+        title=f"Historical Analogues — {target_id}",
+        show_lines=True,
+    )
+    tbl.add_column("Case",         style="cyan",  min_width=12)
+    tbl.add_column("Dist",         justify="right")
+    tbl.add_column("MLCAPE",       justify="right")
+    tbl.add_column("MLCIN",        justify="right")
+    tbl.add_column("Cap °C",       justify="right")
+    tbl.add_column("12Z Tc Gap",   justify="right")
+    tbl.add_column("Cap Behavior")
+    tbl.add_column("Event Class")
+    tbl.add_column("Tornadoes",    justify="right")
+
+    for dist, c in analogues:
+        idx   = c.sounding_12Z
+        cb    = c.cap_behavior
+        ec    = c.event_class
+        cb_c  = _cb_color(cb)
+        ec_c  = _ec_color(ec)
+        cape  = f"{idx.MLCAPE:.0f}" if idx else "—"
+        cin   = f"{idx.MLCIN:.0f}"  if idx else "—"
+        cap   = f"{idx.cap_strength:.1f}" if idx else "—"
+        gap   = f"{c.convective_temp_gap_12Z:+.1f}°F" if c.convective_temp_gap_12Z is not None else "—"
+
+        tbl.add_row(
+            c.case_id,
+            f"{dist:.3f}",
+            cape,
+            cin,
+            cap,
+            gap,
+            f"[{cb_c}]{cb.value if cb else '—'}[/{cb_c}]",
+            f"[{ec_c}]{ec.value if ec else '—'}[/{ec_c}]",
+            str(c.tornado_count),
+        )
+
+    console.print(tbl)
+
+    # Outcome distribution summary
+    outcomes: dict[str, int] = {}
+    for _, c in analogues:
+        key = c.cap_behavior.value if c.cap_behavior else "UNKNOWN"
+        outcomes[key] = outcomes.get(key, 0) + 1
+
+    console.print("\n[bold]Outcome distribution:[/bold]")
+    total = len(analogues)
+    for k, n in sorted(outcomes.items(), key=lambda x: -x[1]):
+        bar = "█" * n + "░" * (total - n)
+        pct = 100 * n / total
+        color = {
+            "CLEAN_EROSION": "bright_green", "EARLY_EROSION": "green",
+            "LATE_EROSION": "yellow", "NO_EROSION": "red",
+            "BOUNDARY_FORCED": "cyan",
+        }.get(k, "white")
+        console.print(f"  [{color}]{k:<20}[/{color}]  {bar}  {n}/{total} ({pct:.0f}%)")
+
+
+# ── find-analogues ────────────────────────────────────────────────────────────
+
+@cli.command("find-analogues")
+@click.argument("case_ref")
+@click.option("--top", default=10, show_default=True,
+              help="Number of closest analogues to return")
+@click.option("--mode", type=click.Choice(["cap", "full"]), default="cap",
+              show_default=True,
+              help="cap = cap diagnostics only; full = cap + kinematics")
+@click.option("--min-year", default=None, type=int,
+              help="Restrict analogues to cases from this year onward")
+def find_analogues(case_ref: str, top: int, mode: str, min_year: int | None):
+    """
+    Find historical cases with the most similar 12Z sounding signature.
+
+    CASE_REF: case_id (e.g. 19990503_OK) or date (e.g. 1999-05-03)
+
+    In 'cap' mode the distance metric weights MLCIN, cap strength, and
+    convective temperature gap most heavily — best for finding cases with
+    a similar erosion challenge.
+
+    In 'full' mode kinematic parameters (SRH, bulk shear, STP) are also
+    included — best for finding end-to-end analogues for a storm event.
+    """
+    from ok_weather_model.storage import Database
+
+    db = Database()
+    case_id, case_date = _resolve_case_ref(case_ref)
+    target = db.load_case(case_id)
+
+    if target is None:
+        console.print(f"[red]Case {case_id} not found.[/red]")
+        return
+    if target.sounding_12Z is None:
+        console.print(f"[red]{case_id} has no 12Z sounding data.[/red]")
+        return
+
+    target_vec = _feature_vector(
+        target.sounding_12Z,
+        target.kinematics_12Z,
+        target.convective_temp_gap_12Z,
+        mode,
+    )
+    if target_vec is None:
+        console.print("[red]Cannot build feature vector for target case.[/red]")
+        return
+
+    console.rule(f"[bold]Analogues for {case_id} — mode={mode}[/bold]")
+
+    all_cases = db.query_parameter_space({
+        "start_date": str(date(min_year or CASE_LIBRARY_START_YEAR, 1, 1)),
+        "end_date":   str(date(CASE_LIBRARY_END_YEAR, 12, 31)),
+    })
+
+    scored: list[tuple[float, object]] = []
+    for c in all_cases:
+        if c.case_id == case_id:
+            continue
+        if c.sounding_12Z is None:
+            continue
+        vec = _feature_vector(
+            c.sounding_12Z,
+            c.kinematics_12Z,
+            c.convective_temp_gap_12Z,
+            mode,
+        )
+        if vec is None:
+            continue
+        scored.append((_analogue_distance(target_vec, vec), c))
+
+    scored.sort(key=lambda x: x[0])
+    top_analogues = scored[:top]
+
+    if not top_analogues:
+        console.print("[yellow]No analogues found — run enrich-all first.[/yellow]")
+        return
+
+    _print_analogues(console, case_id, top_analogues)
+
+
+# ── analyze-now ───────────────────────────────────────────────────────────────
+
+@cli.command("analyze-now")
+@click.option("--station", default="OUN", show_default=True,
+              help="Sounding station (OUN, LMN, AMA, DDC)")
+@click.option("--hour", default=None, type=int,
+              help="Specific UTC hour to fetch (auto-detects latest if omitted)")
+@click.option("--analogues", "n_analogues", default=8, show_default=True,
+              help="Number of historical analogues to display")
+@click.option("--mode", type=click.Choice(["cap", "full"]), default="cap",
+              show_default=True)
+def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
+    """
+    Fetch the latest available sounding and analyze current cap conditions.
+
+    Computes thermodynamic indices, runs the CES heating model, and finds
+    the closest historical analogues from the case library.
+
+    Useful for real-time situational awareness on active convective days.
+    """
+    from ok_weather_model.storage import Database
+    from ok_weather_model.ingestion import SoundingClient, MesonetClient
+    from ok_weather_model.processing import (
+        compute_thermodynamic_indices,
+        compute_kinematic_profile,
+    )
+    from ok_weather_model.processing.cap_calculator import compute_ces_from_sounding
+    from ok_weather_model.models import OklahomaSoundingStation
+
+    now_utc = datetime.now(tz=timezone.utc)
+    today   = now_utc.date()
+
+    # Resolve station enum
+    try:
+        stn = OklahomaSoundingStation[station.upper()]
+    except KeyError:
+        console.print(f"[red]Unknown station '{station}'. Use OUN, LMN, AMA, or DDC.[/red]")
+        return
+
+    # Auto-detect the latest available sounding hour
+    standard_hours = (21, 18, 15, 12, 9, 6, 3, 0)
+    if hour is not None:
+        hours_to_try = [hour]
+    else:
+        current_utc_hour = now_utc.hour
+        hours_to_try = [h for h in standard_hours if h <= current_utc_hour]
+        if not hours_to_try:
+            hours_to_try = [0]
+
+    console.rule(f"[bold]Real-Time Cap Analysis — {stn.value} / {today.isoformat()}[/bold]")
+
+    profile = None
+    fetched_hour = None
+    with console.status("Fetching latest sounding..."):
+        with SoundingClient() as sc:
+            for h in hours_to_try:
+                profile = sc.get_sounding(stn, today, h)
+                if profile is not None:
+                    fetched_hour = h
+                    break
+
+    if profile is None:
+        console.print(f"[red]No sounding found for {stn.value} on {today}. "
+                      f"Tried hours: {hours_to_try}[/red]")
+        return
+
+    console.print(
+        f"[green]Sounding: {stn.value} {today} {fetched_hour:02d}Z "
+        f"({len(profile.levels)} levels)[/green]"
+    )
+
+    with console.status("Computing thermodynamic indices..."):
+        try:
+            indices   = compute_thermodynamic_indices(profile)
+            kinematics = compute_kinematic_profile(profile, indices)
+        except Exception as exc:
+            console.print(f"[red]MetPy computation failed: {exc}[/red]")
+            return
+
+    # ── Sounding summary table ────────────────────────────────────────────────
+    def _cape_c(v):
+        if v >= 3000: return "bright_red"
+        if v >= 2000: return "red"
+        if v >= 1000: return "yellow"
+        if v >= 500:  return "green"
+        return "white"
+
+    def _cin_c(v):
+        if v >= 200:  return "bright_red"
+        if v >= 100:  return "red"
+        if v >= 50:   return "yellow"
+        if v >= 20:   return "bright_yellow"
+        return "green"
+
+    def _cap_c(v):
+        if v >= 4.0:  return "bright_red"
+        if v >= 2.0:  return "red"
+        if v >= 1.0:  return "yellow"
+        return "green"
+
+    snd_tbl = Table(
+        title=f"Sounding — {stn.value}  {fetched_hour:02d}Z  {today}",
+        show_lines=True,
+    )
+    snd_tbl.add_column("Parameter", style="cyan")
+    snd_tbl.add_column("Value")
+
+    cape = indices.MLCAPE
+    cin  = indices.MLCIN
+    cap  = indices.cap_strength
+
+    snd_tbl.add_row("MLCAPE",       f"[{_cape_c(cape)}]{cape:.0f} J/kg[/{_cape_c(cape)}]")
+    snd_tbl.add_row("MLCIN",        f"[{_cin_c(cin)}]{cin:.0f} J/kg[/{_cin_c(cin)}]")
+    snd_tbl.add_row("Cap Strength", f"[{_cap_c(cap)}]{cap:.1f}°C[/{_cap_c(cap)}]")
+    snd_tbl.add_row("SBCAPE",       f"{indices.SBCAPE:.0f} J/kg")
+    snd_tbl.add_row("LCL Height",   f"{indices.LCL_height:.0f} m AGL")
+    if indices.LFC_height is not None:
+        snd_tbl.add_row("LFC Height", f"{indices.LFC_height:.0f} m AGL")
+    if indices.EL_height is not None:
+        snd_tbl.add_row("EL Height",  f"{indices.EL_height:.0f} m AGL")
+    snd_tbl.add_row("Lapse 700–500", f"{indices.lapse_rate_700_500:.1f} °C/km")
+    snd_tbl.add_row("Conv. Temp (Tc)", f"{indices.convective_temperature:.1f}°F")
+    if kinematics:
+        snd_tbl.add_row("SRH 0–3 km",  f"{kinematics.SRH_0_3km:.0f} m²/s²")
+        snd_tbl.add_row("Shear 0–6 km", f"{kinematics.BWD_0_6km:.0f} kt")
+        if kinematics.STP is not None:
+            snd_tbl.add_row("STP",   f"{kinematics.STP:.2f}")
+        if kinematics.SCP is not None:
+            snd_tbl.add_row("SCP",   f"{kinematics.SCP:.2f}")
+
+    console.print(snd_tbl)
+
+    # ── CES projection ────────────────────────────────────────────────────────
+    # Get current surface temperature from Mesonet for CES (or use sounding surface level)
+    surface_temp_c = profile.levels[0].temperature if profile.levels else None
+    ces: dict | None = None
+
+    # Try to grab live Mesonet surface temp for a more accurate CES.
+    # The MDF archive can lag by ~10 minutes, so retry up to 3 earlier 5-min snapshots.
+    from ok_weather_model.models import OklahomaCounty
+    from datetime import timedelta as _td
+    with MesonetClient() as mc:
+        for _lookback in range(4):
+            _snap_time = now_utc - _td(minutes=5 * _lookback)
+            try:
+                snap_obs = mc.get_snapshot_observations(_snap_time)
+                norm_obs = [o for o in snap_obs if o.county == OklahomaCounty.CLEVELAND]
+                if norm_obs:
+                    surface_temp_c = (norm_obs[0].temperature - 32) * 5 / 9
+                    console.print(
+                        f"[dim]Surface temp from Mesonet (NRMN, "
+                        f"{_snap_time.strftime('%H:%MZ')}): "
+                        f"{norm_obs[0].temperature:.1f}°F ({surface_temp_c:.1f}°C)[/dim]"
+                    )
+                    break
+            except Exception:
+                continue  # try an earlier snapshot
+
+    if fetched_hour == 12 and surface_temp_c is not None:
+        ces = compute_ces_from_sounding(indices, surface_temp_c, today)
+        cb  = ces["cap_behavior"]
+
+        def _cb_c(v):
+            return {"CLEAN_EROSION": "bright_green", "EARLY_EROSION": "green",
+                    "LATE_EROSION": "yellow", "NO_EROSION": "red",
+                    "BOUNDARY_FORCED": "cyan"}.get(v.value if v else "", "white")
+
+        ces_tbl = Table(title="CES Projection (12Z Heating Model)", show_lines=True)
+        ces_tbl.add_column("Parameter", style="cyan")
+        ces_tbl.add_column("Value")
+
+        cb_color = _cb_c(cb)
+        ces_tbl.add_row("Projected Cap Behavior",
+                        f"[{cb_color}]{cb.value if cb else '—'}[/{cb_color}]")
+        ces_tbl.add_row("Projected Erosion",
+                        ces["cap_erosion_time"].strftime("%H:%M UTC")
+                        if ces["cap_erosion_time"] else "[red]No erosion projected[/red]")
+        if ces["convective_temp_gap_12Z"] is not None:
+            g = ces["convective_temp_gap_12Z"]
+            gc = "green" if g < 0 else ("yellow" if g < 10 else "red")
+            ces_tbl.add_row("12Z Tc Gap", f"[{gc}]{g:+.1f}°F[/{gc}]")
+        if ces["convective_temp_gap_15Z"] is not None:
+            g = ces["convective_temp_gap_15Z"]
+            gc = "green" if g < 0 else ("yellow" if g < 10 else "red")
+            ces_tbl.add_row("15Z Tc Gap", f"[{gc}]{g:+.1f}°F[/{gc}]")
+        if ces["convective_temp_gap_18Z"] is not None:
+            g = ces["convective_temp_gap_18Z"]
+            gc = "green" if g < 0 else ("yellow" if g < 10 else "red")
+            ces_tbl.add_row("18Z Tc Gap", f"[{gc}]{g:+.1f}°F[/{gc}]")
+
+        console.print(ces_tbl)
+    elif fetched_hour != 12:
+        console.print(
+            f"[dim]CES projection uses the 12Z sounding — "
+            f"fetched {fetched_hour:02d}Z, skipping CES.[/dim]"
+        )
+
+    # ── Historical analogues ──────────────────────────────────────────────────
+    console.rule("[bold]Historical Analogues[/bold]")
+
+    db = Database()
+    all_cases = db.query_parameter_space({
+        "start_date": str(date(CASE_LIBRARY_START_YEAR, 1, 1)),
+        "end_date":   str(date(CASE_LIBRARY_END_YEAR, 12, 31)),
+    })
+
+    ces_tc_gap = ces.get("convective_temp_gap_12Z") if ces is not None else None
+    target_vec = _feature_vector(indices, kinematics, ces_tc_gap, mode)
+
+    if target_vec is None:
+        console.print("[yellow]Cannot compute analogue vector.[/yellow]")
+        return
+
+    scored = []
+    for c in all_cases:
+        if c.sounding_12Z is None:
+            continue
+        vec = _feature_vector(c.sounding_12Z, c.kinematics_12Z, c.convective_temp_gap_12Z, mode)
+        if vec is None:
+            continue
+        scored.append((_analogue_distance(target_vec, vec), c))
+
+    scored.sort(key=lambda x: x[0])
+    _print_analogues(console, f"{stn.value}/{today}/{fetched_hour:02d}Z", scored[:n_analogues])
+
+
 # ── compute-ces ───────────────────────────────────────────────────────────────
 
 @cli.command("compute-ces")
