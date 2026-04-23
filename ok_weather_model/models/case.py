@@ -68,6 +68,10 @@ class HistoricalCase(BaseModel):
     # used to verify CES predictions and observe cap evolution
     sounding_18Z: Optional[ThermodynamicIndices] = None
     kinematics_18Z: Optional[KinematicProfile] = None
+    # 21Z: early-evening sounding — captures LLJ onset and nocturnal
+    # convective intensification; critical for bust/outbreak discrimination
+    sounding_21Z: Optional[ThermodynamicIndices] = None
+    kinematics_21Z: Optional[KinematicProfile] = None
 
     # ── Cap evolution ─────────────────────────────────────────────────────────
     convective_temp_gap_12Z: Optional[float] = None  # °F — Tc minus 12Z surface temp
@@ -155,6 +159,7 @@ class HistoricalCase(BaseModel):
             self.EML_12Z is not None,
             self.sounding_00Z is not None,
             self.sounding_18Z is not None,
+            self.sounding_21Z is not None,
             self.mesonet_data_available,
             self.sounding_data_available,
             self.convective_temp_gap_12Z is not None,
@@ -174,6 +179,7 @@ class HistoricalCase(BaseModel):
             self.EML_12Z is not None,
             self.sounding_00Z is not None,
             self.sounding_18Z is not None,
+            self.sounding_21Z is not None,
             self.mesonet_data_available,
             self.sounding_data_available,
             self.convective_temp_gap_12Z is not None,

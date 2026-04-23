@@ -246,12 +246,20 @@ def enrich_case(case_ref: str, force: bool):
 @click.argument("start_year", type=int)
 @click.argument("end_year", type=int)
 @click.option("--force", is_flag=True, default=False,
-              help="Re-enrich already-enriched cases")
-def enrich_all(start_year: int, end_year: int, force: bool):
+              help="Re-enrich already-enriched cases (refetches all hours)")
+@click.option("--upgrade", is_flag=True, default=False,
+              help="Add missing 00Z/18Z/21Z to cases that already have 12Z, "
+                   "without re-fetching hours already present")
+def enrich_all(start_year: int, end_year: int, force: bool, upgrade: bool):
     """
     Enrich all cases in a year range. Supports resume (skips already-enriched).
 
     START_YEAR END_YEAR: e.g.  enrich-all 1994 2023
+
+    Default: skips cases that already have sounding data.
+    --upgrade: backfills 00Z/18Z/21Z for cases that have 12Z but are missing
+               the surrounding hours (only fetches the missing ones).
+    --force: re-enriches everything from scratch.
     """
     from ok_weather_model.storage import Database
 
@@ -268,13 +276,27 @@ def enrich_all(start_year: int, end_year: int, force: bool):
                       f"Run build-case-skeleton first.[/yellow]")
         return
 
-    to_enrich = cases if force else [
-        c for c in cases if not c.sounding_data_available
-    ]
+    if force:
+        to_enrich = cases
+        mode_label = "force re-enrich"
+    elif upgrade:
+        to_enrich = [
+            c for c in cases
+            if c.sounding_data_available and (
+                c.sounding_00Z is None or
+                c.sounding_18Z is None or
+                c.sounding_21Z is None
+            )
+        ]
+        mode_label = "upgrade (backfill 00Z/18Z/21Z)"
+    else:
+        to_enrich = [c for c in cases if not c.sounding_data_available]
+        mode_label = "enrich new"
 
     console.print(
         f"Found {len(cases)} total cases. "
-        f"Enriching {len(to_enrich)} (skipping {len(cases) - len(to_enrich)} already enriched)."
+        f"{mode_label}: {len(to_enrich)} "
+        f"(skipping {len(cases) - len(to_enrich)})."
     )
 
     from ok_weather_model.ingestion import SoundingClient
@@ -283,23 +305,49 @@ def enrich_all(start_year: int, end_year: int, force: bool):
     errors = []
     enriched = 0
 
-    # Maps the UTC hour → (case field name for indices, field name for kinematics)
+    # Named hours stored as dedicated case fields.
+    # 12Z is the primary pre-convective sounding.
+    # 00Z captures the overnight cap state.
+    # 18Z and 21Z bracket the initiation window and LLJ onset.
     _HOUR_FIELDS = {
         0:  ("sounding_00Z", "kinematics_00Z"),
         12: ("sounding_12Z", "kinematics_12Z"),
         18: ("sounding_18Z", "kinematics_18Z"),
+        21: ("sounding_21Z", "kinematics_21Z"),
     }
+
+    # Routine twice-daily launches are reliably available at all four stations;
+    # fall back to adjacent stations when OUN misses these.
+    # Special-hour soundings (03Z, 06Z, 09Z, 15Z) are OUN-only event launches —
+    # adjacent stations won't have them, so fallback would just waste requests.
+    _FALLBACK_HOURS = {0, 12}
 
     with SoundingClient() as sc:
         for case in track(to_enrich, description="Enriching cases..."):
             try:
-                # Fetch all available soundings for this date (all 8 standard hours)
-                all_profiles = sc.get_all_soundings_for_date(
-                    OklahomaSoundingStation.OUN, case.date
-                )
+                if upgrade and not force:
+                    # Only fetch hours not yet populated on this case
+                    hours_needed = {
+                        h for h, (idx_f, _) in _HOUR_FIELDS.items()
+                        if getattr(case, idx_f) is None
+                    }
+                    # Always include special hours that might have new data
+                    hours_needed |= {h for h in SoundingClient.STANDARD_HOURS
+                                     if h not in _HOUR_FIELDS}
+                else:
+                    hours_needed = set(SoundingClient.STANDARD_HOURS)
 
-                # For hours with no OUN data, try adjacent stations
-                for hour in SoundingClient.STANDARD_HOURS:
+                # Fetch the needed hours from OUN
+                all_profiles: dict[int, object] = {}
+                for hour in sorted(hours_needed):
+                    profile = sc.get_sounding(
+                        OklahomaSoundingStation.OUN, case.date, hour
+                    )
+                    if profile is not None:
+                        all_profiles[hour] = profile
+
+                # For routine 00Z/12Z only, try adjacent stations if OUN misses
+                for hour in _FALLBACK_HOURS & hours_needed:
                     if hour not in all_profiles:
                         fallback = sc.get_sounding_with_fallback(
                             OklahomaSoundingStation.OUN, case.date, hour

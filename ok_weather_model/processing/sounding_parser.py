@@ -204,7 +204,10 @@ def compute_kinematic_profile(
         lm_u = float(bunkers_left[0].to("m/s").magnitude)
         lm_v = float(bunkers_left[1].to("m/s").magnitude)
     except Exception as exc:
-        logger.warning("Bunkers storm motion failed: %s", exc)
+        # Common cause: sounding has too few levels or insufficient height
+        # coverage for MetPy's 0–6 km integration window.  Not a data error —
+        # log at DEBUG so sparse special-hour soundings don't spam the console.
+        logger.debug("Bunkers storm motion not computed: %s", exc)
         rm_u, rm_v, lm_u, lm_v = 0.0, 0.0, 0.0, 0.0
 
     storm_motion_right = (rm_u, rm_v)
