@@ -1,18 +1,20 @@
 """
-Oklahoma Mesonet API client.
+Oklahoma Mesonet client — MDF file-based archive fetcher.
 
-Data source: https://api.mesonet.org/
-Public API — no authentication required for most endpoints.
-Rate limits apply; this client enforces them and retries on transient failures.
+Data source: https://www.mesonet.org/data/public/mesonet/mdf/
+Public archive — no authentication required.
+Each MDF file is a ~20 KB snapshot covering all ~120 stations statewide
+at a 5-minute observation interval.
 
-Reference: https://www.mesonet.org/index.php/api/main
+For case analysis we fetch 4 key snapshots per case day (12Z, 15Z, 18Z, 21Z)
+rather than every 5-minute file, keeping network traffic to ~80 KB per case.
 """
 
 import logging
+import math
 import time as time_module
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
-from functools import lru_cache
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -27,22 +29,155 @@ from ..models import (
 
 logger = logging.getLogger(__name__)
 
-# Mesonet API base — public JSON endpoints
-MESONET_BASE = "https://api.mesonet.org/public/station"
-MESONET_OBS_BASE = "https://api.mesonet.org/public/obs"
+# MDF archive base — files at YYYY/MM/DD/YYYYMMDDHHmm.mdf
+MESONET_MDF_BASE = "https://www.mesonet.org/data/public/mesonet/mdf"
 
-# Rate limiting: Mesonet asks for no more than ~1 req/sec for bulk pulls
+# Rate limiting: be polite to the Mesonet archive
 REQUEST_DELAY_SECONDS = 1.1
+
+# Analysis hours for a convective case day
+_ANALYSIS_HOURS = (12, 15, 18, 21)
+
+
+def _mdf_url(dt: datetime) -> str:
+    """Build the MDF archive URL for the given UTC datetime."""
+    # MDF files are on 5-minute boundaries; snap down
+    minute = (dt.minute // 5) * 5
+    return (
+        f"{MESONET_MDF_BASE}/{dt.year:04d}/{dt.month:02d}/{dt.day:02d}/"
+        f"{dt.year:04d}{dt.month:02d}{dt.day:02d}{dt.hour:02d}{minute:02d}.mdf"
+    )
+
+
+def _dewpoint_c(temp_c: float, rh: float) -> float:
+    """August-Roche-Magnus approximation: dewpoint in °C from T(°C) and RH(%)."""
+    rh = max(1.0, min(100.0, rh))
+    gamma = (17.625 * temp_c / (243.04 + temp_c)) + math.log(rh / 100.0)
+    return 243.04 * gamma / (17.625 - gamma)
+
+
+def _c_to_f(c: float) -> float:
+    return c * 9.0 / 5.0 + 32.0
+
+
+def _ms_to_mph(ms: float) -> float:
+    return ms * 2.23694
+
+
+def _mm_to_in(mm: float) -> float:
+    return mm / 25.4
+
+
+def _parse_mdf(content: str, fallback_date: date) -> list[MesonetObservation]:
+    """
+    Parse an MDF fixed-width text file into MesonetObservation objects.
+
+    MDF format (3-line header, then one row per station):
+      Line 1: ``  N ! copyright``  (N = station count)
+      Line 2: ``  M YYYY MM DD HH MM SS``  (M = column count, then file timestamp)
+      Line 3: column names separated by whitespace
+      Remaining: data rows; missing values are -998 (instrument error) or -999 (not installed)
+    """
+    lines = content.strip().splitlines()
+    if len(lines) < 4:
+        return []
+
+    # Extract file date/time from line 2
+    meta = lines[1].split()
+    try:
+        year, month, day = int(meta[1]), int(meta[2]), int(meta[3])
+    except (IndexError, ValueError):
+        year, month, day = fallback_date.year, fallback_date.month, fallback_date.day
+
+    headers = lines[2].split()
+    col = {h: i for i, h in enumerate(headers)}
+
+    def _val(parts: list[str], key: str) -> Optional[float]:
+        idx = col.get(key)
+        if idx is None or idx >= len(parts):
+            return None
+        try:
+            v = float(parts[idx])
+            # MDF missing codes: -998 (instrument error), -999 (not installed),
+            # -996 (comms failure), -995, etc. All valid met values are > -100.
+            return None if v < -100 else v
+        except (ValueError, TypeError):
+            return None
+
+    observations: list[MesonetObservation] = []
+    for line in lines[3:]:
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+
+        stid_idx = col.get("STID")
+        if stid_idx is None or stid_idx >= len(parts):
+            continue
+        stid = parts[stid_idx].upper()
+
+        try:
+            county = OklahomaCounty.from_mesonet_station(stid)
+        except (ValueError, AttributeError):
+            continue
+
+        # TIME column is minutes since midnight UTC for this date
+        time_min = _val(parts, "TIME")
+        if time_min is None:
+            continue
+        obs_hour = int(time_min) // 60
+        obs_min = int(time_min) % 60
+        valid_time = datetime(year, month, day, obs_hour % 24, obs_min, tzinfo=timezone.utc)
+
+        tair = _val(parts, "TAIR")
+        relh = _val(parts, "RELH")
+        wspd = _val(parts, "WSPD")
+        wdir = _val(parts, "WDIR")
+        pres = _val(parts, "PRES")
+
+        # Require the five core fields
+        if any(v is None for v in (tair, relh, wspd, wdir, pres)):
+            continue
+
+        wmax = _val(parts, "WMAX")
+        srad = _val(parts, "SRAD")
+        ts05 = _val(parts, "TS05")
+        tr05 = _val(parts, "TR05")
+        rain = _val(parts, "RAIN")
+
+        try:
+            obs = MesonetObservation(
+                station_id=stid,
+                county=county,
+                valid_time=valid_time,
+                temperature=_c_to_f(tair),
+                dewpoint=_c_to_f(_dewpoint_c(tair, relh)),
+                relative_humidity=relh,
+                wind_direction=float(wdir) % 360.0,
+                wind_speed=_ms_to_mph(wspd),
+                wind_gust=_ms_to_mph(wmax) if wmax is not None else None,
+                pressure=float(pres),
+                solar_radiation=float(srad) if srad is not None else None,
+                soil_temperature_5cm=float(ts05) if ts05 is not None else None,
+                soil_moisture_5cm=float(tr05) if tr05 is not None else None,
+                precipitation=_mm_to_in(rain) if rain is not None and rain >= 0 else None,
+            )
+            observations.append(obs)
+        except Exception as exc:
+            logger.debug("Skipping malformed MDF row for %s: %s", stid, exc)
+
+    return observations
 
 
 class MesonetClient:
     """
-    Client for Oklahoma Mesonet observations.
+    Client for Oklahoma Mesonet observations via the public MDF archive.
 
     Usage::
 
-        client = MesonetClient()
-        ts = await client.get_observations("NORM", start, end)
+        with MesonetClient() as mc:
+            data = mc.get_historical_case_data(case_date)
     """
 
     def __init__(self, request_delay: float = REQUEST_DELAY_SECONDS):
@@ -61,189 +196,69 @@ class MesonetClient:
         wait=wait_exponential(multiplier=1, min=2, max=30),
         retry=retry_if_exception_type((httpx.TimeoutException, httpx.TransportError)),
     )
-    def _get(self, url: str, params: dict) -> dict:
+    def _fetch_text(self, url: str) -> str:
         self._rate_limit()
-        logger.debug("GET %s params=%s", url, params)
-        response = self._http.get(url, params=params)
-        # Don't retry client errors (4xx) — fail fast
+        logger.debug("GET %s", url)
+        response = self._http.get(url)
         if 400 <= response.status_code < 500:
             response.raise_for_status()
         response.raise_for_status()
-        return response.json()
+        return response.text
 
-    @lru_cache(maxsize=1)
-    def get_station_metadata(self) -> list[MesonetStation]:
+    def get_snapshot_observations(self, dt: datetime) -> list[MesonetObservation]:
         """
-        Pull metadata for all active Mesonet stations.
-        Returns a list of MesonetStation objects.
-        Cached after first call.
+        Fetch all-station observations from the MDF file at the given UTC time.
+        Time is snapped down to the nearest 5-minute boundary.
         """
-        data = self._get(MESONET_BASE, {"format": "json"})
-        stations: list[MesonetStation] = []
-
-        for record in data.get("data", []):
-            station_id = record.get("stid", "").upper()
-            # Map station to county via our enum
-            try:
-                county = OklahomaCounty.from_mesonet_station(station_id)
-            except ValueError:
-                logger.debug("Station %s not mapped to a county — skipping", station_id)
-                continue
-
-            stations.append(
-                MesonetStation(
-                    station_id=station_id,
-                    county=county,
-                    latitude=float(record.get("lat", 0)),
-                    longitude=float(record.get("lon", 0)),
-                    elevation=float(record.get("elev", 0)),
-                    name=record.get("name", station_id),
-                )
-            )
-
-        logger.info("Loaded metadata for %d Mesonet stations", len(stations))
-        return stations
-
-    def get_observations(
-        self,
-        station_id: str,
-        start_time: datetime,
-        end_time: datetime,
-    ) -> MesonetTimeSeries:
-        """
-        Fetch 5-minute observations for a single station over a time window.
-
-        Args:
-            station_id: 4-letter Mesonet code (e.g. "NORM")
-            start_time: UTC start time
-            end_time: UTC end time
-
-        Returns:
-            MesonetTimeSeries with parsed observations
-        """
-        station_id = station_id.upper()
-        county = OklahomaCounty.from_mesonet_station(station_id)
-
-        params = {
-            "stid": station_id,
-            "sdate": start_time.strftime("%Y%m%d%H%M"),
-            "edate": end_time.strftime("%Y%m%d%H%M"),
-            "vars": "TAIR,TDEW,RELH,WSPD,WDIR,WMAX,PRES,SRAD,ST05,SM05,RAIN",
-            "format": "json",
-        }
-
-        data = self._get(MESONET_OBS_BASE, params)
-        observations = _parse_obs_response(data, station_id, county)
-
-        ts = MesonetTimeSeries(
-            station_id=station_id,
-            county=county,
-            start_time=start_time,
-            end_time=end_time,
-            observations=observations,
-        )
-        ts.compute_tendencies()
-        return ts
-
-    def get_county_observations(
-        self,
-        county: OklahomaCounty,
-        start_time: datetime,
-        end_time: datetime,
-    ) -> list[MesonetTimeSeries]:
-        """
-        Fetch observations from all stations in a county over a time window.
-        Returns one MesonetTimeSeries per station.
-        """
-        # Find all stations in this county
-        all_stations = self.get_station_metadata()
-        county_stations = [s for s in all_stations if s.county == county]
-
-        if not county_stations:
-            logger.warning("No Mesonet stations found for county %s", county.name)
-            return []
-
-        result = []
-        for station in county_stations:
-            try:
-                ts = self.get_observations(station.station_id, start_time, end_time)
-                result.append(ts)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to retrieve observations for %s: %s",
-                    station.station_id,
-                    exc,
-                )
-
-        return result
-
-    def get_statewide_snapshot(self, valid_time: datetime) -> list[MesonetObservation]:
-        """
-        Fetch a single-time observation from all stations.
-        Uses a ±5 minute window around valid_time to find the nearest ob.
-
-        Returns a list of MesonetObservation objects (one per station).
-        """
-        start = valid_time - timedelta(minutes=5)
-        end = valid_time + timedelta(minutes=5)
-
-        all_stations = self.get_station_metadata()
-        observations: list[MesonetObservation] = []
-
-        for station in all_stations:
-            try:
-                ts = self.get_observations(station.station_id, start, end)
-                if ts.observations:
-                    # Use observation nearest to valid_time
-                    nearest = min(
-                        ts.observations,
-                        key=lambda o: abs((o.valid_time - valid_time).total_seconds()),
-                    )
-                    observations.append(nearest)
-            except Exception as exc:
-                logger.debug("Skipping %s in snapshot: %s", station.station_id, exc)
-
-        logger.info(
-            "Statewide snapshot at %s: %d stations returned data",
-            valid_time.isoformat(),
-            len(observations),
-        )
-        return observations
+        url = _mdf_url(dt)
+        content = self._fetch_text(url)
+        obs = _parse_mdf(content, dt.date())
+        logger.debug("Parsed %d observations from %s", len(obs), url)
+        return obs
 
     def get_historical_case_data(self, case_date: date) -> dict[str, MesonetTimeSeries]:
         """
-        Pull full-day Mesonet observations for all stations on a case date.
+        Pull Mesonet snapshots at 12Z, 15Z, 18Z, and 21Z for a case date.
 
         Returns a dict mapping station_id → MesonetTimeSeries.
+        Each TimeSeries contains the observations from all fetched snapshots
+        for that station.
         """
-        start = datetime(case_date.year, case_date.month, case_date.day, 0, 0, tzinfo=timezone.utc)
-        end = start + timedelta(hours=24)
+        start = datetime(case_date.year, case_date.month, case_date.day, 12, 0, tzinfo=timezone.utc)
+        end = datetime(case_date.year, case_date.month, case_date.day, 22, 0, tzinfo=timezone.utc)
 
-        all_stations = self.get_station_metadata()
-        result: dict[str, MesonetTimeSeries] = {}
+        station_obs: dict[str, list[MesonetObservation]] = {}
+        station_county: dict[str, OklahomaCounty] = {}
 
-        logger.info(
-            "Pulling full-day Mesonet data for %s (%d stations)",
-            case_date.isoformat(),
-            len(all_stations),
-        )
-
-        for station in all_stations:
+        for hour in _ANALYSIS_HOURS:
+            dt = datetime(case_date.year, case_date.month, case_date.day, hour, 0, tzinfo=timezone.utc)
             try:
-                ts = self.get_observations(station.station_id, start, end)
-                result[station.station_id] = ts
+                snapshot = self.get_snapshot_observations(dt)
+                for obs in snapshot:
+                    station_obs.setdefault(obs.station_id, []).append(obs)
+                    station_county[obs.station_id] = obs.county
+                logger.info("Fetched %dZ MDF for %s: %d stations", hour, case_date, len(snapshot))
             except Exception as exc:
-                logger.warning(
-                    "Failed to pull %s for %s: %s",
-                    station.station_id,
-                    case_date,
-                    exc,
-                )
+                logger.warning("Failed to fetch %dZ MDF for %s: %s", hour, case_date, exc)
+
+        result: dict[str, MesonetTimeSeries] = {}
+        for stid, obs_list in station_obs.items():
+            ts = MesonetTimeSeries(
+                station_id=stid,
+                county=station_county[stid],
+                start_time=start,
+                end_time=end,
+                observations=sorted(obs_list, key=lambda o: o.valid_time),
+            )
+            try:
+                ts.compute_tendencies()
+            except Exception:
+                pass  # tendencies require ≥2 obs; may fail for sparse data
+            result[stid] = ts
 
         logger.info(
-            "Retrieved data for %d/%d stations on %s",
+            "Retrieved Mesonet data for %d stations on %s",
             len(result),
-            len(all_stations),
             case_date.isoformat(),
         )
         return result
@@ -255,10 +270,8 @@ class MesonetClient:
         station_series: list[MesonetTimeSeries],
     ) -> Optional[CountySurfaceState]:
         """
-        Average all available station observations within a county at valid_time
-        to produce a CountySurfaceState.
-
-        Handles missing stations gracefully; returns None if no data available.
+        Average all county station observations nearest to valid_time to produce
+        a CountySurfaceState.  Returns None if no observations are available.
         """
         window = timedelta(minutes=7)
         obs_at_time: list[MesonetObservation] = []
@@ -280,15 +293,12 @@ class MesonetClient:
         mean_wspd = sum(o.wind_speed for o in obs_at_time) / n
 
         # Vector-average wind direction
-        import math
         u_sum = sum(math.sin(math.radians(o.wind_direction)) for o in obs_at_time)
         v_sum = sum(math.cos(math.radians(o.wind_direction)) for o in obs_at_time)
         dom_dir = math.degrees(math.atan2(u_sum / n, v_sum / n)) % 360
 
-        # Data quality: fraction of possible stations that returned valid data
-        all_county_stations = [s for s in self.get_station_metadata() if s.county == county]
-        dqs = n / max(len(all_county_stations), 1)
-        dqs = min(dqs, 1.0)
+        # DQS: 1 station is adequate for a county; cap at 1.0
+        dqs = min(float(n), 1.0)
 
         return CountySurfaceState(
             county=county,
@@ -301,6 +311,34 @@ class MesonetClient:
             data_quality_score=dqs,
         )
 
+    def get_station_metadata(self) -> list[MesonetStation]:
+        """
+        Return basic station metadata derived from a current MDF snapshot.
+        Lat/lon/elevation are not available from MDF files; returns stubs.
+        Prefer using get_historical_case_data() for analysis work.
+        """
+        # Fetch today's 12Z file as a proxy for the station roster
+        today = datetime.now(tz=timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+        try:
+            obs = self.get_snapshot_observations(today)
+        except Exception:
+            # Fall back to yesterday
+            yesterday = today - timedelta(days=1)
+            obs = self.get_snapshot_observations(yesterday)
+
+        seen: dict[str, MesonetStation] = {}
+        for o in obs:
+            if o.station_id not in seen:
+                seen[o.station_id] = MesonetStation(
+                    station_id=o.station_id,
+                    county=o.county,
+                    latitude=0.0,
+                    longitude=0.0,
+                    elevation=0.0,
+                    name=o.station_id,
+                )
+        return list(seen.values())
+
     def close(self) -> None:
         self._http.close()
 
@@ -309,74 +347,3 @@ class MesonetClient:
 
     def __exit__(self, *_):
         self.close()
-
-
-# ── Private helpers ────────────────────────────────────────────────────────────
-
-def _parse_obs_response(
-    data: dict,
-    station_id: str,
-    county: OklahomaCounty,
-) -> list[MesonetObservation]:
-    """Parse the Mesonet JSON response into MesonetObservation objects."""
-    observations: list[MesonetObservation] = []
-
-    # Mesonet API returns data in 'data' list with column headers in 'head'
-    headers = data.get("head", {}).get("vars", [])
-    rows = data.get("data", [])
-
-    if not headers or not rows:
-        logger.debug("No observation data for %s", station_id)
-        return observations
-
-    # Build a header→index map
-    col = {h: i for i, h in enumerate(headers)}
-
-    def _get(row, key, default=None):
-        idx = col.get(key)
-        if idx is None:
-            return default
-        val = row[idx]
-        if val in (None, "", "M", -999, -999.0):
-            return default
-        return val
-
-    for row in rows:
-        try:
-            ts_str = _get(row, "TIME")
-            if ts_str is None:
-                continue
-            valid_time = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(
-                tzinfo=timezone.utc
-            )
-
-            obs = MesonetObservation(
-                station_id=station_id,
-                county=county,
-                valid_time=valid_time,
-                temperature=float(_get(row, "TAIR", 0)),
-                dewpoint=float(_get(row, "TDEW", 0)),
-                relative_humidity=float(_get(row, "RELH", 50)),
-                wind_direction=float(_get(row, "WDIR", 0)),
-                wind_speed=float(_get(row, "WSPD", 0)),
-                wind_gust=_float_or_none(_get(row, "WMAX")),
-                pressure=float(_get(row, "PRES", 1000)),
-                solar_radiation=_float_or_none(_get(row, "SRAD")),
-                soil_temperature_5cm=_float_or_none(_get(row, "ST05")),
-                soil_moisture_5cm=_float_or_none(_get(row, "SM05")),
-                precipitation=_float_or_none(_get(row, "RAIN")),
-            )
-            observations.append(obs)
-        except Exception as exc:
-            logger.debug("Skipping malformed observation row: %s", exc)
-
-    return observations
-
-
-def _float_or_none(value) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
