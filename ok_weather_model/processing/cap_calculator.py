@@ -228,6 +228,101 @@ def estimate_erosion_trajectory(
     )
 
 
+def compute_ces_from_sounding(
+    indices: "ThermodynamicIndices",
+    surface_temp_12Z_c: float,
+    case_date: "date",
+) -> dict:
+    """
+    Compute Cap Erosion Score using sounding data and the Oklahoma
+    climatological heating model.  Does not require Mesonet data.
+
+    Physics:
+        Oklahoma's convective cap is primarily an Elevated Mixed Layer (EML)
+        warm nose at 600–700mb.  The cap erodes when the afternoon boundary
+        layer mixes deep enough to overcome the warm nose.  The surface
+        temperature needed to drive that mixing is estimated as:
+
+            T_eff = T_12Z  +  cap_strength × 4.5  +  MLCIN / 8.0
+
+        Where:
+          - cap_strength × 4.5 converts the °C warm-nose excess to the
+            equivalent surface °F increase needed (via the sub-cap lapse rate)
+          - MLCIN / 8.0 converts J/kg inhibition to °F needed using the
+            empirical Oklahoma heating efficiency (~8 J/kg per °F per hour)
+
+        The heating model then estimates when T_surface(t) ≥ T_eff.
+
+    The convective_temp_gap fields represent T_eff − T_surface at each
+    analysis hour (positive = cap still holding, negative = cap has broken).
+
+    Args:
+        indices: ThermodynamicIndices from 12Z OUN sounding
+        surface_temp_12Z_c: Surface temperature at 12Z (°C) from sounding level 0
+        case_date: Calendar date of the case
+
+    Returns:
+        dict with keys:
+            convective_temp_gap_12Z: float (°F, positive = cap holding)
+            convective_temp_gap_15Z: float (°F)
+            convective_temp_gap_18Z: float (°F)
+            cap_erosion_time: Optional[time] (UTC, or None if cap never erodes)
+            cap_behavior: CapBehavior
+    """
+    from datetime import time as time_type
+    from ..models.enums import CapBehavior
+
+    doy = case_date.timetuple().tm_yday
+    t12z_f = surface_temp_12Z_c * 9.0 / 5.0 + 32.0
+
+    # Effective convective temperature: surface must warm this much above 12Z
+    # to break the EML cap and drive deep convection
+    CAP_LAPSE_FACTOR = 4.5   # °F surface warming per °C of cap strength
+    t_eff_f = t12z_f + (indices.cap_strength * CAP_LAPSE_FACTOR) + (indices.MLCIN / HEATING_EFFICIENCY)
+
+    # Tc gaps at standard synoptic analysis hours
+    gaps: dict = {}
+    for label, hour in [("12Z", 12.0), ("15Z", 15.0), ("18Z", 18.0)]:
+        t_sfc = _okla_surface_temp_f(t12z_f, hour, doy)
+        gaps[f"convective_temp_gap_{label}"] = compute_convective_temp_gap(t_sfc, t_eff_f)
+
+    # Scan hourly 12Z–02Z for erosion, then interpolate sub-hourly
+    erosion_time = None
+    for h in range(12, 27):
+        t_sfc = _okla_surface_temp_f(t12z_f, float(h), doy)
+        if t_sfc >= t_eff_f:
+            if h > 12:
+                t_prev = _okla_surface_temp_f(t12z_f, float(h - 1), doy)
+                frac = (t_eff_f - t_prev) / (t_sfc - t_prev) if t_sfc > t_prev else 0.0
+                erosion_utc = (h - 1) + frac
+            else:
+                erosion_utc = float(h)
+
+            hour_of_day = int(erosion_utc) % 24
+            minute_of_hour = int(round((erosion_utc % 1) * 60))
+            if minute_of_hour == 60:
+                hour_of_day = (hour_of_day + 1) % 24
+                minute_of_hour = 0
+            erosion_time = time_type(hour_of_day, minute_of_hour)
+            break
+
+    # CapBehavior classification
+    if erosion_time is None:
+        cap_behavior = CapBehavior.NO_EROSION
+    elif erosion_time.hour <= 18:
+        cap_behavior = CapBehavior.EARLY_EROSION
+    elif erosion_time.hour <= 21:
+        cap_behavior = CapBehavior.CLEAN_EROSION
+    else:
+        cap_behavior = CapBehavior.LATE_EROSION
+
+    return {
+        **gaps,
+        "cap_erosion_time": erosion_time,
+        "cap_behavior": cap_behavior,
+    }
+
+
 def compute_heating_rate_needed(
     current_CIN: float,
     hours_remaining: float,
@@ -257,6 +352,55 @@ def compute_heating_rate_needed(
 
 
 # ── Private estimation helpers ────────────────────────────────────────────────
+
+def _heating_amplitude(day_of_year: int) -> float:
+    """
+    Climatological max surface heating above 12Z temp (°F) for central Oklahoma.
+
+    Uses a sinusoidal fit that peaks near the summer solstice:
+        ~12°F in winter, ~20°F in spring, ~22°F at summer solstice.
+
+    Calibrated against Oklahoma Mesonet 30-year climatology for 12Z→peak ΔT.
+    """
+    import math
+    return 15.0 + 7.0 * math.sin(2 * math.pi * (day_of_year - 80) / 365)
+
+
+def _okla_surface_temp_f(
+    t12z_f: float,
+    hour_utc: float,
+    day_of_year: int,
+) -> float:
+    """
+    Estimate Oklahoma surface temperature (°F) at a given UTC hour,
+    anchored to the 12Z surface temperature from the sounding.
+
+    Heating curve:
+        12Z–21Z: sin^1 ramp from 0 to peak amplitude
+        21Z–02Z: linear cooling back toward 12Z value
+
+    Peak at 21Z = 4pm CDT, consistent with Oklahoma spring climatology.
+    Hours >= 24 are handled as next-day UTC (25 = 01Z next day).
+    """
+    import math
+
+    t_peak_utc = 21.0
+    t_end_utc = 26.0   # 02Z next day — effectively back to near-12Z temp
+
+    amplitude = _heating_amplitude(day_of_year)
+
+    if hour_utc < 12:
+        hour_utc += 24  # handle post-midnight hours in 12Z-relative frame
+
+    if hour_utc <= t_peak_utc:
+        frac = (hour_utc - 12.0) / (t_peak_utc - 12.0)
+        delta_t = amplitude * math.sin(math.pi / 2 * frac)
+    else:
+        frac = min((hour_utc - t_peak_utc) / (t_end_utc - t_peak_utc), 1.0)
+        delta_t = amplitude * (1.0 - frac)
+
+    return t12z_f + delta_t
+
 
 def _estimate_dynamic_forcing(
     sounding: ThermodynamicIndices,

@@ -448,6 +448,137 @@ def analyze_cap_behavior(case_ref: str, forcing_window_hours: int):
     console.print(budget_table)
 
 
+# ── compute-ces ───────────────────────────────────────────────────────────────
+
+@cli.command("compute-ces")
+@click.option("--start-year", default=CASE_LIBRARY_START_YEAR, show_default=True,
+              help="First year to process")
+@click.option("--end-year", default=CASE_LIBRARY_END_YEAR, show_default=True,
+              help="Last year to process")
+@click.option("--force", is_flag=True, default=False,
+              help="Recompute even if cap_behavior is already set")
+def compute_ces(start_year: int, end_year: int, force: bool):
+    """
+    Compute Cap Erosion Score for all sounding-enriched cases.
+
+    Uses the Oklahoma climatological heating model to project when the
+    convective temperature (Tc) will be reached from the 12Z surface
+    temperature.  Does not require Mesonet data.
+
+    Populates: convective_temp_gap_12Z/15Z/18Z, cap_erosion_time, cap_behavior.
+    """
+    from ok_weather_model.storage import Database
+    from ok_weather_model.processing.cap_calculator import compute_ces_from_sounding
+
+    db = Database()
+    cases = db.query_parameter_space({
+        "start_date": str(date(start_year, 1, 1)),
+        "end_date": str(date(end_year, 12, 31)),
+    })
+
+    enriched = [c for c in cases if c.sounding_data_available and c.sounding_12Z is not None]
+    to_process = enriched if force else [c for c in enriched if c.cap_behavior is None]
+
+    console.print(
+        f"Found [cyan]{len(enriched)}[/cyan] enriched cases. "
+        f"Processing [green]{len(to_process)}[/green] "
+        f"(skipping [yellow]{len(enriched) - len(to_process)}[/yellow] already done)."
+    )
+
+    processed = skipped = errors = 0
+
+    for case in track(to_process, description="Computing CES..."):
+        try:
+            valid_time = datetime(
+                case.date.year, case.date.month, case.date.day, 12, 0, tzinfo=timezone.utc
+            )
+            sounding = db.load_sounding(OklahomaSoundingStation.OUN, valid_time)
+
+            if sounding is None or not sounding.levels:
+                logger.debug("No sounding Parquet for %s — skipping CES", case.case_id)
+                skipped += 1
+                continue
+
+            surface_temp_c = sounding.levels[0].temperature
+            ces = compute_ces_from_sounding(case.sounding_12Z, surface_temp_c, case.date)
+
+            case.convective_temp_gap_12Z = ces["convective_temp_gap_12Z"]
+            case.convective_temp_gap_15Z = ces["convective_temp_gap_15Z"]
+            case.convective_temp_gap_18Z = ces["convective_temp_gap_18Z"]
+            case.cap_erosion_time = ces["cap_erosion_time"]
+            case.cap_behavior = ces["cap_behavior"]
+            case.recompute_completeness()
+            db.save_case(case)
+            processed += 1
+
+        except Exception as exc:
+            errors += 1
+            logger.exception("CES failed for %s: %s", case.case_id, exc)
+
+    console.print(
+        f"\n[bold green]Processed: {processed}[/bold green]  "
+        f"Skipped (no sounding): {skipped}  "
+        f"Errors: {errors}"
+    )
+
+    # ── Distribution summary ──────────────────────────────────────────────────
+    updated = db.query_parameter_space({
+        "start_date": str(date(start_year, 1, 1)),
+        "end_date": str(date(end_year, 12, 31)),
+    })
+
+    behavior_counts: dict[str, int] = {}
+    for c in updated:
+        key = c.cap_behavior.value if c.cap_behavior else "NOT_COMPUTED"
+        behavior_counts[key] = behavior_counts.get(key, 0) + 1
+
+    behavior_labels = {
+        "EARLY_EROSION":   "Eroded before 18Z — early afternoon initiation window",
+        "CLEAN_EROSION":   "Eroded 18Z–21Z — peak storm window (1–4pm CDT)",
+        "LATE_EROSION":    "Eroded after 21Z — marginal or late initiation",
+        "NO_EROSION":      "Cap held through 02Z — bust candidate",
+        "BOUNDARY_FORCED": "Boundary-forced erosion (set manually)",
+        "NOT_COMPUTED":    "No sounding data available",
+    }
+
+    table = Table(
+        title=f"Cap Behavior Distribution ({start_year}–{end_year})",
+        show_lines=True,
+    )
+    table.add_column("Cap Behavior", style="cyan")
+    table.add_column("Cases", justify="right", style="green")
+    table.add_column("Description")
+
+    for beh, count in sorted(behavior_counts.items(), key=lambda x: -x[1]):
+        table.add_row(beh, str(count), behavior_labels.get(beh, ""))
+
+    console.print(table)
+
+    # ── Cross-tab: cap_behavior vs event_class ────────────────────────────────
+    cross: dict[str, dict[str, int]] = {}
+    for c in updated:
+        beh = c.cap_behavior.value if c.cap_behavior else "NOT_COMPUTED"
+        cls = c.event_class.value
+        if beh not in cross:
+            cross[beh] = {}
+        cross[beh][cls] = cross[beh].get(cls, 0) + 1
+
+    event_classes = sorted({c.event_class.value for c in updated})
+    cross_table = Table(
+        title="Cap Behavior × Event Class",
+        show_lines=True,
+    )
+    cross_table.add_column("Cap Behavior", style="cyan")
+    for ec in event_classes:
+        cross_table.add_column(ec, justify="right")
+
+    for beh in sorted(cross.keys()):
+        row = [beh] + [str(cross[beh].get(ec, 0)) for ec in event_classes]
+        cross_table.add_row(*row)
+
+    console.print(cross_table)
+
+
 # ── build-bust-database ───────────────────────────────────────────────────────
 
 @cli.command("build-bust-database")

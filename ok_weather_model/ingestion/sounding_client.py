@@ -280,6 +280,10 @@ def _parse_sounding_table(text: str) -> list[SoundingLevel]:
 
         wind_speed_kt = spd * MPS_TO_KNOTS if speed_in_mps else spd
 
+        # Drop duplicate pressure levels (archive sometimes repeats a level)
+        if levels and pres >= levels[-1].pressure:
+            continue
+
         levels.append(
             SoundingLevel(
                 pressure=pres,

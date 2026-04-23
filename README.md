@@ -286,7 +286,49 @@ Mesonet: 71 stations
 Case 19990503_OK saved. Completeness: 94%
 ```
 
-**Step 3 — Analyze cap behavior:**
+**Step 3 — Bulk enrich with sounding data:**
+
+```bash
+python main.py enrich-all 1994 2023
+```
+
+```
+Found 464 total cases. Enriching 463 (skipping 1 already enriched).
+Enriching cases... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:30:12
+Enriched: 435  No sounding: 28  Errors: 0
+```
+
+**Step 4 — Compute Cap Erosion Score for all cases:**
+
+```bash
+python main.py compute-ces --start-year 1994 --end-year 2023
+```
+
+```
+Found 436 enriched cases. Processing 436 (skipping 0 already done).
+Computing CES... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:08
+
+Processed: 436  Skipped (no sounding): 0  Errors: 0
+
+Cap Behavior Distribution (1994–2023)
+┏━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Cap Behavior  ┃ Cases ┃ Description                               ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ NO_EROSION    │   280 │ Cap held through 02Z — bust candidate     │
+│ EARLY_EROSION │   150 │ Eroded before 18Z — early initiation      │
+│ CLEAN_EROSION │     6 │ Eroded 18Z–21Z — peak storm window        │
+│ NOT_COMPUTED  │    28 │ No sounding data available                 │
+└───────────────┴───────┴───────────────────────────────────────────┘
+```
+
+The Cap Erosion Score uses the Oklahoma climatological heating model: the
+`cap_strength` (°C warm-nose excess) and `MLCIN` (mixed-layer inhibition)
+from the 12Z sounding determine the effective surface temperature needed to
+drive convection.  Cases classified `NO_EROSION` required dynamic forcing
+(QG lift, dryline surge) beyond surface heating — quantifying that forcing
+from ERA5 reanalysis is the next analysis phase.
+
+**Step 5 — Analyze a single case in detail:**
 
 ```bash
 python main.py analyze-cap-behavior 1999-05-03
@@ -322,7 +364,8 @@ Cap Analysis — 19990503_OK
 | `build-case-skeleton` | Initialize case library from SPC data | `python main.py build-case-skeleton` |
 | `enrich-case CASE_REF` | Add sounding + Mesonet data to one case | `python main.py enrich-case 1999-05-03` |
 | `enrich-all YEAR YEAR` | Bulk enrichment with resume support | `python main.py enrich-all 1994 2023` |
-| `analyze-cap-behavior CASE_REF` | Compute cap erosion trajectory | `python main.py analyze-cap-behavior 19990503_OK` |
+| `compute-ces` | Cap Erosion Score from sounding data (no Mesonet needed) | `python main.py compute-ces --start-year 1994 --end-year 2023` |
+| `analyze-cap-behavior CASE_REF` | Compute cap erosion trajectory (requires Mesonet) | `python main.py analyze-cap-behavior 19990503_OK` |
 | `build-bust-database` | Identify bust and alarm-bell cases | `python main.py build-bust-database --spc-threshold 0.10` |
 
 `CASE_REF` accepts either `YYYYMMDD_OK` (case ID) or `YYYY-MM-DD` (date).

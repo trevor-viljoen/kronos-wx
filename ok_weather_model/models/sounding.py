@@ -85,9 +85,9 @@ class ThermodynamicIndices(BaseModel):
     MUCAPE: float            # Most unstable CAPE, J/kg
 
     # Parcel trajectory heights
-    LCL_height: float        # Lifting condensation level, meters AGL
-    LFC_height: float        # Level of free convection, meters AGL
-    EL_height: float         # Equilibrium level, meters AGL
+    LCL_height: float                  # Lifting condensation level, meters AGL
+    LFC_height: Optional[float] = None # Level of free convection, meters AGL
+    EL_height: Optional[float] = None  # Equilibrium level, meters AGL
 
     # Cap diagnostics
     convective_temperature: float   # °F — surface must reach this for free convection

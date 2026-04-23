@@ -311,6 +311,29 @@ def compute_kinematic_profile(
     )
 
 
+def compute_convective_temp_from_profile(profile: SoundingProfile) -> float:
+    """
+    Compute the convective temperature (°F) directly from a SoundingProfile.
+
+    Use this when you need the correct Tc without going through the full
+    compute_thermodynamic_indices() pipeline.  Useful for CES computation
+    when the stored ThermodynamicIndices.convective_temperature may be stale.
+
+    Returns convective temperature in °F.
+    """
+    try:
+        from metpy.units import units
+    except ImportError as exc:
+        raise ImportError("MetPy is required.") from exc
+
+    levels = profile.levels
+    pressure = np.array([lev.pressure for lev in levels]) * units("hPa")
+    temperature = np.array([lev.temperature for lev in levels]) * units("degC")
+    dewpoint = np.array([lev.dewpoint for lev in levels]) * units("degC")
+
+    return _compute_convective_temperature(pressure, temperature, dewpoint)
+
+
 # ── Private computation helpers ────────────────────────────────────────────────
 
 def _pressure_to_height(
@@ -368,38 +391,37 @@ def _compute_cap_strength(
 def _compute_convective_temperature(pressure, temperature, dewpoint) -> float:
     """
     Estimate the convective temperature: the surface temperature at which
-    free convection would occur (CIN = 0) based on afternoon heating.
+    surface-based CIN drops to near zero (free convection imminent).
 
-    Method: find surface temp at which the dry adiabat through surface
-    intersects the LCL of the mixed layer.
+    Method: iteratively raise only the surface level temperature until
+    surface_based_cape_cin returns |CIN| < 10 J/kg.
     """
     try:
         import metpy.calc as mpcalc
         from metpy.units import units
 
-        # Iterative approach: raise surface temp until CIN approaches zero
-        sfc_pres = pressure[0]
-        sfc_dew = dewpoint[0]
+        sfc_temp_c = float(temperature[0].to("degC").magnitude)
+        temp_mag = temperature.magnitude.copy()
 
-        for delta in np.arange(0, 20, 0.5):
-            test_temp = temperature[0] + delta * units("delta_degC")
+        for delta in np.arange(0.0, 30.0, 0.5):
+            temp_mag[0] = sfc_temp_c + delta
+            test_temps = temp_mag * units("degC")
             try:
-                lfc_p, _ = mpcalc.lfc(pressure, temperature, dewpoint)
-                _, cin = mpcalc.surface_based_cape_cin(pressure, temperature, dewpoint)
-                if abs(float(cin.magnitude)) < 10:
-                    conv_temp_c = float(test_temp.to("degC").magnitude)
-                    return conv_temp_c * 9 / 5 + 32  # → °F
+                _, cin = mpcalc.surface_based_cape_cin(pressure, test_temps, dewpoint)
+                cin_val = abs(float(cin.to("J/kg").magnitude))
+                if cin_val < 10.0:
+                    return (sfc_temp_c + delta) * 9.0 / 5.0 + 32.0  # °C → °F
             except Exception:
                 continue
 
-        # Fallback: estimate from surface dewpoint + empirical offset
-        sfc_dew_f = float(sfc_dew.magnitude) * 9 / 5 + 32
-        return sfc_dew_f + 25  # rough empirical estimate
+        # Fallback: dewpoint + empirical offset (~25°F above morning dewpoint)
+        sfc_dew_f = float(dewpoint[0].to("degC").magnitude) * 9.0 / 5.0 + 32.0
+        return sfc_dew_f + 25.0
 
     except Exception as exc:
         logger.warning("Convective temperature calculation failed: %s", exc)
-        sfc_temp_f = float(temperature[0].magnitude) * 9 / 5 + 32
-        return sfc_temp_f + 10.0  # fallback
+        sfc_temp_f = float(temperature[0].magnitude) * 9.0 / 5.0 + 32.0
+        return sfc_temp_f + 10.0
 
 
 def _detect_eml(pressure, temperature, height) -> tuple[Optional[float], Optional[float]]:
