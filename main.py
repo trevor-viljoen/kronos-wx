@@ -286,9 +286,11 @@ def enrich_all(start_year: int, end_year: int, force: bool):
     with SoundingClient() as sc:
         for case in track(to_enrich, description="Enriching cases..."):
             try:
-                profile = sc.get_sounding(OklahomaSoundingStation.OUN, case.date, 12)
+                profile = sc.get_sounding_with_fallback(
+                    OklahomaSoundingStation.OUN, case.date, 12
+                )
                 if profile is None:
-                    logger.debug("No sounding for %s", case.case_id)
+                    logger.debug("No sounding at any station for %s", case.case_id)
                     continue
 
                 db.save_sounding(profile)

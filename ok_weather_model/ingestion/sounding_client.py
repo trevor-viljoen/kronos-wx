@@ -112,13 +112,66 @@ class SoundingClient:
         try:
             html = self._fetch_raw(url)
         except httpx.HTTPStatusError as exc:
-            logger.warning(
-                "HTTP error fetching sounding %s %s %02dZ: %s",
-                station.value, sounding_date, hour, exc
-            )
+            if exc.response.status_code == 404:
+                # 404 = Wyoming has no record for this date/station — expected
+                logger.debug(
+                    "No sounding in archive: %s %s %02dZ",
+                    station.value, sounding_date, hour,
+                )
+            else:
+                logger.warning(
+                    "HTTP %d fetching sounding %s %s %02dZ: %s",
+                    exc.response.status_code, station.value, sounding_date, hour, exc,
+                )
             return None
 
         return parse_wyoming_sounding(html, station, sounding_date, hour)
+
+    def get_sounding_with_fallback(
+        self,
+        preferred_station: OklahomaSoundingStation,
+        sounding_date: date,
+        hour: int,
+        fallback_order: Optional[list[OklahomaSoundingStation]] = None,
+    ) -> Optional[SoundingProfile]:
+        """
+        Try to retrieve a sounding, falling back to adjacent stations if the
+        preferred station has no data on file.
+
+        Oklahoma tornado cases sometimes lack OUN data but have contemporaneous
+        soundings at LMN, DDC, or AMA that are close enough for cap diagnostics.
+
+        Args:
+            preferred_station: Try this station first (usually OUN).
+            fallback_order: Try these stations in order if preferred is missing.
+                            Defaults to [LMN, DDC, AMA].
+
+        Returns:
+            First available SoundingProfile, or None if all stations miss.
+        """
+        if fallback_order is None:
+            fallback_order = [
+                OklahomaSoundingStation.LMN,
+                OklahomaSoundingStation.DDC,
+                OklahomaSoundingStation.AMA,
+            ]
+
+        for station in [preferred_station] + [
+            s for s in fallback_order if s != preferred_station
+        ]:
+            profile = self.get_sounding(station, sounding_date, hour)
+            if profile is not None:
+                if station != preferred_station:
+                    logger.info(
+                        "Used fallback station %s for %s %02dZ (preferred %s missing)",
+                        station.value, sounding_date, hour, preferred_station.value,
+                    )
+                return profile
+
+        logger.debug(
+            "No sounding found at any station for %s %02dZ", sounding_date, hour
+        )
+        return None
 
     def get_sounding_range(
         self,
