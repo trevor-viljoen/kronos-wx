@@ -537,7 +537,7 @@ def analyze_cap_behavior(case_ref: str, forcing_window_hours: int):
         console.print(ces_table)
 
         case.cap_behavior = ces["cap_behavior"]
-        case.cap_erosion_mechanism = ErosionMechanism.SURFACE_HEATING
+        case.cap_erosion_mechanism = ErosionMechanism.HEATING
         if ces["cap_erosion_time"] is not None:
             case.cap_erosion_time = ces["cap_erosion_time"]
         case.convective_temp_gap_12Z = ces["convective_temp_gap_12Z"]
