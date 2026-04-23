@@ -21,6 +21,8 @@ from ..models import (
     CapErosionTrajectory,
     ErosionMechanism,
 )
+from ..models.boundary import BoundaryObservation
+from ..models.kinematic import KinematicProfile
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,11 @@ HEATING_EFFICIENCY = 8.0  # J/kg CIN eroded per °F surface warming per hour
 # Threshold values for forcing classification
 STRONG_FORCING_THRESHOLD = -20.0  # J/kg/hr — strong dynamic forcing
 WEAK_FORCING_THRESHOLD = -5.0     # J/kg/hr — weak forcing
+
+# Boundary convergence scaling: J/kg/hr of CIN erosion per knot of boundary-normal inflow.
+# Calibrated so that a strong dryline case (~30 kt perpendicular LLJ) contributes
+# ~15 J/kg/hr — comparable in magnitude to peak surface heating forcing.
+BOUNDARY_CONVERGENCE_SCALE = 0.5  # J/kg/hr per knot of normal inflow
 
 # CIN thresholds for cap state classification
 STRONG_CAP = 100.0       # J/kg — very strong cap
@@ -43,6 +50,8 @@ def compute_cap_erosion_budget(
     sounding: ThermodynamicIndices,
     mesonet_state: CountySurfaceState,
     era5_fields: Optional[dict] = None,
+    boundary: Optional[BoundaryObservation] = None,
+    kinematics: Optional[KinematicProfile] = None,
 ) -> CapErosionBudget:
     """
     Compute the instantaneous cap erosion budget.
@@ -54,6 +63,8 @@ def compute_cap_erosion_budget(
         sounding: ThermodynamicIndices from nearest sounding (spatial or temporal)
         mesonet_state: CountySurfaceState at the analysis time
         era5_fields: Optional dict from ERA5Client.get_synoptic_analysis()
+        boundary: Optional mesoscale boundary intersecting or approaching the county
+        kinematics: Optional KinematicProfile used to resolve inflow angle vs boundary
 
     Returns:
         CapErosionBudget with all forcing terms populated
@@ -77,9 +88,15 @@ def compute_cap_erosion_budget(
     dynamic_forcing = _estimate_dynamic_forcing(sounding, era5_fields, valid_time)
 
     # ── Boundary forcing ──────────────────────────────────────────────────────
-    # Zero unless a boundary is known to be impinging — set by caller
-    # after boundary analysis
-    boundary_forcing = 0.0
+    # Scaled by the boundary-normal component of low-level inflow.
+    # Zero when no boundary is provided or inflow is parallel to the boundary.
+    if boundary is not None and kinematics is not None:
+        angle_info = compute_boundary_inflow_angle(boundary, kinematics)
+        boundary_forcing = _boundary_forcing_from_normal_inflow(
+            angle_info["normal_inflow_component_kt"]
+        )
+    else:
+        boundary_forcing = 0.0
 
     # ── Lapse rate forcing ────────────────────────────────────────────────────
     # Steepening lapse rates aloft (daytime destabilization) reduce cap
@@ -351,6 +368,121 @@ def compute_heating_rate_needed(
     return heating_rate_needed
 
 
+# ── Boundary-inflow angle ─────────────────────────────────────────────────────
+
+def compute_boundary_inflow_angle(
+    boundary: BoundaryObservation,
+    kinematics: KinematicProfile,
+) -> dict:
+    """
+    Compute the angle between low-level inflow and a mesoscale boundary.
+
+    The boundary-normal inflow component drives convergence along the boundary:
+    maximum when inflow is perpendicular (angle = 90°), zero when parallel.
+
+    Inflow source priority:
+        1. LLJ (850 mb) — best proxy for dryline inflow
+        2. Mean 0–1 km wind from KinematicProfile levels
+        3. Returns zeros if neither is available
+
+    Physics:
+        convergence_efficiency = sin(angle_to_boundary)
+        normal_inflow_component = convergence_efficiency × inflow_speed
+
+    Args:
+        boundary: BoundaryObservation with a valid orientation_angle
+        kinematics: KinematicProfile containing LLJ or wind level data
+
+    Returns dict with keys:
+        boundary_orientation_deg  — strike of boundary (0–180°)
+        inflow_direction_deg      — direction inflow is moving toward (0–360°)
+        inflow_speed_kt           — inflow speed (knots)
+        angle_to_boundary_deg     — angle between inflow and boundary line (0–90°);
+                                    90° = perpendicular = maximum convergence
+        convergence_efficiency    — sin(angle_to_boundary), 0.0–1.0
+        normal_inflow_component_kt — convergence_efficiency × inflow_speed_kt
+        inflow_source             — "LLJ_850mb" | "mean_0_1km" | "none"
+    """
+    import math
+
+    orientation = boundary.orientation_angle
+    if orientation is None:
+        orientation = boundary.compute_orientation_from_polyline()
+
+    # ── Resolve inflow vector ─────────────────────────────────────────────────
+    inflow_speed_kt: float = 0.0
+    inflow_from_deg: float = 0.0
+    inflow_source: str = "none"
+
+    if kinematics.LLJ_speed is not None and kinematics.LLJ_direction is not None:
+        inflow_speed_kt = kinematics.LLJ_speed
+        inflow_from_deg = kinematics.LLJ_direction
+        inflow_source = "LLJ_850mb"
+    elif kinematics.levels:
+        # Fall back to mean wind in the lowest 1 km
+        low_levels = [lv for lv in kinematics.levels if lv.height <= 1000.0]
+        if low_levels:
+            u_mean = sum(lv.u_component for lv in low_levels) / len(low_levels)
+            v_mean = sum(lv.v_component for lv in low_levels) / len(low_levels)
+            speed_ms = math.sqrt(u_mean ** 2 + v_mean ** 2)
+            inflow_speed_kt = speed_ms * 1.94384
+            inflow_from_deg = math.degrees(math.atan2(-u_mean, -v_mean)) % 360
+            inflow_source = "mean_0_1km"
+
+    if inflow_speed_kt == 0.0:
+        return {
+            "boundary_orientation_deg": orientation,
+            "inflow_direction_deg": 0.0,
+            "inflow_speed_kt": 0.0,
+            "angle_to_boundary_deg": 0.0,
+            "convergence_efficiency": 0.0,
+            "normal_inflow_component_kt": 0.0,
+            "inflow_source": inflow_source,
+        }
+
+    # ── Compute angle between inflow and boundary ─────────────────────────────
+    # Convert meteorological FROM direction to the direction the wind moves TOWARD
+    inflow_toward_deg = (inflow_from_deg + 180.0) % 360.0
+
+    # Unit vector for inflow direction (toward)
+    inflow_rad = math.radians(inflow_toward_deg)
+    inflow_u = math.sin(inflow_rad)   # east component
+    inflow_v = math.cos(inflow_rad)   # north component
+
+    # Unit vector along boundary strike direction
+    boundary_rad = math.radians(orientation)
+    boundary_u = math.sin(boundary_rad)
+    boundary_v = math.cos(boundary_rad)
+
+    # |cross product| of two unit 2-D vectors = |sin(angle between them)|
+    # angle_to_boundary = 0° → inflow parallel to boundary (no convergence)
+    # angle_to_boundary = 90° → inflow perpendicular to boundary (max convergence)
+    cross = abs(inflow_u * boundary_v - inflow_v * boundary_u)
+    cross = min(cross, 1.0)  # guard against floating-point overshoot
+    angle_to_boundary_deg = math.degrees(math.asin(cross))
+    convergence_efficiency = cross  # = sin(angle_to_boundary)
+
+    return {
+        "boundary_orientation_deg": orientation,
+        "inflow_direction_deg": inflow_toward_deg,
+        "inflow_speed_kt": inflow_speed_kt,
+        "angle_to_boundary_deg": angle_to_boundary_deg,
+        "convergence_efficiency": convergence_efficiency,
+        "normal_inflow_component_kt": convergence_efficiency * inflow_speed_kt,
+        "inflow_source": inflow_source,
+    }
+
+
+def _boundary_forcing_from_normal_inflow(normal_inflow_kt: float) -> float:
+    """
+    Convert the boundary-normal inflow component to a CIN erosion rate.
+
+    Returns J/kg per hour (negative = eroding the cap).
+    A 30-kt perpendicular inflow → roughly -15 J/kg/hr.
+    """
+    return -1.0 * normal_inflow_kt * BOUNDARY_CONVERGENCE_SCALE
+
+
 # ── Private estimation helpers ────────────────────────────────────────────────
 
 def _heating_amplitude(day_of_year: int) -> float:
@@ -408,27 +540,32 @@ def _estimate_dynamic_forcing(
     valid_time: datetime,
 ) -> float:
     """
-    Estimate dynamic (synoptic-scale lift) forcing contribution to CIN erosion.
+    Estimate dynamic (synoptic-scale) forcing contribution to CIN erosion.
+
+    Prefers the advection-based result from compute_synoptic_cap_forcing()
+    when available (era5_fields["cap_advection"]).  Falls back to a cruder
+    700 mb temperature-anomaly proxy when only get_synoptic_analysis() data
+    is present.
 
     Returns J/kg per hour (negative = eroding).
     """
     if era5_fields is None:
         return 0.0
 
-    # Use 700mb temperature as proxy for synoptic forcing
-    # Warm anomaly at 700mb (warm advection aloft) reduces CIN
+    # ── Preferred: advection-based diagnostics ────────────────────────────────
+    cap_adv = era5_fields.get("cap_advection")
+    if cap_adv is not None:
+        return cap_adv.get("dynamic_cap_forcing_jkg_hr", 0.0)
+
+    # ── Legacy fallback: 700 mb temperature anomaly ───────────────────────────
+    # Warm anomaly at 700 mb relative to -5°C climatology is a crude proxy for
+    # whether synoptic forcing is present; replaced by proper advection above.
     t700 = era5_fields.get("temp_700mb_ok", {})
     mean_t700 = t700.get("mean_c", None)
-
     if mean_t700 is None:
         return 0.0
-
-    # Empirical: every 1°C warmer at 700mb relative to -5°C climatology
-    # contributes ~2 J/kg/hr of dynamic erosion
-    t700_anomaly = mean_t700 - (-5.0)  # positive = warmer than climatology
-    dynamic_forcing = max(-2.0 * t700_anomaly, -30.0)  # cap at -30 J/kg/hr
-
-    return dynamic_forcing
+    t700_anomaly = mean_t700 - (-5.0)
+    return max(-2.0 * t700_anomaly, -30.0)
 
 
 def _estimate_subsidence_forcing(

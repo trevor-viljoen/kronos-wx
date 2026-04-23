@@ -31,8 +31,17 @@ logger = logging.getLogger(__name__)
 # Oklahoma bounding box [N, W, S, E] in ERA5 format [N, W, S, E]
 OK_BBOX = [37.0, -103.0, 33.5, -94.5]
 
-# Standard pressure levels used for upper-air analysis
+# Standard pressure levels used for synoptic analysis (fast, low-volume)
 PRESSURE_LEVELS = ["925", "850", "700", "500", "300", "250"]
+
+# Extended pressure levels for virtual sounding extraction.
+# Provides ≥ 20 levels from near-surface to the upper troposphere — sufficient
+# for MetPy CAPE/CIN computation (which requires ≥ 10 levels).
+SOUNDING_PRESSURE_LEVELS = [
+    "1000", "975", "950", "925", "900", "875", "850", "825", "800",
+    "775", "750", "700", "650", "600", "550", "500", "450", "400",
+    "350", "300", "250", "200",
+]
 
 # ERA5 variable names
 UPPER_AIR_VARS = [

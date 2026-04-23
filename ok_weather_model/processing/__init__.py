@@ -9,6 +9,12 @@ from .cap_calculator import (
     estimate_erosion_trajectory,
     compute_heating_rate_needed,
     compute_ces_from_sounding,
+    compute_boundary_inflow_angle,
+)
+from .era5_diagnostics import (
+    compute_thermal_advection,
+    compute_synoptic_cap_forcing,
+    extract_virtual_sounding,
 )
 
 __all__ = [
@@ -20,4 +26,8 @@ __all__ = [
     "estimate_erosion_trajectory",
     "compute_heating_rate_needed",
     "compute_ces_from_sounding",
+    "compute_boundary_inflow_angle",
+    "compute_thermal_advection",
+    "compute_synoptic_cap_forcing",
+    "extract_virtual_sounding",
 ]

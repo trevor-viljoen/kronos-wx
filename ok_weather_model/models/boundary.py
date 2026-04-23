@@ -7,6 +7,7 @@ Tracking boundary position, motion, and interactions is critical to resolving
 the bust/outbreak problem.
 """
 
+import math
 from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
@@ -32,6 +33,11 @@ class BoundaryObservation(BaseModel):
 
     motion_speed: Optional[float] = None      # mph
     motion_direction: Optional[float] = None  # degrees (meteorological, direction moving toward)
+
+    # Strike direction of the boundary line (0–180°).
+    # 0/180 = N-S oriented, 90 = E-W oriented.
+    # Auto-derived from the polyline if not explicitly provided.
+    orientation_angle: Optional[float] = None
 
     confidence: float = 0.5
     detected_by: str = "manual"  # "mesonet_windshift" | "radar" | "satellite" | "manual"
@@ -68,6 +74,42 @@ class BoundaryObservation(BaseModel):
         if v not in allowed:
             raise ValueError(f"detected_by must be one of {allowed}, got '{v}'")
         return v
+
+    @model_validator(mode="after")
+    def auto_compute_orientation(self) -> "BoundaryObservation":
+        """Derive orientation_angle from the polyline if not explicitly set."""
+        if self.orientation_angle is None and len(self.position_lat) >= 2:
+            self.orientation_angle = self.compute_orientation_from_polyline()
+        return self
+
+    def compute_orientation_from_polyline(self) -> float:
+        """
+        Compute the mean strike direction of the boundary from its polyline.
+
+        Uses the bearing of each consecutive segment, then averages with a
+        circular mean over the doubled angle (to handle the 0°/180° wrap-around
+        for a bidirectional line).
+
+        Returns orientation in degrees on [0, 180):
+            0  = N-S oriented
+            90 = E-W oriented
+        """
+        bearings: list[float] = []
+        for i in range(len(self.position_lat) - 1):
+            dlat = self.position_lat[i + 1] - self.position_lat[i]
+            dlon = self.position_lon[i + 1] - self.position_lon[i]
+            # atan2(dlon, dlat) gives bearing from north, CW positive
+            bearing = math.degrees(math.atan2(dlon, dlat)) % 180
+            bearings.append(bearing)
+
+        if not bearings:
+            return 0.0
+
+        # Circular mean over doubled angles to handle 0/180 wrap-around
+        sin_sum = sum(math.sin(math.radians(2.0 * b)) for b in bearings)
+        cos_sum = sum(math.cos(math.radians(2.0 * b)) for b in bearings)
+        mean_doubled = math.degrees(math.atan2(sin_sum, cos_sum))
+        return (mean_doubled / 2.0) % 180.0
 
 
 class BoundaryInteraction(BaseModel):
