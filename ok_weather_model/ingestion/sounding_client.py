@@ -112,16 +112,19 @@ class SoundingClient:
         try:
             html = self._fetch_raw(url)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                # 404 = Wyoming has no record for this date/station — expected
+            status = exc.response.status_code
+            if status in (400, 404):
+                # Wyoming returns 400 or 404 when it has no record for the
+                # requested date/station — both are expected "data not found"
+                # conditions, not errors worth alerting on.
                 logger.debug(
-                    "No sounding in archive: %s %s %02dZ",
-                    station.value, sounding_date, hour,
+                    "No sounding in archive: %s %s %02dZ (HTTP %d)",
+                    station.value, sounding_date, hour, status,
                 )
             else:
                 logger.warning(
                     "HTTP %d fetching sounding %s %s %02dZ: %s",
-                    exc.response.status_code, station.value, sounding_date, hour, exc,
+                    status, station.value, sounding_date, hour, exc,
                 )
             return None
 
