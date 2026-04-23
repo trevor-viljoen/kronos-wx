@@ -208,3 +208,41 @@ class OklahomaCounty(Enum):
 
     def __str__(self) -> str:
         return self.name
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type, handler):
+        """
+        Pydantic v2 schema: serialize as the enum name (string) and accept
+        name strings or list/tuple values on deserialization.
+
+        JSON serialization stores e.g. "CLEVELAND" instead of the raw tuple,
+        which round-trips cleanly across JSON with no ambiguity.
+        """
+        from pydantic_core import core_schema
+
+        def _validate(value):
+            if isinstance(value, cls):
+                return value
+            if isinstance(value, str):
+                try:
+                    return cls[value]           # name lookup: "CLEVELAND"
+                except KeyError:
+                    pass
+                # Legacy: value as county_seat string
+                for m in cls:
+                    if m.county_seat == value:
+                        return m
+            if isinstance(value, (list, tuple)):
+                tup = tuple(value)
+                for m in cls:
+                    if m.value == tup:
+                        return m
+            raise ValueError(f"Cannot convert {value!r} to OklahomaCounty")
+
+        return core_schema.no_info_plain_validator_function(
+            _validate,
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda v: v.name,
+                info_arg=False,
+            ),
+        )
