@@ -12,9 +12,12 @@ Algorithm
 ---------
 1. Collect all valid Mesonet observations within ±7 min of valid_time.
 2. Bin stations into three latitude bands (south/central/north).
-3. Within each band, sort stations W→E by longitude and find the consecutive
-   pair with the maximum Td drop per degree of longitude that also clears the
-   minimum absolute-drop threshold.
+3. Within each band, walk stations W→E to find the eastern edge of the
+   CONTIGUOUS dry sector (Td ≤ DRY_SECTOR_TD_MAX_F). The first moist station
+   breaks the run — rain-cooled outflow or storm pockets east of the moist
+   sector are naturally ignored because moist-sector air separates them from
+   the genuine dry sector. Pair the dry edge with the nearest moist station
+   to its east that clears the gradient thresholds.
 4. The dryline longitude in that band = midpoint of the max-gradient pair.
 5. Build a polyline through the detected lat/lon points (S→N).
 6. Confidence = blend of gradient sharpness and band coverage.
@@ -43,6 +46,16 @@ MIN_TD_ABSOLUTE_DROP_F: float = 10.0
 
 # A gradient this strong (°F/deg lon) is assigned confidence = 1.0 from gradient alone
 STRONG_GRADIENT_F_PER_DEG: float = 20.0
+
+# The western station of a candidate pair must be in the dry sector (Td below this).
+# Outflow boundaries occur in the moist sector — both stations have high dewpoints.
+# Rain-cooled outflow can push Td to 45–52°F but not into genuine dry-sector range.
+# Classic OK dry-sector dewpoints: 20–45°F.
+DRY_SECTOR_TD_MAX_F: float = 45.0
+
+# Max station-pair separation to consider (degrees longitude).
+# Allows skipping one station that has missing/bad data.
+MAX_PAIR_DLON: float = 2.5
 
 # Observation matching window (seconds)
 _OBS_WINDOW_S: float = 7 * 60
@@ -77,10 +90,20 @@ def _max_gradient_pair(
     stations: list[tuple[float, float, float]],  # (lon, lat, td_F)
 ) -> Optional[tuple[float, float]]:
     """
-    Find the consecutive W→E pair with the steepest Td gradient.
+    Locate the dryline as the eastern edge of the contiguous dry sector.
 
-    Returns (midpoint_lon, gradient_F_per_deg) or None if no pair clears
-    both the absolute-drop and gradient-per-degree thresholds.
+    Algorithm:
+      1. Sort stations W→E and walk east until the first station whose Td
+         exceeds DRY_SECTOR_TD_MAX_F, marking the dry sector's eastern edge.
+         This is the key physical constraint: a rain-cooled storm pocket east
+         of the moist sector is ignored because moist-sector air between it
+         and the genuine dry sector breaks the contiguous run.
+      2. Pair the dry-edge station with the nearest eastern station (within
+         MAX_PAIR_DLON) that produces a gradient ≥ MIN_TD_GRADIENT_F_PER_DEG
+         and an absolute Td jump ≥ MIN_TD_ABSOLUTE_DROP_F.
+
+    Returns (midpoint_lon, gradient_F_per_deg) or None if no dry sector or
+    no valid moist-sector station can be paired with it.
     """
     if len(stations) < 2:
         return None
@@ -88,21 +111,33 @@ def _max_gradient_pair(
     # Sort W→E; Oklahoma lons are negative so ascending sort = W→E
     srt = sorted(stations, key=lambda s: s[0])
 
+    # ── Step 1: find the eastern edge of the contiguous dry sector ────────────
+    dry_edge_idx: Optional[int] = None
+    for i, (lon, _lat, td) in enumerate(srt):
+        if td <= DRY_SECTOR_TD_MAX_F:
+            dry_edge_idx = i
+        else:
+            break   # first moist station ends the contiguous run
+
+    if dry_edge_idx is None:
+        return None  # no dry sector in this band
+
+    lon_w, _, td_w = srt[dry_edge_idx]
+
+    # ── Step 2: find the best moist-sector pairing station ────────────────────
     best_gradient = 0.0
     best_lon: Optional[float] = None
 
-    for i in range(len(srt) - 1):
-        lon_w, _lat_w, td_w = srt[i]
-        lon_e, _lat_e, td_e = srt[i + 1]
-
+    for j in range(dry_edge_idx + 1, len(srt)):
+        lon_e, _, td_e = srt[j]
         dlon = abs(lon_e - lon_w)
-        if dlon < 0.1:          # stations too close — skip
+        if dlon > MAX_PAIR_DLON:
+            break
+        if dlon < 0.1:
             continue
-
-        dtd = td_e - td_w       # positive = moist to the east (classic dryline)
+        dtd = td_e - td_w
         if dtd < MIN_TD_ABSOLUTE_DROP_F:
             continue
-
         gradient = dtd / dlon
         if gradient > best_gradient:
             best_gradient = gradient

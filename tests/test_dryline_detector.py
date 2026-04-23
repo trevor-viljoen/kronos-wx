@@ -104,6 +104,34 @@ class TestDetectDryline:
         # Confidence should be reasonable with a strong gradient
         assert boundary.confidence > 0.3
 
+    def test_no_dryline_outflow_boundary_in_moist_sector(self):
+        """
+        Outflow boundary: sharp Td drop between two moist-sector stations.
+        Both stations have Td well above DRY_SECTOR_TD_MAX_F, so no dryline.
+
+        This was the real-world bug: a storm outflow near Okemah (eastern OK)
+        produced a sharper per-degree gradient than the actual dryline near
+        Weatherford in western OK, causing a false detection ~200 miles east.
+        """
+        series = _station_series([
+            # Western OK — actual dry sector near Weatherford
+            (OklahomaCounty.ROGER_MILLS, 28.0, 265.0),  # lon≈-100.0, dry
+            (OklahomaCounty.CUSTER,      32.0, 255.0),  # lon≈-99.0,  dry
+            (OklahomaCounty.CANADIAN,    62.0, 175.0),  # lon≈-97.9,  moist
+            # Eastern OK — sharp outflow gradient entirely in the moist sector
+            (OklahomaCounty.LINCOLN,     64.0, 170.0),  # lon≈-96.9,  moist
+            (OklahomaCounty.OKFUSKEE,    44.0, 220.0),  # lon≈-96.3,  post-outflow (cool, lower Td)
+            (OklahomaCounty.MUSKOGEE,    65.0, 165.0),  # lon≈-95.4,  moist again
+        ])
+        boundary = detect_dryline(series, _VT)
+        assert boundary is not None, "Should detect the dryline in western OK"
+        mean_lon = sum(boundary.position_lon) / len(boundary.position_lon)
+        # Must be in western OK (between CUSTER and CANADIAN), not near Okemah
+        assert mean_lon < -97.5, (
+            f"Dryline lon {mean_lon:.1f}°W detected in moist sector — "
+            "outflow boundary filter not working"
+        )
+
     def test_no_dryline_uniform_dewpoints(self):
         """Uniform Td across all stations — no dryline should be detected."""
         series = _station_series([
