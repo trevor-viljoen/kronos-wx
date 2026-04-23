@@ -428,39 +428,123 @@ def analyze_cap_behavior(case_ref: str, forcing_window_hours: int):
         case_date.year, case_date.month, case_date.day, 12, 0, tzinfo=timezone.utc
     ) + timedelta(hours=forcing_window_hours)
 
-    # Build budgets for OUN county (Cleveland Co.) using available data
+    # Build budgets for OUN county (Cleveland Co.) using available data.
+    # First try pre-stored Mesonet data; if absent, fetch live from the API
+    # and cache it so subsequent runs are fast.
     budgets: list[CapErosionBudget] = []
     county = OklahomaCounty.CLEVELAND
 
-    for label, hour in [("12Z", 12), ("15Z", 15), ("18Z", 18), ("21Z", 21)]:
-        valid_time = datetime(
-            case_date.year, case_date.month, case_date.day, hour, 0,
-            tzinfo=timezone.utc
-        )
+    from ok_weather_model.ingestion import MesonetClient
 
-        mesonet_ts = db.load_mesonet_timeseries(
-            county,
-            valid_time - timedelta(minutes=15),
-            valid_time + timedelta(minutes=15),
-        )
-        if mesonet_ts is None or not mesonet_ts.observations:
-            continue
+    # Check whether any Mesonet data is already stored for this case
+    _probe_time = datetime(case_date.year, case_date.month, case_date.day, 18, 0, tzinfo=timezone.utc)
+    _probe = db.load_mesonet_timeseries(county, _probe_time - timedelta(minutes=15), _probe_time + timedelta(minutes=15))
+    mesonet_in_db = _probe is not None and bool(_probe.observations)
 
-        from ok_weather_model.ingestion import MesonetClient
-        with MesonetClient() as mc:
-            surface_state = mc.compute_county_surface_state(county, valid_time, [mesonet_ts])
-
-        if surface_state is None:
-            continue
-
+    live_station_data: dict = {}
+    if not mesonet_in_db:
+        console.print("[yellow]No Mesonet data in database — fetching live from API...[/yellow]")
         try:
-            budget = compute_cap_erosion_budget(case.sounding_12Z, surface_state)
-            budgets.append(budget)
+            with MesonetClient() as mc:
+                live_station_data = mc.get_historical_case_data(case_date)
+            if live_station_data:
+                for ts in live_station_data.values():
+                    db.save_mesonet_timeseries(ts)
+                case.mesonet_data_available = True
+                console.print(f"[green]Fetched and cached Mesonet data ({len(live_station_data)} stations)[/green]")
+            else:
+                console.print("[yellow]Mesonet API returned no data for this date[/yellow]")
         except Exception as exc:
-            logger.warning("Budget computation failed at %s: %s", label, exc)
+            console.print(f"[yellow]Live Mesonet fetch failed: {exc}[/yellow]")
+            logger.warning("Live Mesonet fetch failed for %s: %s", case_id, exc)
+
+    with MesonetClient() as mc:
+        for label, hour in [("12Z", 12), ("15Z", 15), ("18Z", 18), ("21Z", 21)]:
+            valid_time = datetime(
+                case_date.year, case_date.month, case_date.day, hour, 0,
+                tzinfo=timezone.utc
+            )
+
+            # Prefer DB; fall back to the live data we just fetched
+            mesonet_ts = db.load_mesonet_timeseries(
+                county,
+                valid_time - timedelta(minutes=15),
+                valid_time + timedelta(minutes=15),
+            )
+
+            if (mesonet_ts is None or not mesonet_ts.observations) and live_station_data:
+                county_series = [ts for ts in live_station_data.values() if ts.county == county]
+                surface_state = mc.compute_county_surface_state(county, valid_time, county_series)
+            elif mesonet_ts is not None and mesonet_ts.observations:
+                surface_state = mc.compute_county_surface_state(county, valid_time, [mesonet_ts])
+            else:
+                surface_state = None
+
+            if surface_state is None:
+                logger.debug("No surface state at %s for %s", label, case_id)
+                continue
+
+            try:
+                budget = compute_cap_erosion_budget(case.sounding_12Z, surface_state)
+                budgets.append(budget)
+            except Exception as exc:
+                logger.warning("Budget computation failed at %s: %s", label, exc)
 
     if not budgets:
-        console.print("[red]No valid budget snapshots — check Mesonet data availability[/red]")
+        console.print(
+            "[yellow]No Mesonet surface data available — running CES sounding-only analysis[/yellow]"
+        )
+        from ok_weather_model.processing.cap_calculator import compute_ces_from_sounding
+        from ok_weather_model.models.enums import ErosionMechanism
+
+        valid_time_12z = datetime(
+            case_date.year, case_date.month, case_date.day, 12, 0, tzinfo=timezone.utc
+        )
+        sounding_raw = db.load_sounding(OklahomaSoundingStation.OUN, valid_time_12z)
+        surface_temp_c = (
+            sounding_raw.levels[0].temperature
+            if sounding_raw and sounding_raw.levels
+            else None
+        )
+
+        if case.sounding_12Z is None or surface_temp_c is None:
+            console.print(
+                "[red]No 12Z sounding data available — cannot compute CES. "
+                "Run enrich-case first.[/red]"
+            )
+            return
+
+        ces = compute_ces_from_sounding(case.sounding_12Z, surface_temp_c, case_date)
+
+        ces_table = Table(title=f"CES Sounding-Only Analysis — {case_id}", show_lines=True)
+        ces_table.add_column("Metric", style="cyan")
+        ces_table.add_column("Value", style="green")
+        ces_table.add_row("Event Class", case.event_class.value)
+        ces_table.add_row("Cap Behavior", ces["cap_behavior"].value if ces["cap_behavior"] else "—")
+        ces_table.add_row("12Z MLCAPE", f"{case.sounding_12Z.MLCAPE:.0f} J/kg")
+        ces_table.add_row("12Z MLCIN", f"{case.sounding_12Z.MLCIN:.0f} J/kg")
+        ces_table.add_row("12Z Cap Strength", f"{case.sounding_12Z.cap_strength:.1f}°C")
+        ces_table.add_row(
+            "Projected Erosion",
+            ces["cap_erosion_time"].strftime("%H:%M UTC") if ces["cap_erosion_time"] else "No erosion"
+        )
+        if ces["convective_temp_gap_12Z"] is not None:
+            ces_table.add_row("12Z Tc Gap", f"{ces['convective_temp_gap_12Z']:+.1f}°F")
+        if ces["convective_temp_gap_15Z"] is not None:
+            ces_table.add_row("15Z Tc Gap", f"{ces['convective_temp_gap_15Z']:+.1f}°F")
+        if ces["convective_temp_gap_18Z"] is not None:
+            ces_table.add_row("18Z Tc Gap", f"{ces['convective_temp_gap_18Z']:+.1f}°F")
+        console.print(ces_table)
+
+        case.cap_behavior = ces["cap_behavior"]
+        case.cap_erosion_mechanism = ErosionMechanism.SURFACE_HEATING
+        if ces["cap_erosion_time"] is not None:
+            case.cap_erosion_time = ces["cap_erosion_time"]
+        case.convective_temp_gap_12Z = ces["convective_temp_gap_12Z"]
+        case.convective_temp_gap_15Z = ces["convective_temp_gap_15Z"]
+        case.convective_temp_gap_18Z = ces["convective_temp_gap_18Z"]
+        case.recompute_completeness()
+        db.save_case(case)
         return
 
     trajectory = estimate_erosion_trajectory(budgets, forcing_window_close)
