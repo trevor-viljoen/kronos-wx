@@ -28,8 +28,10 @@ logger = logging.getLogger(__name__)
 _MD_INDEX_URL = "https://www.spc.noaa.gov/products/md/"
 _MD_BASE_URL  = "https://www.spc.noaa.gov"
 
-_D1_CAT_URL  = "https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson"
-_D1_TORN_URL = "https://www.spc.noaa.gov/products/outlook/day1otlk_torn.nolyr.geojson"
+_D1_CAT_URL   = "https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson"
+_D1_TORN_URL  = "https://www.spc.noaa.gov/products/outlook/day1otlk_torn.nolyr.geojson"
+_NWS_ALERT_URL = "https://api.weather.gov/alerts/active?area=OK"
+_NWS_UA        = "kronos-wx/0.1 trevor.viljoen@gmail.com"
 
 # Oklahoma bounding box for outlook intersection check (rough)
 _OK_LAT_MIN, _OK_LAT_MAX = 33.5, 37.0
@@ -46,6 +48,34 @@ _OK_TERMS = frozenset({
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
+
+@dataclass
+class NWSAlert:
+    """
+    One active NWS alert product for Oklahoma.
+
+    Priority order for display (highest first):
+        Tornado Warning > Tornado Watch > Severe Thunderstorm Warning > other
+    """
+    event:        str             # e.g. "Tornado Watch"
+    headline:     str
+    expires_utc:  Optional[datetime]
+    area_desc:    str             # comma-separated county names
+    watch_number: Optional[int] = None  # parsed from headline for watches
+
+    @property
+    def priority(self) -> int:
+        if "Tornado Warning" in self.event:    return 4
+        if "Tornado Watch"   in self.event:    return 3
+        if "Severe Thunderstorm Warning" in self.event: return 2
+        return 1
+
+    @property
+    def expires_label(self) -> str:
+        if self.expires_utc is None:
+            return ""
+        return self.expires_utc.strftime("%H:%MZ")
+
 
 @dataclass
 class MesoscaleDiscussion:
@@ -92,6 +122,86 @@ def fetch_active_mds(timeout: float = 12.0) -> list[MesoscaleDiscussion]:
     except Exception as exc:
         logger.warning("SPC MD fetch failed: %s", exc)
         return []
+
+
+def fetch_active_watches_warnings(timeout: float = 12.0) -> list[NWSAlert]:
+    """
+    Fetch active NWS watch and warning products for Oklahoma via the NWS API.
+
+    Returns Tornado Warnings, Tornado Watches, and Severe Thunderstorm
+    Warnings sorted by priority (highest first), then by expiry.
+    Returns [] on network error.
+    """
+    _WANTED = frozenset({
+        "Tornado Warning",
+        "Tornado Watch",
+        "Severe Thunderstorm Warning",
+    })
+
+    try:
+        with httpx.Client(
+            timeout=timeout,
+            follow_redirects=True,
+            headers={"User-Agent": _NWS_UA},
+        ) as client:
+            resp = client.get(_NWS_ALERT_URL)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.warning("NWS alerts fetch failed: %s", exc)
+        return []
+
+    now_utc = datetime.now(tz=timezone.utc)
+    alerts: list[NWSAlert] = []
+
+    for feature in data.get("features", []):
+        props = feature.get("properties", {})
+        event = props.get("event", "")
+        if event not in _WANTED:
+            continue
+
+        # Parse expiry
+        expires_utc: Optional[datetime] = None
+        raw_exp = props.get("expires") or props.get("ends")
+        if raw_exp:
+            try:
+                expires_utc = datetime.fromisoformat(raw_exp).astimezone(timezone.utc)
+            except ValueError:
+                pass
+
+        # Skip already-expired products
+        if expires_utc and expires_utc < now_utc:
+            continue
+
+        headline  = props.get("headline", "")
+        area_desc = props.get("areaDesc", "")
+
+        # Extract watch number from headline ("Tornado Watch Number 141")
+        watch_number: Optional[int] = None
+        m = re.search(r"Watch\s+(?:Number\s+)?(\d+)", headline, re.IGNORECASE)
+        if m:
+            watch_number = int(m.group(1))
+
+        alerts.append(NWSAlert(
+            event=event,
+            headline=headline,
+            expires_utc=expires_utc,
+            area_desc=area_desc,
+            watch_number=watch_number,
+        ))
+
+    # Deduplicate watches by number (multiple WFOs issue the same watch)
+    seen_watch_nums: set[int] = set()
+    deduped: list[NWSAlert] = []
+    for a in alerts:
+        if a.watch_number is not None:
+            if a.watch_number in seen_watch_nums:
+                continue
+            seen_watch_nums.add(a.watch_number)
+        deduped.append(a)
+
+    deduped.sort(key=lambda a: (-a.priority, a.expires_utc or now_utc))
+    return deduped
 
 
 def fetch_spc_outlook(timeout: float = 12.0) -> Optional[SPCOutlook]:

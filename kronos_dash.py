@@ -14,6 +14,7 @@ Run via:  python main.py dashboard
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -32,8 +33,10 @@ from ok_weather_model.ingestion import SoundingClient, MesonetClient, HRRRClient
 from ok_weather_model.ingestion.spc_products import (
     fetch_active_mds,
     fetch_spc_outlook,
+    fetch_active_watches_warnings,
     MesoscaleDiscussion,
     SPCOutlook,
+    NWSAlert,
 )
 from ok_weather_model.models import OklahomaSoundingStation, OklahomaCounty
 from ok_weather_model.models.mesonet import MesonetTimeSeries as _MTS
@@ -279,6 +282,18 @@ class TendencyPanel(Static):
         self.update("\n".join(lines))
 
 
+def _abbrev_counties(area_desc: str, max_counties: int = 8) -> str:
+    """Shorten a comma-separated county list for one-line display."""
+    parts = [p.strip().replace(", OK", "").replace(", ok", "")
+             for p in area_desc.replace(";", ",").split(",") if p.strip()]
+    # Strip state suffixes like "Hughes, OK" -> "Hughes"
+    clean = [re.sub(r",?\s*[A-Z]{2}$", "", p).strip() for p in parts]
+    clean = [c for c in clean if c]
+    if len(clean) <= max_counties:
+        return ", ".join(clean)
+    return ", ".join(clean[:max_counties]) + f" +{len(clean) - max_counties}"
+
+
 class SPCProductsPanel(Static):
     DEFAULT_CSS = """
     SPCProductsPanel {
@@ -301,8 +316,15 @@ class SPCProductsPanel(Static):
         "NONE":  "dim",
     }
 
+    _WARN_COLOR = {
+        "Tornado Warning":             "bright_red",
+        "Tornado Watch":               "red",
+        "Severe Thunderstorm Warning": "yellow",
+    }
+
     def render_spc(
         self,
+        alerts: list[NWSAlert],
         mds: list[MesoscaleDiscussion],
         outlook: Optional[SPCOutlook],
         fetch_label: str,
@@ -323,17 +345,41 @@ class SPCProductsPanel(Static):
         else:
             lines.append("[dim]D1 Outlook: unavailable[/dim]")
 
-        lines.append("")
+        # ── Active watches and warnings ───────────────────────────────────────
+        tor_warnings  = [a for a in alerts if "Tornado Warning"             in a.event]
+        tor_watches   = [a for a in alerts if "Tornado Watch"               in a.event]
+        tstm_warnings = [a for a in alerts if "Severe Thunderstorm Warning" in a.event]
+
+        if tor_warnings or tor_watches or tstm_warnings:
+            lines.append("")
+            for a in tor_warnings:
+                counties = a.area_desc.replace(", OK", "").replace(", ok", "")
+                lines.append(
+                    f"[bold bright_red]TORNADO WARNING[/bold bright_red]"
+                    f"  {counties}  exp {a.expires_label}"
+                )
+            for a in tor_watches:
+                num_str  = f" #{a.watch_number}" if a.watch_number else ""
+                # Abbreviate county list for display
+                counties = _abbrev_counties(a.area_desc, max_counties=8)
+                lines.append(
+                    f"[bold red]TORNADO WATCH{num_str}[/bold red]"
+                    f"  {counties}  exp {a.expires_label}"
+                )
+            if tstm_warnings:
+                counties = _abbrev_counties(
+                    "; ".join(a.area_desc for a in tstm_warnings), max_counties=6
+                )
+                lines.append(
+                    f"[yellow]{len(tstm_warnings)} SVR TSTM WARNING{'S' if len(tstm_warnings)>1 else ''}[/yellow]"
+                    f"  {counties}"
+                )
 
         # ── Active Mesoscale Discussions ──────────────────────────────────────
-        if not mds:
-            lines.append("[dim]No active SPC Mesoscale Discussions for Oklahoma[/dim]")
-        else:
+        if mds:
+            lines.append("")
             for md in mds:
-                ok_tag = " [cyan](OK)[/cyan]" if md.mentions_oklahoma else ""
-                lines.append(
-                    f"[bold]MD #{md.number:04d}[/bold]{ok_tag}"
-                )
+                lines.append(f"[bold]MD #{md.number:04d}[/bold]")
                 if md.areas_affected:
                     lines.append(f"  [dim]Areas:[/dim] {md.areas_affected}")
                 if md.concerning:
@@ -341,7 +387,9 @@ class SPCProductsPanel(Static):
                 for body_line in md.body_lines[:3]:
                     lines.append(f"  {body_line}")
                 lines.append(f"  [dim]{md.url}[/dim]")
-                lines.append("")
+
+        if not tor_warnings and not tor_watches and not tstm_warnings and not mds:
+            lines.append("\n[dim]No active watches, warnings, or MDs for Oklahoma[/dim]")
 
         self.update("\n".join(lines))
 
@@ -437,6 +485,7 @@ class KronosDashboard(App):
         self._prev_dryline_lon:  Optional[float] = None
 
         # SPC products
+        self._spc_alerts:  list = []
         self._spc_mds:     list = []
         self._spc_outlook: Optional[SPCOutlook] = None
         self._spc_label:   str = "—"
@@ -759,24 +808,43 @@ class KronosDashboard(App):
 
     @work(thread=True, exclusive=True, group="spc")
     def _do_spc(self) -> None:
+        alerts  = fetch_active_watches_warnings()
         mds     = fetch_active_mds()
         outlook = fetch_spc_outlook()
         label   = datetime.now(tz=timezone.utc).strftime("%H:%MZ")
-        self.call_from_thread(self._update_spc, mds, outlook, label)
+        self.call_from_thread(self._update_spc, alerts, mds, outlook, label)
 
     def _update_spc(
         self,
+        alerts: list,
         mds: list,
         outlook: Optional[SPCOutlook],
         label: str,
     ) -> None:
         alert_log = self.query_one(AlertLog)
 
+        # Alert on new tornado warnings/watches
+        prev_events = {(a.event, a.watch_number) for a in self._spc_alerts}
+        for a in alerts:
+            key = (a.event, a.watch_number)
+            if key not in prev_events:
+                if "Tornado Warning" in a.event:
+                    counties = _abbrev_counties(a.area_desc, max_counties=4)
+                    alert_log.add_alert(
+                        f"[bold bright_red]TORNADO WARNING[/bold bright_red]  "
+                        f"{counties}  exp {a.expires_label}"
+                    )
+                elif "Tornado Watch" in a.event:
+                    num_str = f" #{a.watch_number}" if a.watch_number else ""
+                    alert_log.add_alert(
+                        f"[bold red]TORNADO WATCH{num_str} issued[/bold red]  "
+                        f"exp {a.expires_label}"
+                    )
+
         # Alert on new Oklahoma-relevant MD
-        new_ok_nums = {md.number for md in mds if md.mentions_oklahoma}
-        old_ok_nums = {md.number for md in self._spc_mds if md.mentions_oklahoma}
+        old_md_nums = {md.number for md in self._spc_mds}
         for md in mds:
-            if md.mentions_oklahoma and md.number not in old_ok_nums:
+            if md.number not in old_md_nums:
                 alert_log.add_alert(
                     f"[bold yellow]SPC MD #{md.number:04d}[/bold yellow]  "
                     f"{md.concerning or md.areas_affected or 'active'}"
@@ -798,7 +866,8 @@ class KronosDashboard(App):
                     "[bold bright_red]SPC D1: significant tornado hatch added over Oklahoma[/bold bright_red]"
                 )
 
+        self._spc_alerts  = alerts
         self._spc_mds     = mds
         self._spc_outlook = outlook
         self._spc_label   = label
-        self.query_one(SPCProductsPanel).render_spc(mds, outlook, label)
+        self.query_one(SPCProductsPanel).render_spc(alerts, mds, outlook, label)
