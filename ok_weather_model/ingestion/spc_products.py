@@ -259,7 +259,9 @@ def _fetch_outlook_with_client(client: httpx.Client) -> Optional[SPCOutlook]:
 
     for feature in cat_data.get("features", []):
         props = feature.get("properties", {})
-        label = (props.get("LABEL2") or props.get("LABEL") or "").upper().strip()
+        # LABEL has the short code (TSTM/MRGL/SLGT/ENH/MDT/HIGH);
+        # LABEL2 is the long description ("Marginal Risk") — do not use for ranking
+        label = (props.get("LABEL") or "").upper().strip()
         if not label:
             continue
         # Check if any polygon vertex is inside OK bounding box (fast proxy)
@@ -276,16 +278,16 @@ def _fetch_outlook_with_client(client: httpx.Client) -> Optional[SPCOutlook]:
         torn_data = torn_resp.json()
         for feature in torn_data.get("features", []):
             props = feature.get("properties", {})
-            label = (props.get("LABEL2") or props.get("LABEL") or "").strip()
+            label = (props.get("LABEL") or "").strip()
             if not label:
                 continue
             try:
-                prob = float(label.replace("%", "").strip()) / 100.0
+                raw = float(label.replace("%", "").strip())
+                # LABEL is already a decimal (0.02, 0.05 …); only divide if
+                # it looks like a whole-number percentage (e.g. "5", "15")
+                prob = raw / 100.0 if raw > 1.0 else raw
             except ValueError:
-                try:
-                    prob = float(label)
-                except ValueError:
-                    continue
+                continue
             if _geojson_intersects_ok(feature.get("geometry", {})) and (
                 max_torn_prob is None or prob > max_torn_prob
             ):
