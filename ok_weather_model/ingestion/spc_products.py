@@ -38,9 +38,10 @@ _OK_LON_MIN, _OK_LON_MAX = -103.0, -94.5
 # ── Oklahoma mention terms ────────────────────────────────────────────────────
 # Lowercase; checked against full MD text.
 _OK_TERMS = frozenset({
-    "oklahoma", " ok ", "okla", "oun", "lmn",
-    "norman", "tulsa", "oklahoma city", "enid", "lawton",
-    "central ok", "northern ok", "southern ok", "western ok",
+    "oklahoma",
+    "central ok", "northern ok", "southern ok", "western ok", "eastern ok",
+    "south-central ok", "north-central ok",
+    "tulsa", "oklahoma city", "enid", "lawton", "norman",
 })
 
 
@@ -216,8 +217,13 @@ def _fetch_single_md(
         if past_valid and len(body_lines) < 6:
             body_lines.append(line)
 
-    full_lower = raw.lower()
-    mentions_ok = any(term in full_lower for term in _OK_TERMS)
+    # Check only the content fields — not the raw text, which always contains
+    # "NWS Storm Prediction Center Norman OK" in the header, causing every MD
+    # to match regardless of the actual affected area.
+    content_lower = " ".join(
+        [areas_affected, concerning] + body_lines
+    ).lower()
+    mentions_ok = any(term in content_lower for term in _OK_TERMS)
 
     return MesoscaleDiscussion(
         number=number,
