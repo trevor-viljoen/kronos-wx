@@ -107,6 +107,19 @@ scene.add_boundary(dryline)
 scene.save("cap_analysis.html")  # self-contained HTML, no server needed
 ```
 
+## Development Workflow
+
+After completing any feature or fix:
+
+1. **Verify** — run the affected CLI command or test to confirm the change works end-to-end. For pipeline changes, prefer a real data smoke-test over a unit test alone.
+2. **Commit** — one focused commit per logical change; message explains *why*, not just *what*.
+3. **Push** — `git push` after every commit unless the user says otherwise.
+4. **Close GitHub issues** — if the work closes an open issue, close it with `gh issue close <N> --comment "..."`. Do this every session.
+5. **Update CLAUDE.md** — if new CLI commands, architectural patterns, or domain concepts were added, update the relevant section immediately. Don't defer.
+6. **Open new GitHub issues** for work that was discovered but not done in the current session. Use `gh issue create --title "..." --body "..." --label enhancement` so nothing falls through the cracks.
+
+The GitHub issue list (trevor-viljoen/kronos-wx) is the canonical backlog. Keep it current. When starting a session, check open issues to orient on priorities.
+
 ## Configuration
 
 Copy `.env.example` to `.env`. ERA5 data requires a Copernicus CDS account and `CDS_API_KEY` in `.env` (format: `<UID>:<API-KEY>`). Wyoming sounding and Mesonet clients work without API keys but respect rate limits (`WYOMING_REQUEST_DELAY=2.0s`, `MESONET_REQUEST_DELAY=1.1s`).
