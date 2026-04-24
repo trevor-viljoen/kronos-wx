@@ -1793,6 +1793,7 @@ def watch_now(interval: int, min_tier: str, station: str):
     prev_county_tiers: dict = {}
     prev_hrrr_valid:   datetime | None = None
     prev_trend: str = "steady"
+    prev_dryline_lon:  float | None = None   # last known dryline center longitude
     cycle = 0
 
     def _classify_trend(tend_counties) -> str:
@@ -1816,9 +1817,15 @@ def watch_now(interval: int, min_tier: str, station: str):
     def _fetch_cycle() -> tuple:
         """
         Returns (hrrr_snap, hrrr_valid, baseline_snap, baseline_valid,
-                 risk_zones, baseline_risk_zones, tend_counties, sounding_hour)
+                 risk_zones, baseline_risk_zones, tend_counties, sounding_hour,
+                 current_dryline, prev_dryline, surface_temp_c)
         or None on hard failure.
         """
+        from ok_weather_model.ingestion import MesonetClient
+        from ok_weather_model.models import OklahomaCounty
+        from ok_weather_model.models.mesonet import MesonetTimeSeries as _MTS
+        from ok_weather_model.processing import detect_dryline, compute_dryline_surge_rate
+
         now_utc = datetime.now(tz=timezone.utc)
         today   = now_utc.date()
 
@@ -1836,10 +1843,59 @@ def watch_now(interval: int, min_tier: str, station: str):
         if profile is None:
             return None
 
+        # Mesonet: current snapshot + one from ~1 hr ago for dryline surge rate
+        # and surface temp (CES Tc-gap update). Each fetch tries up to 4 earlier
+        # 5-min boundaries to handle archive lag.
+        station_series: dict[str, _MTS] = {}
+        snap_times: list[datetime] = []
+        with MesonetClient() as mc:
+            for hrs_back in (0, 1):
+                target = now_utc - timedelta(hours=hrs_back)
+                for lb in range(4):
+                    snap_time = target - timedelta(minutes=5 * lb)
+                    try:
+                        obs = mc.get_snapshot_observations(snap_time)
+                    except Exception:
+                        continue
+                    for o in obs:
+                        stid = o.station_id
+                        if stid not in station_series:
+                            station_series[stid] = _MTS(
+                                station_id=stid, county=o.county,
+                                start_time=snap_time, end_time=snap_time,
+                                observations=[],
+                            )
+                        station_series[stid].observations.append(o)
+                        station_series[stid].end_time = max(
+                            station_series[stid].end_time, snap_time
+                        )
+                    snap_times.append(snap_time)
+                    break  # got this hour's snapshot
+
+        # Dryline detection
+        current_dryline = prev_dryline = None
+        if len(snap_times) >= 1:
+            current_dryline = detect_dryline(station_series, snap_times[0])
+        if len(snap_times) >= 2:
+            prev_dryline = detect_dryline(station_series, snap_times[-1])
+
+        # Surface temp for CES (nearest Cleveland county obs to now)
+        surface_temp_c = profile.levels[0].temperature if profile.levels else None
+        if snap_times:
+            current_snap_t = snap_times[0]
+            for ts in station_series.values():
+                if ts.county == OklahomaCounty.CLEVELAND:
+                    for o in ts.observations:
+                        if abs((o.valid_time - current_snap_t).total_seconds()) <= 420:
+                            surface_temp_c = (o.temperature - 32) * 5 / 9
+                            break
+                    break
+
         # HRRR: baseline at sounding hour + current most-recent
         base_vt = datetime(today.year, today.month, today.day,
                            fetched_hour, 0, tzinfo=timezone.utc)
-        hrrr_baseline = hrrr_valid = curr_snap = curr_valid = None
+        hrrr_baseline = curr_snap = curr_valid = None
+        base_valid = None
         with HRRRClient() as hc:
             hrrr_baseline = hc.get_county_snapshot(base_vt)
             base_valid    = base_vt if hrrr_baseline else None
@@ -1862,9 +1918,14 @@ def watch_now(interval: int, min_tier: str, station: str):
         if curr_snap is None:
             return None
 
-        risk_zones     = compute_risk_zones_from_hrrr(curr_snap,  min_tier="MARGINAL")
-        base_risk_zones = compute_risk_zones_from_hrrr(hrrr_baseline, min_tier="MARGINAL") \
-                          if hrrr_baseline and hrrr_baseline is not curr_snap else []
+        # Pass dryline to risk zone scoring so counties near the dryline
+        # get their tier boosted appropriately
+        risk_zones = compute_risk_zones_from_hrrr(
+            curr_snap, dryline=current_dryline, min_tier="MARGINAL"
+        )
+        base_risk_zones = compute_risk_zones_from_hrrr(
+            hrrr_baseline, dryline=current_dryline, min_tier="MARGINAL"
+        ) if hrrr_baseline and hrrr_baseline is not curr_snap else []
 
         # Tendency counties: use elevated zones from current or baseline
         _elevated_now  = any(z.tier_rank >= 3 for z in risk_zones)
@@ -1885,7 +1946,8 @@ def watch_now(interval: int, min_tier: str, station: str):
                     tend_counties.append((zone.tier, pt_now, pt_base))
 
         return (curr_snap, curr_valid, hrrr_baseline, base_valid,
-                risk_zones, base_risk_zones, tend_counties, fetched_hour)
+                risk_zones, base_risk_zones, tend_counties, fetched_hour,
+                current_dryline, prev_dryline, surface_temp_c)
 
     # ── Main watch loop ───────────────────────────────────────────────────────
     console.rule(
@@ -1909,7 +1971,8 @@ def watch_now(interval: int, min_tier: str, station: str):
                 continue
 
             (curr_snap, curr_valid, base_snap, base_valid,
-             risk_zones, base_zones, tend_counties, snd_hour) = result
+             risk_zones, base_zones, tend_counties, snd_hour,
+             current_dryline, prev_dryline, surface_temp_c) = result
 
             curr_valid_str = curr_valid.strftime("%H:%MZ")
 
@@ -1927,6 +1990,30 @@ def watch_now(interval: int, min_tier: str, station: str):
             new_hrrr = (prev_hrrr_valid is None or curr_valid != prev_hrrr_valid)
             if new_hrrr and prev_hrrr_valid is not None:
                 alerts.append(f"New HRRR run: {curr_valid_str}")
+
+            # Dryline: appeared, disappeared, or surged significantly
+            from ok_weather_model.processing import compute_dryline_surge_rate
+            curr_dl_lon = None
+            if current_dryline and current_dryline.position_lon:
+                curr_dl_lon = sum(current_dryline.position_lon) / len(current_dryline.position_lon)
+
+            if curr_dl_lon is not None and prev_dryline_lon is None:
+                alerts.append(
+                    f"Dryline appeared — center {abs(curr_dl_lon):.1f}°W  "
+                    f"confidence {current_dryline.confidence:.2f}"
+                )
+            elif curr_dl_lon is None and prev_dryline_lon is not None:
+                alerts.append("Dryline no longer detected")
+            elif curr_dl_lon is not None and prev_dryline_lon is not None:
+                surge = compute_dryline_surge_rate(prev_dryline, current_dryline) \
+                        if prev_dryline and current_dryline else None
+                if surge is not None and abs(surge) >= 10:
+                    direction = "eastward" if surge > 0 else "retrograding"
+                    surge_color = "red" if surge > 15 else "yellow"
+                    alerts.append(
+                        f"[{surge_color}]Dryline surging {direction}: "
+                        f"{surge:+.0f} mph  now {abs(curr_dl_lon):.1f}°W[/{surge_color}]"
+                    )
 
             # Tier changes for counties at or above min_tier (either direction)
             for county, new_tier in curr_county_tiers.items():
@@ -2068,6 +2155,7 @@ def watch_now(interval: int, min_tier: str, station: str):
             prev_county_tiers = curr_county_tiers
             prev_hrrr_valid   = curr_valid
             prev_trend        = curr_trend
+            prev_dryline_lon  = curr_dl_lon
 
             time.sleep(interval * 60)
 
