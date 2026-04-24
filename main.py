@@ -1743,6 +1743,338 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
     _print_analogues(console, f"{stn.value}/{today}/{fetched_hour:02d}Z", scored[:n_analogues])
 
 
+# ── watch-now ─────────────────────────────────────────────────────────────────
+
+@cli.command("watch-now")
+@click.option("--interval", default=15, show_default=True,
+              help="Poll interval in minutes")
+@click.option("--min-tier", default="MODERATE",
+              type=click.Choice(["MARGINAL", "MODERATE", "DANGEROUS_CAPPED", "HIGH", "EXTREME"]),
+              show_default=True,
+              help="Minimum tier change that triggers an alert")
+@click.option("--station", default="OUN", show_default=True,
+              help="Primary sounding station")
+def watch_now(interval: int, min_tier: str, station: str):
+    """
+    Continuously monitor conditions and alert on meaningful changes.
+
+    Polls HRRR every INTERVAL minutes.  Only prints output when:
+      - A county's risk tier changes (upgrade or downgrade)
+      - The dominant tendency flips direction (favorable ↔ unfavorable)
+      - A new HRRR run becomes available
+
+    Designed to run in a terminal during an active convective day.
+    Press Ctrl-C to stop.
+    """
+    import time
+    from rich.panel import Panel
+    from ok_weather_model.ingestion import HRRRClient
+    from ok_weather_model.processing.risk_zone import (
+        compute_risk_zones_from_hrrr,
+        _TIER_RANK as _TR,
+        _TIER_COLOR as _TC,
+    )
+    from ok_weather_model.models import OklahomaSoundingStation
+    from ok_weather_model.ingestion import SoundingClient
+    from ok_weather_model.processing import compute_thermodynamic_indices, compute_kinematic_profile
+
+    try:
+        stn = OklahomaSoundingStation[station.upper()]
+    except KeyError:
+        console.print(f"[red]Unknown station '{station}'.[/red]")
+        return
+
+    min_rank = _TR.get(min_tier, 2)
+
+    # ── State tracking ────────────────────────────────────────────────────────
+    # prev_county_tiers: county → tier string from last cycle
+    # prev_hrrr_valid:   datetime of last seen HRRR run
+    # prev_trend:        "favorable" | "unfavorable" | "steady"
+    prev_county_tiers: dict = {}
+    prev_hrrr_valid:   datetime | None = None
+    prev_trend: str = "steady"
+    cycle = 0
+
+    def _classify_trend(tend_counties) -> str:
+        if not tend_counties:
+            return "steady"
+        inc = sum(
+            1 for _, now, base in tend_counties
+            if (now.MLCIN - base.MLCIN) < -10 or
+               (now.SRH_0_1km - base.SRH_0_1km) > 20
+        )
+        dec = sum(
+            1 for _, now, base in tend_counties
+            if (now.MLCIN - base.MLCIN) > 10 or
+               (now.SRH_0_1km - base.SRH_0_1km) < -20
+        )
+        total = len(tend_counties)
+        if inc / total >= 0.5:   return "favorable"
+        if dec / total >= 0.5:   return "unfavorable"
+        return "steady"
+
+    def _fetch_cycle() -> tuple:
+        """
+        Returns (hrrr_snap, hrrr_valid, baseline_snap, baseline_valid,
+                 risk_zones, baseline_risk_zones, tend_counties, sounding_hour)
+        or None on hard failure.
+        """
+        now_utc = datetime.now(tz=timezone.utc)
+        today   = now_utc.date()
+
+        # Latest sounding
+        standard_hours = (21, 18, 15, 12, 9, 6, 3, 0)
+        hours_to_try   = [h for h in standard_hours if h <= now_utc.hour] or [0]
+        profile = fetched_hour = None
+        with SoundingClient() as sc:
+            for h in hours_to_try:
+                p = sc.get_sounding(stn, today, h)
+                if p is not None:
+                    profile      = p
+                    fetched_hour = h
+                    break
+        if profile is None:
+            return None
+
+        # HRRR: baseline at sounding hour + current most-recent
+        base_vt = datetime(today.year, today.month, today.day,
+                           fetched_hour, 0, tzinfo=timezone.utc)
+        hrrr_baseline = hrrr_valid = curr_snap = curr_valid = None
+        with HRRRClient() as hc:
+            hrrr_baseline = hc.get_county_snapshot(base_vt)
+            base_valid    = base_vt if hrrr_baseline else None
+
+            for hb in range(4):
+                try_h    = (now_utc.hour - hb) % 24
+                try_date = today if now_utc.hour >= hb else today - timedelta(days=1)
+                vt = datetime(try_date.year, try_date.month, try_date.day,
+                              try_h, 0, tzinfo=timezone.utc)
+                if vt == base_vt:
+                    curr_snap  = hrrr_baseline
+                    curr_valid = vt
+                    break
+                snap = hc.get_county_snapshot(vt)
+                if snap is not None:
+                    curr_snap  = snap
+                    curr_valid = vt
+                    break
+
+        if curr_snap is None:
+            return None
+
+        risk_zones     = compute_risk_zones_from_hrrr(curr_snap,  min_tier="MARGINAL")
+        base_risk_zones = compute_risk_zones_from_hrrr(hrrr_baseline, min_tier="MARGINAL") \
+                          if hrrr_baseline and hrrr_baseline is not curr_snap else []
+
+        # Tendency counties: use elevated zones from current or baseline
+        _elevated_now  = any(z.tier_rank >= 3 for z in risk_zones)
+        _elevated_base = any(z.tier_rank >= 3 for z in base_risk_zones)
+        ref_zones = risk_zones if _elevated_now else base_risk_zones
+        tend_counties = []
+        seen: set = set()
+        for zone in ref_zones:
+            if zone.tier_rank < 3:
+                continue
+            for county in zone.counties:
+                if county in seen:
+                    continue
+                seen.add(county)
+                pt_now  = curr_snap.get(county)
+                pt_base = hrrr_baseline.get(county) if hrrr_baseline else None
+                if pt_now and pt_base and curr_valid != base_valid:
+                    tend_counties.append((zone.tier, pt_now, pt_base))
+
+        return (curr_snap, curr_valid, hrrr_baseline, base_valid,
+                risk_zones, base_risk_zones, tend_counties, fetched_hour)
+
+    # ── Main watch loop ───────────────────────────────────────────────────────
+    console.rule(
+        f"[bold cyan]KRONOS-WX WATCH  —  {station}  "
+        f"interval={interval}min  alert≥{min_tier}[/bold cyan]"
+    )
+    console.print(f"[dim]Started {datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%MZ')}  "
+                  f"Press Ctrl-C to stop.[/dim]\n")
+
+    try:
+        while True:
+            cycle += 1
+            now_str = datetime.now(tz=timezone.utc).strftime("%H:%MZ")
+
+            with console.status(f"[dim]Cycle {cycle}  {now_str}  fetching...[/dim]"):
+                result = _fetch_cycle()
+
+            if result is None:
+                console.print(f"[dim]{now_str}  Cycle {cycle}: no data available, retrying in {interval}min[/dim]")
+                time.sleep(interval * 60)
+                continue
+
+            (curr_snap, curr_valid, base_snap, base_valid,
+             risk_zones, base_zones, tend_counties, snd_hour) = result
+
+            curr_valid_str = curr_valid.strftime("%H:%MZ")
+
+            # ── Detect changes ─────────────────────────────────────────────────
+            alerts: list[str] = []
+            tier_changes: list[tuple] = []  # (county, old_tier, new_tier)
+
+            # Build current tier map
+            curr_county_tiers: dict = {}
+            for zone in risk_zones:
+                for county in zone.counties:
+                    curr_county_tiers[county] = zone.tier
+
+            # New HRRR run
+            new_hrrr = (prev_hrrr_valid is None or curr_valid != prev_hrrr_valid)
+            if new_hrrr and prev_hrrr_valid is not None:
+                alerts.append(f"New HRRR run: {curr_valid_str}")
+
+            # Tier changes for counties at or above min_tier (either direction)
+            for county, new_tier in curr_county_tiers.items():
+                old_tier = prev_county_tiers.get(county, "LOW")
+                if old_tier == new_tier:
+                    continue
+                old_rank = _TR.get(old_tier, 0)
+                new_rank = _TR.get(new_tier, 0)
+                if max(old_rank, new_rank) >= min_rank:
+                    tier_changes.append((county, old_tier, new_tier))
+
+            # Counties that dropped out of elevated tiers
+            for county, old_tier in prev_county_tiers.items():
+                if county not in curr_county_tiers:
+                    old_rank = _TR.get(old_tier, 0)
+                    if old_rank >= min_rank:
+                        tier_changes.append((county, old_tier, "LOW"))
+
+            # Trend flip
+            curr_trend = _classify_trend(tend_counties)
+            trend_flip = (
+                prev_trend != curr_trend and
+                prev_trend != "steady" and
+                any(z.tier_rank >= 3 for z in (risk_zones + base_zones))
+            )
+            if trend_flip:
+                alerts.append(
+                    f"Trend flip: {prev_trend.upper()} → {curr_trend.upper()}"
+                )
+
+            # ── Print output only when something changed ───────────────────────
+            has_elevated = any(z.tier_rank >= min_rank for z in risk_zones)
+            should_print = bool(tier_changes) or trend_flip or (
+                cycle == 1  # always print full picture on first run
+            )
+
+            if should_print:
+                console.rule(f"[bold]{curr_valid_str}  Cycle {cycle}[/bold]")
+
+                # Tier change summary
+                if tier_changes:
+                    upgrades   = [(c, o, n) for c, o, n in tier_changes
+                                  if _TR.get(n, 0) > _TR.get(o, 0)]
+                    downgrades = [(c, o, n) for c, o, n in tier_changes
+                                  if _TR.get(n, 0) < _TR.get(o, 0)]
+
+                    if upgrades:
+                        lines = []
+                        for county, old, new in upgrades:
+                            oc = _TC.get(old, "white")
+                            nc = _TC.get(new, "white")
+                            lines.append(
+                                f"  {county.name}: "
+                                f"[{oc}]{old}[/{oc}] → [{nc}]{new}[/{nc}]"
+                            )
+                        console.print(Panel(
+                            "\n".join(lines),
+                            title="[bold red on white] ▲  TIER UPGRADES [/bold red on white]",
+                            border_style="red",
+                        ))
+
+                    if downgrades:
+                        lines = []
+                        for county, old, new in downgrades:
+                            oc = _TC.get(old, "white")
+                            nc = _TC.get(new, "white")
+                            lines.append(
+                                f"  {county.name}: "
+                                f"[{oc}]{old}[/{oc}] → [{nc}]{new}[/{nc}]"
+                            )
+                        console.print(Panel(
+                            "\n".join(lines),
+                            title="[bold yellow on black] ▼  TIER DOWNGRADES [/bold yellow on black]",
+                            border_style="yellow",
+                        ))
+
+                # Trend flip
+                if trend_flip:
+                    trend_color = "bright_green" if curr_trend == "favorable" else (
+                        "red" if curr_trend == "unfavorable" else "yellow"
+                    )
+                    console.print(Panel(
+                        f"[{trend_color}]{prev_trend.upper()} → {curr_trend.upper()}[/{trend_color}]",
+                        title="[bold] Trend Flip [/bold]",
+                        border_style=trend_color,
+                    ))
+
+                # Other alerts
+                for a in alerts:
+                    console.print(f"[dim]{now_str}  {a}[/dim]")
+
+                # Current risk snapshot (elevated counties only)
+                if has_elevated:
+                    snap_tbl = Table(show_lines=True, title=f"Risk Snapshot  {curr_valid_str}")
+                    snap_tbl.add_column("County",   style="cyan")
+                    snap_tbl.add_column("Tier")
+                    snap_tbl.add_column("MLCAPE",   justify="right")
+                    snap_tbl.add_column("MLCIN",    justify="right")
+                    snap_tbl.add_column("SRH 0–1",  justify="right")
+                    snap_tbl.add_column("EHI",      justify="right")
+                    snap_tbl.add_column("STP",      justify="right")
+
+                    for zone in risk_zones:
+                        if zone.tier_rank < min_rank:
+                            continue
+                        for county in zone.counties:
+                            pt = curr_snap.get(county)
+                            if pt is None:
+                                continue
+                            color = _TC.get(zone.tier, "white")
+                            snap_tbl.add_row(
+                                county.name,
+                                f"[{color}]{zone.tier}[/{color}]",
+                                f"{pt.MLCAPE:.0f}",
+                                f"{pt.MLCIN:.0f}",
+                                f"{pt.SRH_0_1km:.0f}",
+                                f"{pt.EHI:.2f}" if pt.EHI else "—",
+                                f"{pt.STP:.2f}" if pt.STP else "—",
+                            )
+                    console.print(snap_tbl)
+
+                elif cycle == 1:
+                    console.print(
+                        f"[dim]No counties at or above {min_tier}. "
+                        f"Monitoring…[/dim]"
+                    )
+
+            else:
+                # Quiet cycle — print a single status line so the user knows
+                # it's still running
+                top_tier = risk_zones[0].tier if risk_zones else "LOW"
+                top_color = _TC.get(top_tier, "dim")
+                console.print(
+                    f"[dim]{now_str}  No change  "
+                    f"top tier: [{top_color}]{top_tier}[/{top_color}][/dim]"
+                )
+
+            # Update state
+            prev_county_tiers = curr_county_tiers
+            prev_hrrr_valid   = curr_valid
+            prev_trend        = curr_trend
+
+            time.sleep(interval * 60)
+
+    except KeyboardInterrupt:
+        console.print("\n[dim]Watch stopped.[/dim]")
+
+
 # ── compute-ces ───────────────────────────────────────────────────────────────
 
 @cli.command("compute-ces")

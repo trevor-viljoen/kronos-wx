@@ -25,6 +25,12 @@ python main.py enrich-all 1994 2024
 python main.py compute-ces --start-year 1994 --end-year 2024
 python main.py analyze-cap-behavior 19990503_OK
 python main.py build-bust-database
+
+# Real-time situational awareness
+python main.py analyze-now                        # one-shot: current cap + HRRR county risk
+python main.py analyze-now --mode kinematics      # weight shear/SRH in analogue scoring
+python main.py watch-now                          # continuous: alerts on tier changes / trend flips
+python main.py watch-now --interval 10 --min-tier HIGH   # tighter alert threshold
 ```
 
 ## Architecture
@@ -34,13 +40,16 @@ KRONOS-WX is an Oklahoma severe weather case library and analysis system. The pi
 **1. Ingestion** (`ok_weather_model/ingestion/`)
 - `SPCClient` — downloads the SPC tornado database and groups Oklahoma tornado days into `HistoricalCase` skeletons
 - `SoundingClient` — fetches rawinsonde soundings from the University of Wyoming archive (OUN/LMN/AMA/DDC stations, 00Z and 12Z)
-- `MesonetClient` — pulls Oklahoma Mesonet surface observations
+- `MesonetClient` — pulls Oklahoma Mesonet surface observations; `get_snapshot_observations()` fetches a single 5-min network snapshot for real-time use
 - `ERA5Client` — fetches reanalysis fields via `cdsapi` (CDS API key required in `.env`)
+- `HRRRClient` — fetches HRRR F00 analysis fields from the NOAA AWS archive (s3://noaa-hrrr-bdp-pds/) using `herbie`; available from 2016-07-15 onward. `get_county_snapshot(valid_time)` returns a `HRRRCountySnapshot` with 14 severe weather fields extracted at all 77 Oklahoma county centroids. Fields: MLCAPE, MLCIN, SBCAPE, SBCIN, SRH 0-1km/3km, BWD 0-6km, lapse rate 700-500mb, dewpoint 2m, LCL height, EHI, STP.
 
 **2. Processing** (`ok_weather_model/processing/`)
 - `sounding_parser.py` — converts raw `SoundingProfile` → `ThermodynamicIndices` + `KinematicProfile` using MetPy; computes CAPE/CIN, LCL/LFC/EL, cap strength, EML detection, lapse rates, composite parameters (STP, SCP, EHI)
 - `cap_calculator.py` — the central diagnostic; implements the Cap Erosion Budget framework (instantaneous balance sheet of erosion/preservation forcings) and the Cap Erosion Score (CES), a sounding-only heating model that estimates when Tc will be reached
 - `era5_diagnostics.py` — bridges ERA5 grids to cap diagnostics: `compute_thermal_advection()` computes `ADV(T) = -(u·∂T/∂x + v·∂T/∂y)` in K/hr via xarray differentiation; `compute_synoptic_cap_forcing()` aggregates 700/500mb advection + omega into a `dynamic_cap_forcing_jkg_hr` term for the budget; `extract_virtual_sounding()` extracts a `SoundingProfile(raw_source="virtual")` at any lat/lon grid point from ERA5 pressure-level fields
+- `dryline_detector.py` — detects dryline position from Mesonet surface dewpoint gradient; returns a `BoundaryObservation` polyline with confidence score; `compute_dryline_surge_rate()` estimates eastward movement in mph between two snapshots
+- `risk_zone.py` — scores all 77 Oklahoma counties into risk tiers (EXTREME, HIGH, DANGEROUS_CAPPED, MODERATE, MARGINAL, LOW). Primary path: `compute_risk_zones_from_hrrr()` uses per-county HRRR data directly. Fallback: `compute_risk_zones()` interpolates linearly between OUN (35.2°N) and LMN (36.7°N) soundings. Dryline proximity boosts tier for counties within ±50 miles.
 
 **3. Storage** (`ok_weather_model/storage/database.py`)
 - Two-tier: SQLite for `HistoricalCase` metadata and indexed queries; Parquet (via pyarrow) for `MesonetTimeSeries` and `SoundingProfile` level data
@@ -53,6 +62,13 @@ KRONOS-WX is an Oklahoma severe weather case library and analysis system. The pi
   - `CapErosionBudget` / `CapErosionTrajectory` — per-hour and full-day cap analysis
   - `HistoricalCase` — the top-level case record aggregating all data
   - `OklahomaCounty` — enum with embedded metadata (county seat, Mesonet station ID, lat/lon, region)
+  - `HRRRCountyPoint` / `HRRRCountySnapshot` — HRRR analysis at a single county centroid / all 77 counties at one valid time
+
+**Real-time analysis** (`main.py`)
+- `analyze-now`: fetches latest OUN+LMN soundings, Mesonet snapshot, dryline, two HRRR snapshots (sounding-hour baseline + most-recent current). Outputs: multi-station comparison, DANGEROUS_CAPPED warning, dryline table, CES projection, county risk zones, per-county drill-down, environment tendency table (ΔMLCIN/ΔCAPE/ΔSRH per threat county), historical analogues.
+- `watch-now`: polls on a timer, diffs risk tiers and tendency direction each cycle, prints alerts only on tier changes or trend flips. Quiet cycles print a one-line status. First cycle always prints full risk snapshot.
+- `DANGEROUS_CAPPED` flag (`_dangerous_capped_flag`): fires when MLCIN ≥ 80 J/kg AND (SRH 0-1km > 150 OR EHI > 2.5 OR SRH 0-3km > 300 OR shear > 50kt) — the April 23, 2026 boundary-forced miss pattern.
+- Analogue `mode` options: `cap` (default, weights MLCIN/cap/Tc-gap), `kinematics` (weights SRH/shear/EHI), `full` (blended).
 
 ## Key Domain Concepts
 
