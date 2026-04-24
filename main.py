@@ -2308,7 +2308,7 @@ def compute_ces(start_year: int, end_year: int, force: bool):
         "CLEAN_EROSION":   "Eroded 18Z–21Z — peak storm window (1–4pm CDT)",
         "LATE_EROSION":    "Eroded after 21Z — marginal or late initiation",
         "NO_EROSION":      "Cap held through 02Z — bust candidate",
-        "BOUNDARY_FORCED": "Boundary-forced erosion (set manually)",
+        "BOUNDARY_FORCED": "Boundary-forced erosion (ERA5 dynamic forcing or manual)",
         "NOT_COMPUTED":    "No sounding data available",
     }
 
@@ -2432,6 +2432,175 @@ def build_bust_database(spc_threshold: float):
                 case.cap_behavior.value if case.cap_behavior else "—",
             )
         console.print(bust_table)
+
+
+# ── classify-boundary-forced ─────────────────────────────────────────────────
+
+@cli.command("classify-boundary-forced")
+@click.option("--start-year", default=CASE_LIBRARY_START_YEAR, show_default=True,
+              help="First year to process")
+@click.option("--end-year", default=CASE_LIBRARY_END_YEAR, show_default=True,
+              help="Last year to process")
+@click.option("--forcing-threshold", default=-15.0, show_default=True, type=float,
+              help="dynamic_cap_forcing_jkg_hr cutoff; values ≤ this trigger reclassification")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Report candidates but do not write to the database")
+@click.option("--force", is_flag=True, default=False,
+              help="Re-evaluate even if cap_behavior is already BOUNDARY_FORCED")
+def classify_boundary_forced(
+    start_year: int,
+    end_year: int,
+    forcing_threshold: float,
+    dry_run: bool,
+    force: bool,
+):
+    """
+    Reclassify NO_EROSION tornado cases to BOUNDARY_FORCED using ERA5 synoptic forcing.
+
+    Targets cases where the CES sounding model predicted the cap would hold all
+    day (NO_EROSION) but tornadoes actually occurred — the El Reno 2013 / April 23
+    2026 pattern.  For each candidate, ERA5 12Z synoptic forcing is computed; if
+    dynamic_cap_forcing_jkg_hr ≤ FORCING_THRESHOLD the cap erosion is attributed
+    to dynamic boundary forcing rather than surface heating alone.
+
+    Requires ERA5 access (CDS API key in ~/.cdsapirc).
+
+    Run after compute-ces to ensure cap_behavior is populated.
+    """
+    from ok_weather_model.storage import Database
+    from ok_weather_model.ingestion.era5_client import ERA5Client, PRESSURE_LEVELS, UPPER_AIR_VARS
+    from ok_weather_model.processing.era5_diagnostics import compute_synoptic_cap_forcing
+    from ok_weather_model.models.enums import ErosionMechanism
+
+    # EventClasses that represent actual tornado activity — candidates for
+    # BOUNDARY_FORCED.  NULL_BUST (no tornadoes) and SIGNIFICANT_SEVERE_NO_TORNADO
+    # (no tornado, just hail/wind) are excluded.
+    _TORNADO_CLASSES = {
+        EventClass.SIGNIFICANT_OUTBREAK,
+        EventClass.ISOLATED_SIGNIFICANT,
+        EventClass.WEAK_OUTBREAK,
+        EventClass.SURPRISING_OUTBREAK,
+    }
+
+    db = Database()
+    all_cases = db.query_parameter_space({
+        "start_date": str(date(start_year, 1, 1)),
+        "end_date": str(date(end_year, 12, 31)),
+    })
+
+    # Candidates: NO_EROSION cap behavior + actual tornado activity
+    candidates = [
+        c for c in all_cases
+        if c.cap_behavior == CapBehavior.NO_EROSION
+        and c.event_class in _TORNADO_CLASSES
+    ]
+
+    if force:
+        # Also re-evaluate existing BOUNDARY_FORCED to confirm/update
+        already_bf = [
+            c for c in all_cases
+            if c.cap_behavior == CapBehavior.BOUNDARY_FORCED
+            and c.event_class in _TORNADO_CLASSES
+        ]
+        candidates = candidates + already_bf
+
+    console.rule("[bold cyan]BOUNDARY_FORCED Classification via ERA5[/bold cyan]")
+    console.print(
+        f"Year range: [cyan]{start_year}–{end_year}[/cyan]  "
+        f"Candidates: [green]{len(candidates)}[/green]  "
+        f"Forcing threshold: [yellow]{forcing_threshold:.1f} J/kg/hr[/yellow]"
+    )
+    if dry_run:
+        console.print("[yellow]DRY RUN — no changes will be saved[/yellow]")
+
+    reclassified = 0
+    skipped_no_era5 = 0
+    skipped_weak_forcing = 0
+
+    results_table = Table(
+        title="BOUNDARY_FORCED Candidates",
+        show_lines=True,
+        expand=True,
+    )
+    results_table.add_column("Case ID", style="cyan", no_wrap=True)
+    results_table.add_column("Event Class", style="green")
+    results_table.add_column("dyn. forcing\nJ/kg/hr", justify="right")
+    results_table.add_column("T-adv 700mb\nK/hr", justify="right")
+    results_table.add_column("omega 700mb\nPa/s", justify="right")
+    results_table.add_column("Result")
+
+    era5 = ERA5Client()
+
+    for case in track(candidates, description="Fetching ERA5..."):
+        try:
+            ds = era5.get_upper_air_fields(
+                case.date,
+                pressure_levels=PRESSURE_LEVELS,
+                variables=UPPER_AIR_VARS,
+                hours=[12],
+            )
+        except Exception as exc:
+            logger.warning("ERA5 unavailable for %s: %s", case.case_id, exc)
+            skipped_no_era5 += 1
+            results_table.add_row(
+                case.case_id,
+                case.event_class.value,
+                "—", "—", "—",
+                "[dim]ERA5 unavailable[/dim]",
+            )
+            continue
+
+        valid_time = datetime(
+            case.date.year, case.date.month, case.date.day, 12, 0,
+            tzinfo=timezone.utc,
+        )
+
+        try:
+            forcing = compute_synoptic_cap_forcing(ds, valid_time)
+        except Exception as exc:
+            logger.warning("Forcing computation failed for %s: %s", case.case_id, exc)
+            skipped_no_era5 += 1
+            continue
+
+        dyn  = forcing["dynamic_cap_forcing_jkg_hr"]
+        adv7 = forcing["thermal_advection_700mb"]
+        om7  = forcing["vertical_motion_700mb"]
+
+        if dyn <= forcing_threshold:
+            # Strong enough synoptic support → BOUNDARY_FORCED
+            result_label = "[bright_cyan]RECLASSIFIED[/bright_cyan]"
+            if not dry_run:
+                case.cap_behavior = CapBehavior.BOUNDARY_FORCED
+                case.cap_erosion_mechanism = ErosionMechanism.DYNAMIC
+                case.recompute_completeness()
+                db.save_case(case)
+            reclassified += 1
+        else:
+            result_label = "[dim]forcing too weak[/dim]"
+            skipped_weak_forcing += 1
+
+        results_table.add_row(
+            case.case_id,
+            case.event_class.value,
+            f"{dyn:+.1f}",
+            f"{adv7:+.4f}",
+            f"{om7:+.4f}",
+            result_label,
+        )
+
+    era5.close()
+
+    console.print(results_table)
+    console.print(
+        f"\n[bold green]Reclassified: {reclassified}[/bold green]  "
+        f"Forcing too weak: {skipped_weak_forcing}  "
+        f"ERA5 unavailable: {skipped_no_era5}"
+    )
+    if dry_run and reclassified > 0:
+        console.print(
+            f"[yellow]DRY RUN: {reclassified} case(s) would be reclassified. "
+            f"Re-run without --dry-run to save.[/yellow]"
+        )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

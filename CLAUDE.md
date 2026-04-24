@@ -25,6 +25,8 @@ python main.py enrich-all 1994 2024
 python main.py compute-ces --start-year 1994 --end-year 2024
 python main.py analyze-cap-behavior 19990503_OK
 python main.py build-bust-database
+python main.py classify-boundary-forced --start-year 1994 --end-year 2024
+python main.py classify-boundary-forced --dry-run   # preview without writing
 
 # Real-time situational awareness
 python main.py analyze-now                        # one-shot: current cap + HRRR county risk
