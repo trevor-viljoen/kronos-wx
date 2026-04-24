@@ -17,6 +17,7 @@ from .kinematic import WindLevel, KinematicProfile
 from .cap import EMLCharacteristics, CapErosionBudget, CapErosionTrajectory
 from .boundary import BoundaryObservation, BoundaryInteraction
 from .case import HistoricalCase
+from .hrrr import HRRRCountyPoint, HRRRCountySnapshot
 
 __all__ = [
     # Enums
@@ -35,4 +36,6 @@ __all__ = [
     "BoundaryObservation", "BoundaryInteraction",
     # Case
     "HistoricalCase",
+    # HRRR
+    "HRRRCountyPoint", "HRRRCountySnapshot",
 ]

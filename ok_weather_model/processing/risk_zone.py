@@ -375,3 +375,89 @@ def compute_risk_zones(
 
     zones.sort(key=lambda z: z.tier_rank, reverse=True)
     return zones
+
+
+def compute_risk_zones_from_hrrr(
+    hrrr_snapshot,
+    dryline: Optional[BoundaryObservation] = None,
+    min_tier: str = "MARGINAL",
+) -> list[RiskZone]:
+    """
+    Compute county risk zones using HRRR per-county data directly.
+
+    This is the preferred path when a HRRRCountySnapshot is available —
+    it uses actual 3km model analysis at every county centroid rather than
+    the OUN/LMN N-S interpolation.
+
+    Parameters
+    ----------
+    hrrr_snapshot : HRRRCountySnapshot from HRRRClient.get_county_snapshot()
+    dryline       : Optional detected BoundaryObservation
+    min_tier      : Minimum tier to include (default "MARGINAL")
+    """
+    if hrrr_snapshot is None:
+        return []
+
+    min_rank = _TIER_RANK.get(min_tier, 1)
+
+    scored: dict[str, list[CountyEnvironment]] = {}
+
+    for pt in hrrr_snapshot.counties:
+        county = pt.county
+
+        # Dryline proximity flag
+        near_dl = False
+        if dryline is not None:
+            dist = _dryline_distance_miles(county, dryline)
+            if dist is not None and -50 <= dist <= 50:
+                near_dl = True
+
+        env = CountyEnvironment(
+            county=county,
+            MLCAPE=pt.MLCAPE,
+            MLCIN=pt.MLCIN,
+            cap_strength=0.0,      # HRRR doesn't output cap strength directly
+            SRH_0_1km=pt.SRH_0_1km,
+            SRH_0_3km=pt.SRH_0_3km,
+            BWD_0_6km=pt.BWD_0_6km,
+            EHI=pt.EHI or 0.0,
+            near_dryline=near_dl,
+        )
+
+        tier = _score_environment(env)
+        if _TIER_RANK.get(tier, 0) >= min_rank:
+            scored.setdefault(tier, []).append(env)
+
+    # Build RiskZone per tier (same assembly as compute_risk_zones)
+    zones: list[RiskZone] = []
+    for tier, envs in scored.items():
+        counties = [e.county for e in envs]
+        lats = [c.lat for c in counties]
+        lons = [c.lon for c in counties]
+        lat_min, lat_max = min(lats), max(lats)
+        lon_min, lon_max = min(lons), max(lons)
+        center_lat = sum(lats) / len(lats)
+        center_lon = sum(lons) / len(lons)
+        span_ns = (lat_max - lat_min) * _MILES_PER_DEG_LAT
+        span_ew = (lon_max - lon_min) * _MILES_PER_DEG_LON
+        peak = max(envs, key=lambda e: e.SRH_0_1km + e.EHI * 50)
+
+        zones.append(RiskZone(
+            tier=tier,
+            counties=counties,
+            center_lat=center_lat,
+            center_lon=center_lon,
+            lat_min=lat_min,
+            lat_max=lat_max,
+            lon_min=lon_min,
+            lon_max=lon_max,
+            span_ew_mi=span_ew,
+            span_ns_mi=span_ns,
+            peak_MLCAPE=peak.MLCAPE,
+            peak_MLCIN=peak.MLCIN,
+            peak_SRH_0_1km=peak.SRH_0_1km,
+            peak_EHI=peak.EHI,
+        ))
+
+    zones.sort(key=lambda z: z.tier_rank, reverse=True)
+    return zones

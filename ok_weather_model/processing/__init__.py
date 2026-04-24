@@ -24,6 +24,7 @@ from .dryline_detector import (
 from .risk_zone import (
     build_county_environments,
     compute_risk_zones,
+    compute_risk_zones_from_hrrr,
     RiskZone,
     CountyEnvironment,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "analyze_dryline_from_mesonet",
     "build_county_environments",
     "compute_risk_zones",
+    "compute_risk_zones_from_hrrr",
     "RiskZone",
     "CountyEnvironment",
 ]

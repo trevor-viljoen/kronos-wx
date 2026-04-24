@@ -1375,28 +1375,49 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
         )
 
     # ── Risk zone map ─────────────────────────────────────────────────────────
-    # Interpolate between OUN and LMN by county latitude to produce a
-    # county-resolution risk picture across Oklahoma.
+    # Prefer HRRR 3km analysis (actual per-county model data) when available.
+    # Fall back to OUN/LMN sounding interpolation for pre-2016 dates or when
+    # the HRRR fetch fails.
     console.rule("[bold]County Risk Zones[/bold]")
-    from ok_weather_model.processing.risk_zone import compute_risk_zones
-
-    # Use the dryline from this session if detected
-    _dryline_for_risk = current_dryline if snap_times_fetched else None
-
-    risk_zones = compute_risk_zones(
-        oun_indices=indices,
-        oun_kinematics=kinematics,
-        lmn_indices=lmn_indices,
-        lmn_kinematics=lmn_kinematics,
-        dryline=_dryline_for_risk,
-        min_tier="MARGINAL",
+    from ok_weather_model.processing.risk_zone import (
+        compute_risk_zones, compute_risk_zones_from_hrrr,
     )
+    from ok_weather_model.ingestion import HRRRClient
+
+    _dryline_for_risk = current_dryline if snap_times_fetched else None
+    hrrr_snap = None
+    risk_source = "OUN+LMN interpolated"
+
+    with console.status("Fetching HRRR 3km analysis for risk zones..."):
+        try:
+            with HRRRClient() as hc:
+                hrrr_snap = hc.get_county_snapshot(
+                    datetime(today.year, today.month, today.day,
+                             fetched_hour, 0, tzinfo=timezone.utc)
+                )
+        except Exception as _hrrr_err:
+            logger.debug("HRRR fetch failed: %s", _hrrr_err)
+
+    if hrrr_snap is not None:
+        risk_zones = compute_risk_zones_from_hrrr(
+            hrrr_snap, dryline=_dryline_for_risk, min_tier="MARGINAL"
+        )
+        risk_source = "HRRR 3km analysis"
+    else:
+        risk_zones = compute_risk_zones(
+            oun_indices=indices,
+            oun_kinematics=kinematics,
+            lmn_indices=lmn_indices,
+            lmn_kinematics=lmn_kinematics,
+            dryline=_dryline_for_risk,
+            min_tier="MARGINAL",
+        )
 
     if not risk_zones:
         console.print("[dim]No elevated risk areas identified.[/dim]")
     else:
         rz_tbl = Table(
-            title=f"Risk Zones — OUN+LMN interpolated  {fetched_hour:02d}Z  {today}",
+            title=f"Risk Zones — {risk_source}  {fetched_hour:02d}Z  {today}",
             show_lines=True,
         )
         rz_tbl.add_column("Tier",         style="bold",    min_width=18)

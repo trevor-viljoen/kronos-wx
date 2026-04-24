@@ -2,6 +2,7 @@ from .mesonet_client import MesonetClient
 from .sounding_client import SoundingClient, parse_wyoming_sounding
 from .spc_client import SPCClient
 from .era5_client import ERA5Client, SOUNDING_PRESSURE_LEVELS
+from .hrrr_client import HRRRClient
 
 __all__ = [
     "MesonetClient",
@@ -10,4 +11,5 @@ __all__ = [
     "SPCClient",
     "ERA5Client",
     "SOUNDING_PRESSURE_LEVELS",
+    "HRRRClient",
 ]
