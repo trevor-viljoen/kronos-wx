@@ -1388,13 +1388,44 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
     hrrr_snap = None
     risk_source = "OUN+LMN interpolated"
 
-    with console.status("Fetching HRRR 3km analysis for risk zones..."):
+    # Two HRRR snapshots:
+    #   baseline — at the sounding hour (morning environment, what we projected from)
+    #   current  — most recent run available right now (how conditions have evolved)
+    # The delta between them is the tendency signal: is the cap eroding faster than
+    # expected? Are kinematics tightening? This is the automated forecast evolution.
+    _hrrr_baseline: object | None = None   # HRRRCountySnapshot at sounding time
+    _hrrr_baseline_valid: datetime | None = None
+    _hrrr_valid: datetime | None = None
+    _hrrr_hour = now_utc.hour
+
+    with console.status("Fetching HRRR snapshots (baseline + current)..."):
         try:
             with HRRRClient() as hc:
-                hrrr_snap = hc.get_county_snapshot(
-                    datetime(today.year, today.month, today.day,
-                             fetched_hour, 0, tzinfo=timezone.utc)
-                )
+                # Baseline: sounding hour (may be several hours ago)
+                _base_vt = datetime(today.year, today.month, today.day,
+                                    fetched_hour, 0, tzinfo=timezone.utc)
+                _hrrr_baseline = hc.get_county_snapshot(_base_vt)
+                if _hrrr_baseline is not None:
+                    _hrrr_baseline_valid = _base_vt
+
+                # Current: walk back from now until we find a posted run
+                # (HRRR analysis files appear ~45-60 min after valid time)
+                for _h_back in range(4):
+                    _try_hour = (_hrrr_hour - _h_back) % 24
+                    _try_date = today if _hrrr_hour >= _h_back else (
+                        today - timedelta(days=1)
+                    )
+                    _vt = datetime(_try_date.year, _try_date.month, _try_date.day,
+                                   _try_hour, 0, tzinfo=timezone.utc)
+                    # Skip if same as baseline — no tendency to compute
+                    if _vt == _base_vt:
+                        hrrr_snap = _hrrr_baseline
+                        _hrrr_valid = _vt
+                        break
+                    hrrr_snap = hc.get_county_snapshot(_vt)
+                    if hrrr_snap is not None:
+                        _hrrr_valid = _vt
+                        break
         except Exception as _hrrr_err:
             logger.debug("HRRR fetch failed: %s", _hrrr_err)
 
@@ -1402,7 +1433,8 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
         risk_zones = compute_risk_zones_from_hrrr(
             hrrr_snap, dryline=_dryline_for_risk, min_tier="MARGINAL"
         )
-        risk_source = "HRRR 3km analysis"
+        _hrrr_label = _hrrr_valid.strftime("%H:%MZ") if _hrrr_valid else "?"
+        risk_source = f"HRRR 3km  {_hrrr_label}"
     else:
         risk_zones = compute_risk_zones(
             oun_indices=indices,
@@ -1417,7 +1449,7 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
         console.print("[dim]No elevated risk areas identified.[/dim]")
     else:
         rz_tbl = Table(
-            title=f"Risk Zones — {risk_source}  {fetched_hour:02d}Z  {today}",
+            title=f"Risk Zones — {risk_source}  {today}",
             show_lines=True,
         )
         rz_tbl.add_column("Tier",         style="bold",    min_width=18)
@@ -1460,6 +1492,227 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
                 f"  ~{top.span_ew_mi:.0f} mi wide × {top.span_ns_mi:.0f} mi tall, "
                 f"centered {top.center_lat:.1f}°N / {abs(top.center_lon):.1f}°W"
             )
+
+        # ── Per-county drill-down (HRRR only, elevated tiers) ─────────────────
+        # When HRRR data is available, show a full parameter breakdown for every
+        # county in the top risk tiers so the user can see exactly which counties
+        # are driving the risk and compare neighboring counties directly.
+        if hrrr_snap is not None and any(z.tier_rank >= 3 for z in risk_zones):
+            # Collect counties in DANGEROUS_CAPPED or higher
+            threat_counties: list[tuple[str, object]] = []  # (tier, HRRRCountyPoint)
+            for zone in risk_zones:
+                if zone.tier_rank < 3:
+                    continue
+                for county in zone.counties:
+                    pt = hrrr_snap.get(county)
+                    if pt is not None:
+                        threat_counties.append((zone.tier, pt))
+
+            if threat_counties:
+                # Sort: tier rank desc, then SRH 0-1km desc
+                from ok_weather_model.processing.risk_zone import _TIER_RANK as _TR, _TIER_COLOR as _TC
+                threat_counties.sort(
+                    key=lambda x: (_TR.get(x[0], 0), x[1].SRH_0_1km),
+                    reverse=True,
+                )
+
+                drill_tbl = Table(
+                    title=f"County Drill-Down — HRRR {_hrrr_label}  {today}",
+                    show_lines=True,
+                )
+                drill_tbl.add_column("County",    style="cyan",        min_width=12)
+                drill_tbl.add_column("Tier",       min_width=14)
+                drill_tbl.add_column("Lat",        justify="right")
+                drill_tbl.add_column("MLCAPE",     justify="right")
+                drill_tbl.add_column("MLCIN",      justify="right")
+                drill_tbl.add_column("SRH 0–1km",  justify="right")
+                drill_tbl.add_column("SRH 0–3km",  justify="right")
+                drill_tbl.add_column("Shear 0–6",  justify="right")
+                drill_tbl.add_column("EHI",        justify="right")
+                drill_tbl.add_column("STP",        justify="right")
+                drill_tbl.add_column("Td 2m",      justify="right")
+
+                for tier, pt in threat_counties:
+                    color = _TC.get(tier, "white")
+                    ehi_str = f"{pt.EHI:.2f}" if pt.EHI is not None else "—"
+                    stp_str = f"{pt.STP:.2f}" if pt.STP is not None else "—"
+                    drill_tbl.add_row(
+                        pt.county.name,
+                        f"[{color}]{tier}[/{color}]",
+                        f"{pt.county.lat:.1f}°N",
+                        f"[{_cape_c(pt.MLCAPE)}]{pt.MLCAPE:.0f}[/{_cape_c(pt.MLCAPE)}]",
+                        f"[{_cin_c(pt.MLCIN)}]{pt.MLCIN:.0f}[/{_cin_c(pt.MLCIN)}]",
+                        f"[{_srh_c(pt.SRH_0_1km)}]{pt.SRH_0_1km:.0f}[/{_srh_c(pt.SRH_0_1km)}]",
+                        f"[{_srh_c(pt.SRH_0_3km)}]{pt.SRH_0_3km:.0f}[/{_srh_c(pt.SRH_0_3km)}]",
+                        f"{pt.BWD_0_6km:.0f} kt",
+                        f"[{_ehi_c(pt.EHI or 0)}]{ehi_str}[/{_ehi_c(pt.EHI or 0)}]",
+                        stp_str,
+                        f"{pt.dewpoint_2m_F:.0f}°F",
+                    )
+
+                console.print(drill_tbl)
+
+        # ── Environment tendency (baseline → current) ─────────────────────────
+        # Shows how the threat-area environment has evolved since the sounding.
+        # Green = conditions trending toward storm initiation (cap eroding,
+        # kinematics tightening). Red = cap rebuilding or shear weakening.
+        # Compute baseline risk zones to check if the morning had elevated tiers
+        _baseline_risk_zones = []
+        if _hrrr_baseline is not None and _hrrr_baseline is not hrrr_snap:
+            from ok_weather_model.processing.risk_zone import compute_risk_zones_from_hrrr as _rzh
+            _baseline_risk_zones = _rzh(
+                _hrrr_baseline, dryline=_dryline_for_risk, min_tier="MARGINAL"
+            )
+
+        _has_tendency = (
+            _hrrr_baseline is not None
+            and hrrr_snap is not None
+            and _hrrr_valid != _hrrr_baseline_valid
+        )
+        _elevated_now      = any(z.tier_rank >= 3 for z in risk_zones)
+        _elevated_baseline = any(z.tier_rank >= 3 for z in _baseline_risk_zones)
+
+        if _has_tendency and (_elevated_now or _elevated_baseline):
+            baseline_label = _hrrr_baseline_valid.strftime("%H:%MZ")
+            current_label  = _hrrr_valid.strftime("%H:%MZ")
+            hrs_elapsed = (
+                (_hrrr_valid - _hrrr_baseline_valid).total_seconds() / 3600.0
+            )
+
+            tend_tbl = Table(
+                title=(
+                    f"Environment Tendency  "
+                    f"{baseline_label} → {current_label}  "
+                    f"(+{hrs_elapsed:.0f} hr)  {today}"
+                ),
+                show_lines=True,
+            )
+            tend_tbl.add_column("County",      style="cyan", min_width=12)
+            tend_tbl.add_column("Tier",         min_width=14)
+            tend_tbl.add_column("ΔMLCIN",       justify="right",
+                                header_style="bold", style="")
+            tend_tbl.add_column("ΔMLCAPE",      justify="right")
+            tend_tbl.add_column("ΔSRH 0–1km",   justify="right")
+            tend_tbl.add_column("ΔSRH 0–3km",   justify="right")
+            tend_tbl.add_column("ΔEHI",          justify="right")
+            tend_tbl.add_column("Trend",         justify="center")
+
+            from ok_weather_model.processing.risk_zone import _TIER_RANK as _TR, _TIER_COLOR as _TC
+
+            def _delta_cin_str(d: float) -> str:
+                """Negative ΔCIN = cap eroding = good (green). Positive = rebuilding (red)."""
+                if d <= -30:  return f"[bright_green]{d:+.0f}[/bright_green]"
+                if d <= -10:  return f"[green]{d:+.0f}[/green]"
+                if d <    0:  return f"[bright_yellow]{d:+.0f}[/bright_yellow]"
+                if d <=  10:  return f"[yellow]{d:+.0f}[/yellow]"
+                return f"[red]{d:+.0f}[/red]"
+
+            def _delta_cape_str(d: float) -> str:
+                if d >= 500:  return f"[bright_green]{d:+.0f}[/bright_green]"
+                if d >= 200:  return f"[green]{d:+.0f}[/green]"
+                if d >= -200: return f"[bright_yellow]{d:+.0f}[/bright_yellow]"
+                return f"[red]{d:+.0f}[/red]"
+
+            def _delta_srh_str(d: float) -> str:
+                if d >= 50:   return f"[bright_green]{d:+.0f}[/bright_green]"
+                if d >= 20:   return f"[green]{d:+.0f}[/green]"
+                if d >= -20:  return f"[bright_yellow]{d:+.0f}[/bright_yellow]"
+                return f"[red]{d:+.0f}[/red]"
+
+            def _delta_ehi_str(d: float) -> str:
+                if d >= 0.5:  return f"[bright_green]{d:+.2f}[/bright_green]"
+                if d >= 0.1:  return f"[green]{d:+.2f}[/green]"
+                if d >= -0.1: return f"[bright_yellow]{d:+.2f}[/bright_yellow]"
+                return f"[red]{d:+.2f}[/red]"
+
+            def _trend_arrow(d_cin: float, d_srh: float, d_cape: float) -> str:
+                """Summarize overall trend as an arrow + label."""
+                score = 0
+                if d_cin  <  -10: score += 1
+                if d_cin  <= -30: score += 1
+                if d_srh  >   20: score += 1
+                if d_srh  >   50: score += 1
+                if d_cape >  200: score += 1
+                if d_cin  >   10: score -= 1
+                if d_srh  <  -20: score -= 1
+                if score >= 3:  return "[bright_green]▲▲ INCREASING[/bright_green]"
+                if score == 2:  return "[green]▲ Increasing[/green]"
+                if score == 1:  return "[bright_yellow]→ Slight ▲[/bright_yellow]"
+                if score == 0:  return "[yellow]→ Steady[/yellow]"
+                if score == -1: return "[red]▼ Decreasing[/red]"
+                return "[bright_red]▼▼ DECREASING[/bright_red]"
+
+            # Collect threat counties — prefer current elevated zones; fall back
+            # to baseline elevated zones when current tiers have dropped (the
+            # collapse itself is the signal worth reporting).
+            _ref_zones = risk_zones if _elevated_now else _baseline_risk_zones
+            _tend_counties: list[tuple[str, object, object]] = []
+            _seen_counties: set = set()
+            for zone in _ref_zones:
+                if zone.tier_rank < 3:
+                    continue
+                for county in zone.counties:
+                    if county in _seen_counties:
+                        continue
+                    _seen_counties.add(county)
+                    pt_now  = hrrr_snap.get(county)
+                    pt_base = _hrrr_baseline.get(county)
+                    if pt_now is not None and pt_base is not None:
+                        _tend_counties.append((zone.tier, pt_now, pt_base))
+
+            _tend_counties.sort(
+                key=lambda x: (_TR.get(x[0], 0), x[1].SRH_0_1km),
+                reverse=True,
+            )
+
+            for tier, pt_now, pt_base in _tend_counties:
+                color   = _TC.get(tier, "white")
+                d_cin   = pt_now.MLCIN  - pt_base.MLCIN
+                d_cape  = pt_now.MLCAPE - pt_base.MLCAPE
+                d_srh1  = pt_now.SRH_0_1km - pt_base.SRH_0_1km
+                d_srh3  = pt_now.SRH_0_3km - pt_base.SRH_0_3km
+                d_ehi   = (pt_now.EHI or 0.0) - (pt_base.EHI or 0.0)
+                tend_tbl.add_row(
+                    pt_now.county.name,
+                    f"[{color}]{tier}[/{color}]",
+                    _delta_cin_str(d_cin),
+                    _delta_cape_str(d_cape),
+                    _delta_srh_str(d_srh1),
+                    _delta_srh_str(d_srh3),
+                    _delta_ehi_str(d_ehi),
+                    _trend_arrow(d_cin, d_srh1, d_cape),
+                )
+
+            console.print(tend_tbl)
+
+            # Headline: summarize the dominant trend across the threat area
+            _increasing = sum(
+                1 for _, pt_now, pt_base in _tend_counties
+                if (pt_now.MLCIN - pt_base.MLCIN) < -10 or
+                   (pt_now.SRH_0_1km - pt_base.SRH_0_1km) > 20
+            )
+            _total_tc = len(_tend_counties)
+            if _total_tc > 0:
+                _pct = _increasing / _total_tc
+                if _pct >= 0.6:
+                    console.print(
+                        f"[bold bright_green]Threat trend:[/bold bright_green] "
+                        f"Environment actively evolving toward initiation — "
+                        f"{_increasing}/{_total_tc} counties showing cap erosion or "
+                        f"tightening kinematics."
+                    )
+                elif _pct >= 0.3:
+                    console.print(
+                        f"[bold yellow]Threat trend:[/bold yellow] "
+                        f"Mixed signals — {_increasing}/{_total_tc} counties trending "
+                        f"favorable. Monitor closely."
+                    )
+                else:
+                    console.print(
+                        f"[bold dim]Threat trend:[/bold dim] "
+                        f"Environment relatively steady to unfavorable since "
+                        f"{baseline_label}."
+                    )
 
     # ── Historical analogues ──────────────────────────────────────────────────
     console.rule("[bold]Historical Analogues[/bold]")
