@@ -120,6 +120,21 @@ After completing any feature or fix:
 
 The GitHub issue list (trevor-viljoen/kronos-wx) is the canonical backlog. Keep it current. When starting a session, check open issues to orient on priorities.
 
+### Issue labels
+- `enhancement` — new features and improvements
+- `architecture` — design decisions with cross-cutting impact (message bus, API shape, data models)
+- `infrastructure` — deployment, containers, DevOps
+- `long-term` — roadmap items not scheduled for near-term implementation
+
+### Architectural direction (roadmap)
+The long-term target is a containerized field deployment (issue #9):
+- **`kronos-worker`** — background fetch loop (HRRR, Mesonet, sounding); publishes to MQTT
+- **`kronos-api`** — FastAPI REST + WebSocket server (issue #7); bridges MQTT to HTTP clients
+- **`mosquitto`** — MQTT message bus (issue #8); retained messages for current state, QoS 1 for alerts
+- **`kronos-llm`** — optional Ollama container for on-device LLM narration (issue #10)
+
+All services share a `./data` volume. Coordination is via MQTT topics (`kronos/risk/#`, `kronos/alert/#`, `kronos/sensor/#`), not direct DB calls between services. Podman rootless is the target runtime.
+
 ## Configuration
 
 Copy `.env.example` to `.env`. ERA5 data requires a Copernicus CDS account and `CDS_API_KEY` in `.env` (format: `<UID>:<API-KEY>`). Wyoming sounding and Mesonet clients work without API keys but respect rate limits (`WYOMING_REQUEST_DELAY=2.0s`, `MESONET_REQUEST_DELAY=1.1s`).
