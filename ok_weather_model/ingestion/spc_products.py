@@ -143,9 +143,7 @@ def _fetch_mds_with_client(client: httpx.Client) -> list[MesoscaleDiscussion]:
         if md is not None:
             results.append(md)
 
-    # Prefer Oklahoma-relevant MDs; fall back to all active if none match
-    ok_mds = [md for md in results if md.mentions_oklahoma]
-    return ok_mds if ok_mds else results[:3]
+    return [md for md in results if md.mentions_oklahoma]
 
 
 def _fetch_single_md(
