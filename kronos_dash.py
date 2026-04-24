@@ -19,27 +19,34 @@ from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, ScrollableContainer
+from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, RichLog, Static, Rule
+from textual.widgets import Footer, Header, RichLog, Static
 from textual import work
+
+# Import all ok_weather_model modules at the top level so Python's import lock
+# is acquired and released once, before any @work(thread=True) workers start.
+# Lazy imports inside threaded workers cause _DeadlockError when multiple
+# workers fire simultaneously and race on the same _ModuleLock.
+from ok_weather_model.ingestion import SoundingClient, MesonetClient, HRRRClient
+from ok_weather_model.models import OklahomaSoundingStation, OklahomaCounty
+from ok_weather_model.models.mesonet import MesonetTimeSeries as _MTS
+from ok_weather_model.processing import (
+    compute_thermodynamic_indices,
+    compute_kinematic_profile,
+    detect_dryline,
+    compute_dryline_surge_rate,
+)
+from ok_weather_model.processing.cap_calculator import compute_ces_from_sounding
+from ok_weather_model.processing.risk_zone import (
+    compute_risk_zones_from_hrrr,
+    _TIER_RANK,
+    _TIER_COLOR,
+)
 
 
 # ── Tier display helpers ──────────────────────────────────────────────────────
-
-_TIER_COLOR = {
-    "EXTREME":          "bright_red",
-    "HIGH":             "red",
-    "DANGEROUS_CAPPED": "magenta",
-    "MODERATE":         "yellow",
-    "MARGINAL":         "green",
-    "LOW":              "dim",
-}
-
-_TIER_RANK = {
-    "EXTREME": 5, "HIGH": 4, "DANGEROUS_CAPPED": 3,
-    "MODERATE": 2, "MARGINAL": 1, "LOW": 0,
-}
+# _TIER_COLOR and _TIER_RANK are imported from ok_weather_model.processing.risk_zone
 
 _TIER_DESC = {
     "EXTREME":
@@ -380,14 +387,6 @@ class KronosDashboard(App):
 
     @work(thread=True, exclusive=True, group="sounding")
     def _do_sounding(self) -> None:
-        from datetime import date
-        from ok_weather_model.ingestion import SoundingClient
-        from ok_weather_model.models import OklahomaSoundingStation
-        from ok_weather_model.processing import (
-            compute_thermodynamic_indices, compute_kinematic_profile,
-        )
-        from ok_weather_model.processing.cap_calculator import compute_ces_from_sounding
-
         now_utc = datetime.now(tz=timezone.utc)
         today   = now_utc.date()
         try:
@@ -456,11 +455,6 @@ class KronosDashboard(App):
 
     @work(thread=True, exclusive=True, group="mesonet")
     def _do_mesonet(self) -> None:
-        from ok_weather_model.ingestion import MesonetClient
-        from ok_weather_model.models import OklahomaCounty
-        from ok_weather_model.models.mesonet import MesonetTimeSeries as _MTS
-        from ok_weather_model.processing import detect_dryline, compute_dryline_surge_rate
-
         now_utc = datetime.now(tz=timezone.utc)
         station_series: dict[str, _MTS] = {}
         snap_times: list[datetime] = []
@@ -497,8 +491,7 @@ class KronosDashboard(App):
 
         surge: Optional[float] = None
         if prev_dryline and current_dryline:
-            from ok_weather_model.processing import compute_dryline_surge_rate as _csr
-            surge = _csr(prev_dryline, current_dryline)
+            surge = compute_dryline_surge_rate(prev_dryline, current_dryline)
 
         surface_temp_c = None
         if snap_times:
@@ -551,9 +544,6 @@ class KronosDashboard(App):
 
     @work(thread=True, exclusive=True, group="hrrr")
     def _do_hrrr(self) -> None:
-        from ok_weather_model.ingestion import HRRRClient
-        from ok_weather_model.processing.risk_zone import compute_risk_zones_from_hrrr
-
         now_utc = datetime.now(tz=timezone.utc)
         today   = now_utc.date()
         snd_hour = self._snd_hour or 12
