@@ -1743,6 +1743,34 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
     _print_analogues(console, f"{stn.value}/{today}/{fetched_hour:02d}Z", scored[:n_analogues])
 
 
+# ── dashboard ────────────────────────────────────────────────────────────────
+
+@cli.command("dashboard")
+@click.option("--station", default="OUN", show_default=True,
+              help="Primary sounding station (OUN, LMN, AMA, DDC)")
+def dashboard(station: str):
+    """
+    Launch the real-time TUI dashboard.
+
+    Four panes update asynchronously on independent timers:
+      Risk Zones   — HRRR 3km county tiers          (every 15 min)
+      Environment  — OUN + LMN sounding + CES        (every 60 min)
+      Dryline      — Mesonet surface network          (every 5 min)
+      Tendency     — HRRR baseline vs current deltas  (every 15 min)
+
+    Alert log at the bottom scrolls all tier changes and dryline events.
+    Press R to force-refresh all data, Q to quit.
+
+    Requires: pip install textual
+    """
+    try:
+        from kronos_dash import KronosDashboard
+    except ImportError:
+        console.print("[red]textual is required: pip install textual[/red]")
+        return
+    KronosDashboard(station=station).run()
+
+
 # ── watch-now ─────────────────────────────────────────────────────────────────
 
 @cli.command("watch-now")
@@ -1950,12 +1978,40 @@ def watch_now(interval: int, min_tier: str, station: str):
                 current_dryline, prev_dryline, surface_temp_c)
 
     # ── Main watch loop ───────────────────────────────────────────────────────
+    from rich.table import Table as _RichTable
+    from rich.panel import Panel as _Panel
+
     console.rule(
         f"[bold cyan]KRONOS-WX WATCH  —  {station}  "
         f"interval={interval}min  alert≥{min_tier}[/bold cyan]"
     )
     console.print(f"[dim]Started {datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%MZ')}  "
-                  f"Press Ctrl-C to stop.[/dim]\n")
+                  f"Press Ctrl-C to stop.[/dim]")
+
+    # ── Tier legend ───────────────────────────────────────────────────────────
+    legend = _RichTable(box=None, padding=(0, 2, 0, 0), show_header=False)
+    legend.add_column(style="bold", min_width=20)
+    legend.add_column()
+    legend.add_row("[bright_red]EXTREME[/bright_red]",
+                   "Near-zero cap (CIN<50), high instability (CAPE≥1500), extreme kinematics "
+                   "(SRH1≥250, EHI≥3.5). Any storm that fires produces significant tornadoes.")
+    legend.add_row("[red]HIGH[/red]",
+                   "Manageable cap (CIN<100), strong instability (CAPE≥1000), strong kinematics "
+                   "(SRH1≥150, EHI≥2.0). Likely significant tornadoes with initiation.")
+    legend.add_row("[magenta]DANGEROUS_CAPPED[/magenta]",
+                   "Strong cap (CIN≥80) but violent kinematics (SRH1≥150, EHI≥2.0). "
+                   "Boundary-forced initiation — dryline surge, outflow, differential heating — "
+                   "can produce violent tornadoes with minimal warning. [italic](Apr 23 2026 pattern)[/italic]")
+    legend.add_row("[yellow]MODERATE[/yellow]",
+                   "Some tornado potential if cap erodes (CIN<200, CAPE≥500, SRH1≥100). "
+                   "Kinematics support organized convection but environment is limited.")
+    legend.add_row("[green]MARGINAL[/green]",
+                   "Isolated storm potential (CIN<250, CAPE≥200, SRH1≥50). "
+                   "Weakly forced environment; storms possible but not likely to be significant.")
+    console.print(_Panel(legend, title="[bold]Risk Tier Reference[/bold]",
+                         border_style="dim", padding=(0, 1)))
+    console.print(f"[dim]Alerts fire on tier changes ≥{min_tier}, trend flips, "
+                  f"and dryline events. Quiet cycles show a one-line status.[/dim]\n")
 
     try:
         while True:
