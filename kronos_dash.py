@@ -29,6 +29,12 @@ from textual import work
 # Lazy imports inside threaded workers cause _DeadlockError when multiple
 # workers fire simultaneously and race on the same _ModuleLock.
 from ok_weather_model.ingestion import SoundingClient, MesonetClient, HRRRClient
+from ok_weather_model.ingestion.spc_products import (
+    fetch_active_mds,
+    fetch_spc_outlook,
+    MesoscaleDiscussion,
+    SPCOutlook,
+)
 from ok_weather_model.models import OklahomaSoundingStation, OklahomaCounty
 from ok_weather_model.models.mesonet import MesonetTimeSeries as _MTS
 from ok_weather_model.processing import (
@@ -273,6 +279,71 @@ class TendencyPanel(Static):
         self.update("\n".join(lines))
 
 
+class SPCProductsPanel(Static):
+    DEFAULT_CSS = """
+    SPCProductsPanel {
+        border: solid $warning;
+        height: auto;
+        min-height: 5;
+        padding: 0 1;
+        overflow-y: auto;
+    }
+    """
+
+    # Outlook category color mapping
+    _CAT_COLOR = {
+        "HIGH":  "bright_red",
+        "MDT":   "red",
+        "ENH":   "dark_orange",
+        "SLGT":  "yellow",
+        "MRGL":  "green",
+        "TSTM":  "dim",
+        "NONE":  "dim",
+    }
+
+    def render_spc(
+        self,
+        mds: list[MesoscaleDiscussion],
+        outlook: Optional[SPCOutlook],
+        fetch_label: str,
+    ) -> None:
+        lines = [f"[bold yellow]SPC PRODUCTS[/bold yellow]  {fetch_label}"]
+
+        # ── Day 1 outlook line ────────────────────────────────────────────────
+        if outlook is not None:
+            cat   = outlook.category
+            color = self._CAT_COLOR.get(cat, "white")
+            prob  = outlook.max_tornado_prob
+            prob_str = f"  torn {prob:.0%}" if prob is not None else ""
+            lines.append(
+                f"D1 Outlook: [{color}]{cat}[/{color}]{prob_str}"
+            )
+        else:
+            lines.append("[dim]D1 Outlook: unavailable[/dim]")
+
+        lines.append("")
+
+        # ── Active Mesoscale Discussions ──────────────────────────────────────
+        if not mds:
+            lines.append("[dim]No active SPC Mesoscale Discussions for Oklahoma[/dim]")
+        else:
+            for md in mds:
+                ok_tag = " [cyan](OK)[/cyan]" if md.mentions_oklahoma else ""
+                lines.append(
+                    f"[bold]MD #{md.number:04d}[/bold]{ok_tag}"
+                )
+                if md.areas_affected:
+                    lines.append(f"  [dim]Areas:[/dim] {md.areas_affected}")
+                if md.concerning:
+                    lines.append(f"  [dim]Re:[/dim]    {md.concerning}")
+                for body_line in md.body_lines[:3]:
+                    lines.append(f"  {body_line}")
+                lines.append(f"  [dim]{md.url}[/dim]")
+                lines.append("")
+
+        self.update("\n".join(lines))
+
+
 class AlertLog(RichLog):
     DEFAULT_CSS = """
     AlertLog {
@@ -296,7 +367,7 @@ class KronosDashboard(App):
     Screen {
         layout: grid;
         grid-size: 2;
-        grid-rows: 1fr 10;
+        grid-rows: 1fr auto 10;
     }
 
     #left-col {
@@ -307,6 +378,13 @@ class KronosDashboard(App):
     #right-col {
         layout: vertical;
         height: 1fr;
+    }
+
+    #spc-row {
+        column-span: 2;
+        height: auto;
+        min-height: 5;
+        max-height: 16;
     }
 
     #alert-row {
@@ -356,6 +434,11 @@ class KronosDashboard(App):
         self._prev_county_tiers: dict = {}
         self._prev_dryline_lon:  Optional[float] = None
 
+        # SPC products
+        self._spc_mds:     list = []
+        self._spc_outlook: Optional[SPCOutlook] = None
+        self._spc_label:   str = "—"
+
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal():
@@ -365,6 +448,7 @@ class KronosDashboard(App):
             with Vertical(id="right-col"):
                 yield EnvironmentPanel(id="env-panel")
                 yield TendencyPanel(id="tend-panel")
+        yield SPCProductsPanel(id="spc-panel")
         yield AlertLog(id="alert-log", highlight=True, markup=True)
         yield Footer()
 
@@ -373,14 +457,17 @@ class KronosDashboard(App):
         self._do_sounding()
         self._do_mesonet()
         self._do_hrrr()
+        self._do_spc()
 
         self.set_interval(60 * 60, self._do_sounding)   # 60 min
         self.set_interval(5  * 60, self._do_mesonet)    # 5 min
         self.set_interval(15 * 60, self._do_hrrr)       # 15 min
+        self.set_interval(10 * 60, self._do_spc)        # 10 min
 
     def action_force_refresh(self) -> None:
         self._do_mesonet()
         self._do_hrrr()
+        self._do_spc()
         self.query_one(AlertLog).add_alert("[dim]Manual refresh triggered[/dim]")
 
     # ── Workers ───────────────────────────────────────────────────────────────
@@ -665,3 +752,47 @@ class KronosDashboard(App):
         self.query_one(TendencyPanel).render_tendency(
             tend_counties, base_label, hrrr_label
         )
+
+    # ── SPC products worker ───────────────────────────────────────────────────
+
+    @work(thread=True, exclusive=True, group="spc")
+    def _do_spc(self) -> None:
+        mds     = fetch_active_mds()
+        outlook = fetch_spc_outlook()
+        label   = datetime.now(tz=timezone.utc).strftime("%H:%MZ")
+        self.call_from_thread(self._update_spc, mds, outlook, label)
+
+    def _update_spc(
+        self,
+        mds: list,
+        outlook: Optional[SPCOutlook],
+        label: str,
+    ) -> None:
+        alert_log = self.query_one(AlertLog)
+
+        # Alert on new Oklahoma-relevant MD
+        new_ok_nums = {md.number for md in mds if md.mentions_oklahoma}
+        old_ok_nums = {md.number for md in self._spc_mds if md.mentions_oklahoma}
+        for md in mds:
+            if md.mentions_oklahoma and md.number not in old_ok_nums:
+                alert_log.add_alert(
+                    f"[bold yellow]SPC MD #{md.number:04d}[/bold yellow]  "
+                    f"{md.concerning or md.areas_affected or 'active'}"
+                )
+
+        # Alert on outlook upgrade
+        if outlook and self._spc_outlook:
+            _rank = {"NONE": 0, "TSTM": 1, "MRGL": 2, "SLGT": 3, "ENH": 4, "MDT": 5, "HIGH": 6}
+            old_r = _rank.get(self._spc_outlook.category, 0)
+            new_r = _rank.get(outlook.category, 0)
+            if new_r > old_r and new_r >= 3:
+                color = SPCProductsPanel._CAT_COLOR.get(outlook.category, "yellow")
+                alert_log.add_alert(
+                    f"[{color}]SPC D1 upgraded to {outlook.category}[/{color}]"
+                    + (f"  torn {outlook.max_tornado_prob:.0%}" if outlook.max_tornado_prob else "")
+                )
+
+        self._spc_mds     = mds
+        self._spc_outlook = outlook
+        self._spc_label   = label
+        self.query_one(SPCProductsPanel).render_spc(mds, outlook, label)
