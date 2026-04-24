@@ -116,7 +116,7 @@ After completing any feature or fix:
 3. **Push** — `git push` after every commit unless the user says otherwise.
 4. **Close GitHub issues** — if the work closes an open issue, close it with `gh issue close <N> --comment "..."`. Do this every session.
 5. **Update CLAUDE.md** — if new CLI commands, architectural patterns, or domain concepts were added, update the relevant section immediately. Don't defer.
-6. **Open new GitHub issues** for work that was discovered but not done in the current session. Use `gh issue create --title "..." --body "..." --label enhancement` so nothing falls through the cracks.
+6. **Open new GitHub issues** for any work discovered but not done in the current session, and for any new ideas or architectural thoughts raised in conversation. Use `gh issue create --title "..." --body "..." --label <labels>` and immediately add to the project with `gh project item-add 1 --owner trevor-viljoen --url <issue-url>`. Nothing gets discussed and dropped — if it's worth saying, it's worth an issue.
 
 The GitHub issue list (trevor-viljoen/kronos-wx) is the canonical backlog. Keep it current. When starting a session, check open issues to orient on priorities.
 
