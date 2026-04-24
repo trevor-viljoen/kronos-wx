@@ -69,10 +69,11 @@ class SPCOutlook:
     """
     Current SPC Day 1 convective outlook summary for Oklahoma.
     """
-    category:          str            # TSTM / MRGL / SLGT / ENH / MDT / HIGH / NONE
-    max_tornado_prob:  Optional[float]  # 0.02, 0.05, 0.10, 0.15, 0.30, 0.45, 0.60
-    issued_utc:        Optional[datetime] = None
-    valid_label:       str = ""       # e.g. "Valid 20Z Fri – 12Z Sat"
+    category:                str            # TSTM / MRGL / SLGT / ENH / MDT / HIGH / NONE
+    max_tornado_prob:         Optional[float]  # 0.02, 0.05, 0.10 …
+    sig_tornado_hatched:      bool = False  # CIG1 / SIGN hatch intersects Oklahoma
+    issued_utc:               Optional[datetime] = None
+    valid_label:              str = ""
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -276,8 +277,9 @@ def _fetch_outlook_with_client(client: httpx.Client) -> Optional[SPCOutlook]:
                 best_cat = label
         valid_label = props.get("VALID", "") or valid_label
 
-    # Tornado probability
+    # Tornado probability + significant hatch
     max_torn_prob: Optional[float] = None
+    sig_hatched = False
     try:
         torn_resp = client.get(_D1_TORN_URL)
         torn_resp.raise_for_status()
@@ -287,6 +289,15 @@ def _fetch_outlook_with_client(client: httpx.Client) -> Optional[SPCOutlook]:
             label = (props.get("LABEL") or "").strip()
             if not label:
                 continue
+
+            geom = feature.get("geometry", {})
+
+            # Significant tornado hatch: CIG1 (current) or SIGN (legacy)
+            if label.upper() in ("CIG1", "SIGN"):
+                if _geojson_intersects_ok(geom):
+                    sig_hatched = True
+                continue
+
             try:
                 raw = float(label.replace("%", "").strip())
                 # LABEL is already a decimal (0.02, 0.05 …); only divide if
@@ -294,7 +305,7 @@ def _fetch_outlook_with_client(client: httpx.Client) -> Optional[SPCOutlook]:
                 prob = raw / 100.0 if raw > 1.0 else raw
             except ValueError:
                 continue
-            if _geojson_intersects_ok(feature.get("geometry", {})) and (
+            if _geojson_intersects_ok(geom) and (
                 max_torn_prob is None or prob > max_torn_prob
             ):
                 max_torn_prob = prob
@@ -304,6 +315,7 @@ def _fetch_outlook_with_client(client: httpx.Client) -> Optional[SPCOutlook]:
     return SPCOutlook(
         category=best_cat,
         max_tornado_prob=max_torn_prob,
+        sig_tornado_hatched=sig_hatched,
         valid_label=valid_label,
     )
 

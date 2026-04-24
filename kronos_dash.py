@@ -315,8 +315,10 @@ class SPCProductsPanel(Static):
             color = self._CAT_COLOR.get(cat, "white")
             prob  = outlook.max_tornado_prob
             prob_str = f"  torn {prob:.0%}" if prob is not None else ""
+            sig_str  = "  [bold bright_red]** SIG TORNADO HATCHED **[/bold bright_red]" \
+                       if outlook.sig_tornado_hatched else ""
             lines.append(
-                f"D1 Outlook: [{color}]{cat}[/{color}]{prob_str}"
+                f"D1 Outlook: [{color}]{cat}[/{color}]{prob_str}{sig_str}"
             )
         else:
             lines.append("[dim]D1 Outlook: unavailable[/dim]")
@@ -780,7 +782,7 @@ class KronosDashboard(App):
                     f"{md.concerning or md.areas_affected or 'active'}"
                 )
 
-        # Alert on outlook upgrade
+        # Alert on outlook upgrade or new sig hatch
         if outlook and self._spc_outlook:
             _rank = {"NONE": 0, "TSTM": 1, "MRGL": 2, "SLGT": 3, "ENH": 4, "MDT": 5, "HIGH": 6}
             old_r = _rank.get(self._spc_outlook.category, 0)
@@ -790,6 +792,10 @@ class KronosDashboard(App):
                 alert_log.add_alert(
                     f"[{color}]SPC D1 upgraded to {outlook.category}[/{color}]"
                     + (f"  torn {outlook.max_tornado_prob:.0%}" if outlook.max_tornado_prob else "")
+                )
+            if outlook.sig_tornado_hatched and not self._spc_outlook.sig_tornado_hatched:
+                alert_log.add_alert(
+                    "[bold bright_red]SPC D1: significant tornado hatch added over Oklahoma[/bold bright_red]"
                 )
 
         self._spc_mds     = mds
