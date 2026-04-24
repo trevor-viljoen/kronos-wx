@@ -754,6 +754,35 @@ def analyze_cap_behavior(case_ref: str, forcing_window_hours: int):
 
 # ── Shared analogue helpers ────────────────────────────────────────────────────
 
+def _dangerous_capped_flag(
+    indices,
+    kinematics,
+) -> tuple[bool, list[str]]:
+    """
+    Return (flag, reasons) when a strong cap sits over a violent kinematic
+    environment — the BOUNDARY_FORCED miss pattern.
+
+    Thresholds are intentionally modest: we want early warning, not perfect
+    precision. A false positive on a busted severe day is far less costly than
+    a missed outbreak.
+    """
+    if indices is None or indices.MLCIN < 80:
+        return False, []
+
+    reasons: list[str] = []
+    if kinematics:
+        if kinematics.SRH_0_1km > 150:
+            reasons.append(f"SRH 0–1km {kinematics.SRH_0_1km:.0f} m²/s²")
+        if kinematics.SRH_0_3km > 300:
+            reasons.append(f"SRH 0–3km {kinematics.SRH_0_3km:.0f} m²/s²")
+        if kinematics.EHI is not None and kinematics.EHI > 2.5:
+            reasons.append(f"EHI {kinematics.EHI:.2f}")
+        if kinematics.BWD_0_6km > 50:
+            reasons.append(f"Shear 0–6km {kinematics.BWD_0_6km:.0f} kt")
+
+    return bool(reasons), reasons
+
+
 def _feature_vector(
     indices,
     kinematics,
@@ -766,6 +795,12 @@ def _feature_vector(
     Returns None if required fields are missing.
     All components are already multiplied by their weight so that
     Euclidean distance reflects relative importance directly.
+
+    Modes
+    -----
+    cap        — cap/thermodynamic similarity (default)
+    full       — cap + kinematics blended
+    kinematics — shear/helicity similarity; ignores cap state
     """
     if indices is None:
         return None
@@ -774,16 +809,26 @@ def _feature_vector(
     def _norm(v, lo, hi):
         return max(0.0, min(1.0, (v - lo) / (hi - lo)))
 
-    mlcin    = _norm(indices.MLCIN,            0,   350)   # J/kg
-    cap      = _norm(indices.cap_strength,     0,   7.0)   # °C
-    cape     = _norm(indices.MLCAPE,           0,  5000)   # J/kg
-    lapse    = _norm(indices.lapse_rate_700_500, 5.0, 10.0)# °C/km
+    mlcin    = _norm(indices.MLCIN,              0,   350)   # J/kg
+    cap      = _norm(indices.cap_strength,       0,   7.0)   # °C
+    cape     = _norm(indices.MLCAPE,             0,  5000)   # J/kg
+    lapse    = _norm(indices.lapse_rate_700_500, 5.0, 10.0)  # °C/km
     tc_gap   = _norm(tc_gap_12z if tc_gap_12z is not None else 20, -15, 70)
 
     if mode == "cap":
         weights = [0.30, 0.28, 0.20, 0.12, 0.10]
         raw     = [mlcin, cap, tc_gap, cape, lapse]
-    else:  # full — add kinematics
+    elif mode == "kinematics":
+        if kinematics is None:
+            return None
+        srh1  = _norm(kinematics.SRH_0_1km,           0, 600)
+        srh3  = _norm(kinematics.SRH_0_3km,           0, 800)
+        shear = _norm(kinematics.BWD_0_6km,            0,  80)
+        ehi   = _norm((kinematics.EHI or 0),           0,   8)
+        cape2 = _norm(indices.MLCAPE,                  0, 5000)
+        weights = [0.30, 0.25, 0.20, 0.15, 0.10]
+        raw     = [srh1, srh3, shear, ehi, cape2]
+    else:  # full — cap + kinematics blended
         srh    = _norm(kinematics.SRH_0_3km if kinematics else 0,    0, 600)
         shear  = _norm(kinematics.BWD_0_6km if kinematics else 0,    0,  80)
         stp    = _norm((kinematics.STP or 0) if kinematics else 0,   0,   8)
@@ -886,9 +931,9 @@ def _print_analogues(
 @click.argument("case_ref")
 @click.option("--top", default=10, show_default=True,
               help="Number of closest analogues to return")
-@click.option("--mode", type=click.Choice(["cap", "full"]), default="cap",
-              show_default=True,
-              help="cap = cap diagnostics only; full = cap + kinematics")
+@click.option("--mode", type=click.Choice(["cap", "full", "kinematics"]),
+              default="cap", show_default=True,
+              help="cap = cap diagnostics; full = cap+kinematics; kinematics = shear/SRH only")
 @click.option("--min-year", default=None, type=int,
               help="Restrict analogues to cases from this year onward")
 def find_analogues(case_ref: str, top: int, mode: str, min_year: int | None):
@@ -900,6 +945,10 @@ def find_analogues(case_ref: str, top: int, mode: str, min_year: int | None):
     In 'cap' mode the distance metric weights MLCIN, cap strength, and
     convective temperature gap most heavily — best for finding cases with
     a similar erosion challenge.
+
+    In 'kinematics' mode the metric weights SRH 0-1km, SRH 0-3km, bulk shear,
+    and EHI — useful for asking "what happened on other days with this wind
+    profile?" regardless of cap state.
 
     In 'full' mode kinematic parameters (SRH, bulk shear, STP) are also
     included — best for finding end-to-end analogues for a storm event.
@@ -969,8 +1018,9 @@ def find_analogues(case_ref: str, top: int, mode: str, min_year: int | None):
               help="Specific UTC hour to fetch (auto-detects latest if omitted)")
 @click.option("--analogues", "n_analogues", default=8, show_default=True,
               help="Number of historical analogues to display")
-@click.option("--mode", type=click.Choice(["cap", "full"]), default="cap",
-              show_default=True)
+@click.option("--mode", type=click.Choice(["cap", "full", "kinematics"]),
+              default="cap", show_default=True,
+              help="Analogue scoring: cap = thermodynamic; full = cap+kinematics; kinematics = shear/SRH only")
 def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
     """
     Fetch the latest available sounding and analyze current cap conditions.
@@ -1039,7 +1089,7 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
             console.print(f"[red]MetPy computation failed: {exc}[/red]")
             return
 
-    # ── Sounding summary table ────────────────────────────────────────────────
+    # ── Color helpers ─────────────────────────────────────────────────────────
     def _cape_c(v):
         if v >= 3000: return "bright_red"
         if v >= 2000: return "red"
@@ -1060,37 +1110,119 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
         if v >= 1.0:  return "yellow"
         return "green"
 
+    def _srh_c(v):
+        if v >= 400: return "bright_red"
+        if v >= 250: return "red"
+        if v >= 150: return "yellow"
+        return "white"
+
+    def _ehi_c(v):
+        if v >= 4.0: return "bright_red"
+        if v >= 2.5: return "red"
+        if v >= 1.5: return "yellow"
+        return "white"
+
+    # ── Fetch secondary station (LMN — northern OK, 36.7°N) ──────────────────
+    # LMN covers the Grant/Kay/Garfield county corridor — the most common
+    # northern-OK initiation zone. Fetching it alongside OUN reveals N-S
+    # thermodynamic variation that a single-station view misses entirely.
+    lmn_indices   = None
+    lmn_kinematics = None
+    lmn_fetched   = False
+    if stn == OklahomaSoundingStation.OUN:
+        with console.status("Fetching LMN (Lamont, northern OK) sounding..."):
+            with SoundingClient() as sc2:
+                lmn_profile = sc2.get_sounding(
+                    OklahomaSoundingStation.LMN, today, fetched_hour
+                )
+        if lmn_profile is not None:
+            try:
+                lmn_indices    = compute_thermodynamic_indices(lmn_profile)
+                lmn_kinematics = compute_kinematic_profile(lmn_profile, lmn_indices)
+                lmn_fetched    = True
+            except Exception:
+                pass  # LMN failure is non-fatal; proceed with OUN only
+
+    # ── Multi-station comparison table ────────────────────────────────────────
+    def _fmt_val(val, fmt, color_fn=None):
+        """Format a value with optional Rich color markup."""
+        import math as _math
+        if val is None or (isinstance(val, float) and _math.isnan(val)):
+            return "—"
+        s = fmt.format(val)
+        if color_fn:
+            c = color_fn(val)
+            return f"[{c}]{s}[/{c}]"
+        return s
+
     snd_tbl = Table(
-        title=f"Sounding — {stn.value}  {fetched_hour:02d}Z  {today}",
+        title=f"Sounding Comparison — {fetched_hour:02d}Z  {today}",
         show_lines=True,
     )
-    snd_tbl.add_column("Parameter", style="cyan")
-    snd_tbl.add_column("Value")
+    snd_tbl.add_column("Parameter",       style="cyan")
+    snd_tbl.add_column("OUN  Norman 35.2°N", justify="right")
+    if lmn_fetched:
+        snd_tbl.add_column("LMN  Lamont 36.7°N", justify="right")
 
-    cape = indices.MLCAPE
-    cin  = indices.MLCIN
-    cap  = indices.cap_strength
+    def _row(label, oun_val, lmn_val, fmt, color_fn=None):
+        cols = [label, _fmt_val(oun_val, fmt, color_fn)]
+        if lmn_fetched:
+            cols.append(_fmt_val(lmn_val, fmt, color_fn))
+        snd_tbl.add_row(*cols)
 
-    snd_tbl.add_row("MLCAPE",       f"[{_cape_c(cape)}]{cape:.0f} J/kg[/{_cape_c(cape)}]")
-    snd_tbl.add_row("MLCIN",        f"[{_cin_c(cin)}]{cin:.0f} J/kg[/{_cin_c(cin)}]")
-    snd_tbl.add_row("Cap Strength", f"[{_cap_c(cap)}]{cap:.1f}°C[/{_cap_c(cap)}]")
-    snd_tbl.add_row("SBCAPE",       f"{indices.SBCAPE:.0f} J/kg")
-    snd_tbl.add_row("LCL Height",   f"{indices.LCL_height:.0f} m AGL")
-    if indices.LFC_height is not None:
-        snd_tbl.add_row("LFC Height", f"{indices.LFC_height:.0f} m AGL")
-    if indices.EL_height is not None:
-        snd_tbl.add_row("EL Height",  f"{indices.EL_height:.0f} m AGL")
-    snd_tbl.add_row("Lapse 700–500", f"{indices.lapse_rate_700_500:.1f} °C/km")
-    snd_tbl.add_row("Conv. Temp (Tc)", f"{indices.convective_temperature:.1f}°F")
-    if kinematics:
-        snd_tbl.add_row("SRH 0–3 km",  f"{kinematics.SRH_0_3km:.0f} m²/s²")
-        snd_tbl.add_row("Shear 0–6 km", f"{kinematics.BWD_0_6km:.0f} kt")
-        if kinematics.STP is not None:
-            snd_tbl.add_row("STP",   f"{kinematics.STP:.2f}")
-        if kinematics.SCP is not None:
-            snd_tbl.add_row("SCP",   f"{kinematics.SCP:.2f}")
+    _row("MLCAPE",        indices.MLCAPE,             lmn_indices.MLCAPE             if lmn_indices else None, "{:.0f} J/kg",   _cape_c)
+    _row("MLCIN",         indices.MLCIN,              lmn_indices.MLCIN              if lmn_indices else None, "{:.0f} J/kg",   _cin_c)
+    _row("Cap Strength",  indices.cap_strength,       lmn_indices.cap_strength       if lmn_indices else None, "{:.1f}°C",      _cap_c)
+    _row("LCL Height",    indices.LCL_height,         lmn_indices.LCL_height         if lmn_indices else None, "{:.0f} m AGL")
+    _row("LFC Height",    indices.LFC_height,         lmn_indices.LFC_height         if lmn_indices else None, "{:.0f} m AGL")
+    _row("Lapse 700–500", indices.lapse_rate_700_500, lmn_indices.lapse_rate_700_500 if lmn_indices else None, "{:.1f} °C/km")
+    _row("Conv. Temp Tc", indices.convective_temperature, lmn_indices.convective_temperature if lmn_indices else None, "{:.1f}°F")
+
+    # Kinematics rows
+    oun_srh1  = kinematics.SRH_0_1km  if kinematics else None
+    oun_srh3  = kinematics.SRH_0_3km  if kinematics else None
+    oun_bwd6  = kinematics.BWD_0_6km  if kinematics else None
+    oun_ehi   = kinematics.EHI        if kinematics else None
+    oun_stp   = kinematics.STP        if kinematics else None
+    oun_scp   = kinematics.SCP        if kinematics else None
+    lmn_srh1  = lmn_kinematics.SRH_0_1km if lmn_kinematics else None
+    lmn_srh3  = lmn_kinematics.SRH_0_3km if lmn_kinematics else None
+    lmn_bwd6  = lmn_kinematics.BWD_0_6km if lmn_kinematics else None
+    lmn_ehi   = lmn_kinematics.EHI       if lmn_kinematics else None
+    lmn_stp   = lmn_kinematics.STP       if lmn_kinematics else None
+    lmn_scp   = lmn_kinematics.SCP       if lmn_kinematics else None
+
+    _row("SRH 0–1km",    oun_srh1, lmn_srh1, "{:.0f} m²/s²", _srh_c)
+    _row("SRH 0–3km",    oun_srh3, lmn_srh3, "{:.0f} m²/s²", _srh_c)
+    _row("Shear 0–6km",  oun_bwd6, lmn_bwd6, "{:.0f} kt")
+    _row("EHI",          oun_ehi,  lmn_ehi,  "{:.2f}",        _ehi_c)
+    _row("STP",          oun_stp,  lmn_stp,  "{:.2f}")
+    _row("SCP",          oun_scp,  lmn_scp,  "{:.2f}")
 
     console.print(snd_tbl)
+
+    # ── DANGEROUS CAPPED warning ──────────────────────────────────────────────
+    # Check both stations; the warning fires if EITHER environment is dangerous.
+    # A capped northern-OK environment with violent shear is exactly what
+    # produced yesterday's tornadoes while OUN looked benign.
+    flag_oun, reasons_oun = _dangerous_capped_flag(indices, kinematics)
+    flag_lmn, reasons_lmn = _dangerous_capped_flag(lmn_indices, lmn_kinematics)
+
+    if flag_oun or flag_lmn:
+        from rich.panel import Panel
+        lines = ["[bold red]Cap is strong but the kinematic environment is in violent-tornado range.[/bold red]",
+                 "Any boundary-forced initiation — dryline surge, outflow, differential heating —",
+                 "could produce significant tornadoes with little or no warning time.", ""]
+        if flag_oun and reasons_oun:
+            lines.append(f"[yellow]OUN (central OK):[/yellow]  {' | '.join(reasons_oun)}")
+        if flag_lmn and reasons_lmn:
+            lines.append(f"[yellow]LMN (northern OK):[/yellow] {' | '.join(reasons_lmn)}")
+        console.print(Panel(
+            "\n".join(lines),
+            title="[bold red on white] ⚠  DANGEROUS CAPPED ENVIRONMENT [/bold red on white]",
+            border_style="red",
+            padding=(1, 2),
+        ))
 
     # ── Mesonet: surface temp + dryline detection ────────────────────────────────
     # Fetch the current snapshot plus snapshots 1 hr and 2 hrs ago so that the
@@ -1150,6 +1282,7 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
                 break
 
     # ── Dryline detection ─────────────────────────────────────────────────────
+    current_dryline = None   # set below if Mesonet data was available
     if snap_times_fetched:
         current_snap = snap_times_fetched[0]
         current_dryline = detect_dryline(station_series, current_snap)
@@ -1240,6 +1373,72 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
             f"[dim]CES projection uses the 12Z sounding — "
             f"fetched {fetched_hour:02d}Z, skipping CES.[/dim]"
         )
+
+    # ── Risk zone map ─────────────────────────────────────────────────────────
+    # Interpolate between OUN and LMN by county latitude to produce a
+    # county-resolution risk picture across Oklahoma.
+    console.rule("[bold]County Risk Zones[/bold]")
+    from ok_weather_model.processing.risk_zone import compute_risk_zones
+
+    # Use the dryline from this session if detected
+    _dryline_for_risk = current_dryline if snap_times_fetched else None
+
+    risk_zones = compute_risk_zones(
+        oun_indices=indices,
+        oun_kinematics=kinematics,
+        lmn_indices=lmn_indices,
+        lmn_kinematics=lmn_kinematics,
+        dryline=_dryline_for_risk,
+        min_tier="MARGINAL",
+    )
+
+    if not risk_zones:
+        console.print("[dim]No elevated risk areas identified.[/dim]")
+    else:
+        rz_tbl = Table(
+            title=f"Risk Zones — OUN+LMN interpolated  {fetched_hour:02d}Z  {today}",
+            show_lines=True,
+        )
+        rz_tbl.add_column("Tier",         style="bold",    min_width=18)
+        rz_tbl.add_column("Counties",                      min_width=8)
+        rz_tbl.add_column("Center",       justify="right")
+        rz_tbl.add_column("Span",         justify="right")
+        rz_tbl.add_column("Peak CAPE",    justify="right")
+        rz_tbl.add_column("Peak CIN",     justify="right")
+        rz_tbl.add_column("Peak SRH1",    justify="right")
+        rz_tbl.add_column("Peak EHI",     justify="right")
+
+        for zone in risk_zones:
+            county_names = ", ".join(c.name for c in zone.counties[:6])
+            if len(zone.counties) > 6:
+                county_names += f" +{len(zone.counties) - 6} more"
+            span_str = f"{zone.span_ew_mi:.0f}×{zone.span_ns_mi:.0f} mi"
+            center_str = f"{zone.center_lat:.1f}°N, {abs(zone.center_lon):.1f}°W"
+            rz_tbl.add_row(
+                f"[{zone.color}]{zone.tier}[/{zone.color}]",
+                county_names,
+                center_str,
+                span_str,
+                f"{zone.peak_MLCAPE:.0f} J/kg",
+                f"{zone.peak_MLCIN:.0f} J/kg",
+                f"{zone.peak_SRH_0_1km:.0f} m²/s²",
+                f"{zone.peak_EHI:.2f}",
+            )
+
+        console.print(rz_tbl)
+
+        # Narrative summary for the highest tier
+        top = risk_zones[0]
+        if top.tier_rank >= 3:  # DANGEROUS_CAPPED or higher
+            county_list = ", ".join(c.name for c in top.counties[:8])
+            if len(top.counties) > 8:
+                county_list += f" and {len(top.counties) - 8} others"
+            console.print(
+                f"\n[bold {top.color}]Primary risk corridor:[/bold {top.color}] "
+                f"{county_list}\n"
+                f"  ~{top.span_ew_mi:.0f} mi wide × {top.span_ns_mi:.0f} mi tall, "
+                f"centered {top.center_lat:.1f}°N / {abs(top.center_lon):.1f}°W"
+            )
 
     # ── Historical analogues ──────────────────────────────────────────────────
     console.rule("[bold]Historical Analogues[/bold]")

@@ -21,6 +21,12 @@ from .dryline_detector import (
     compute_dryline_surge_rate,
     analyze_dryline_from_mesonet,
 )
+from .risk_zone import (
+    build_county_environments,
+    compute_risk_zones,
+    RiskZone,
+    CountyEnvironment,
+)
 
 __all__ = [
     "compute_thermodynamic_indices",
@@ -38,4 +44,8 @@ __all__ = [
     "detect_dryline",
     "compute_dryline_surge_rate",
     "analyze_dryline_from_mesonet",
+    "build_county_environments",
+    "compute_risk_zones",
+    "RiskZone",
+    "CountyEnvironment",
 ]
