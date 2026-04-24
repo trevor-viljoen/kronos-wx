@@ -6,14 +6,14 @@ providing hourly analysis fields at 31km resolution over the Oklahoma domain.
 
 Setup (one-time):
     1. Register at https://cds.climate.copernicus.eu/user/register
-    2. Accept the ERA5 terms of use
-    3. Create ~/.cdsapirc with your UID and API key:
+    2. Accept the ERA5 terms of use at:
+       https://cds.climate.copernicus.eu/datasets/reanalysis-era5-pressure-levels?tab=download#manage-licences
+    3. Create ~/.cdsapirc with your API key (new CDS API format):
 
-       url: https://cds.climate.copernicus.eu/api/v2
-       key: <UID>:<API-KEY>
-       verify: 0
+       url: https://cds.climate.copernicus.eu/api
+       key: <YOUR-API-KEY>
 
-    4. Set CDS_API_KEY=<UID>:<API-KEY> in your .env as a fallback
+    4. Set CDS_API_KEY=<YOUR-API-KEY> in your .env as a fallback
 
 Dependencies: pip install cdsapi xarray cfgrib
 """
@@ -52,6 +52,44 @@ UPPER_AIR_VARS = [
     "geopotential",
     "specific_humidity",
 ]
+
+
+# ── Dataset normalization ─────────────────────────────────────────────────────
+# The new CDS API (2024+) returns short variable names and different dimension
+# names vs the legacy API. Normalize everything to the long-name convention that
+# era5_diagnostics.py expects so the processing layer never has to care.
+
+_VAR_RENAME = {
+    "t": "temperature",
+    "u": "u_component_of_wind",
+    "v": "v_component_of_wind",
+    "w": "vertical_velocity",
+    "z": "geopotential",
+    "q": "specific_humidity",
+}
+
+_DIM_RENAME = {
+    "valid_time":     "time",
+    "pressure_level": "level",
+}
+
+
+def _normalize_era5_dataset(ds):
+    """
+    Rename CDS API short variable/dimension names to the long-name convention.
+    Passes through datasets that already use the long names (idempotent).
+    """
+    # Rename dimensions that exist
+    dim_map = {k: v for k, v in _DIM_RENAME.items() if k in ds.dims}
+    if dim_map:
+        ds = ds.rename(dim_map)
+
+    # Rename variables that exist
+    var_map = {k: v for k, v in _VAR_RENAME.items() if k in ds.data_vars}
+    if var_map:
+        ds = ds.rename(var_map)
+
+    return ds
 
 
 class ERA5Client:
@@ -131,7 +169,7 @@ class ERA5Client:
 
         if cache_path.exists():
             logger.info("Loading ERA5 from cache: %s", cache_path)
-            return xr.open_dataset(cache_path)
+            return _normalize_era5_dataset(xr.open_dataset(cache_path))
 
         cds = self._get_cds_client()
         hour_strings = [f"{h:02d}:00" for h in hours]
@@ -162,7 +200,7 @@ class ERA5Client:
             cds.retrieve("reanalysis-era5-pressure-levels", request, str(tmp_path))
             tmp_path.rename(cache_path)
             logger.info("ERA5 download complete → %s", cache_path)
-            return xr.open_dataset(cache_path)
+            return _normalize_era5_dataset(xr.open_dataset(cache_path))
         except Exception as exc:
             tmp_path.unlink(missing_ok=True)
             raise RuntimeError(f"ERA5 download failed: {exc}") from exc
