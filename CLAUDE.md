@@ -39,6 +39,11 @@ python main.py analyze-now --mode kinematics      # weight shear/SRH in analogue
 python main.py analyze-now --forecast-hour 24     # HRRR county risk map for valid time = now+24h
 python main.py watch-now                          # continuous: alerts on tier changes / trend flips
 python main.py watch-now --interval 10 --min-tier HIGH   # tighter alert threshold
+
+# Web dashboard
+cd kronos_web/frontend && npm install && npm run dev      # Vite dev server → http://localhost:5173
+uvicorn kronos_web.backend.api:app --reload --port 8000  # FastAPI backend (run from project root)
+pip install -r kronos_web/backend/requirements.txt       # install web backend deps
 ```
 
 ## Architecture

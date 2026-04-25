@@ -1,0 +1,58 @@
+/* KRONOS-WX Design Tokens — generated from kronos_web/DESIGN.md */
+:root {
+  /* Backgrounds */
+  --color-deep:         #050510;
+  --color-panel:        #080820;
+  --color-panel-raised: #0d1530;
+  --color-header:       #0e2040;
+
+  /* Borders */
+  --color-border:       #1e3a5f;
+  --color-border-warn:  #5f3a1e;
+  --color-border-alert: #5f1e1e;
+
+  /* Text */
+  --color-accent:       #7ec8e3;
+  --color-text:         #d0d8e8;
+  --color-text-dim:     #5a7090;
+  --color-text-muted:   #2a4060;
+
+  /* Risk Tiers */
+  --tier-extreme:          #ff2222;
+  --tier-extreme-bg:       #2a0505;
+  --tier-high:             #ff6600;
+  --tier-high-bg:          #2a1205;
+  --tier-dangerous:        #cc44ff;
+  --tier-dangerous-bg:     #1a0530;
+  --tier-moderate:         #ffcc00;
+  --tier-moderate-bg:      #1a1400;
+  --tier-marginal:         #44aa44;
+  --tier-marginal-bg:      #051205;
+  --tier-low:              #4a5568;
+  --tier-low-bg:           #080810;
+
+  /* Alert types */
+  --warning-tornado:  #ff2222;
+  --warning-watch:    #ff6600;
+  --warning-svr:      #ffcc00;
+  --warning-md:       #7ec8e3;
+
+  /* Typography */
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+
+  /* Spacing */
+  --space-xs:  4px;
+  --space-sm:  8px;
+  --space-md:  16px;
+  --space-lg:  24px;
+  --space-xl:  32px;
+  --space-2xl: 48px;
+
+  /* Radii */
+  --radius-sm:   4px;
+  --radius-md:   6px;
+  --radius-lg:   10px;
+  --radius-xl:   16px;
+  --radius-full: 9999px;
+}
