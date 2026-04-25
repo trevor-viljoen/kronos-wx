@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from rich.table import Table
@@ -28,6 +28,28 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
+
+# ── Pipeline imports at module level (avoids import-lock deadlocks in threads) ─
+from ok_weather_model.ingestion import HRRRClient, MesonetClient, SoundingClient
+from ok_weather_model.ingestion.spc_products import (
+    fetch_spc_outlook,
+    fetch_active_watches_warnings,
+    fetch_active_mds,
+)
+from ok_weather_model.models import OklahomaSoundingStation
+from ok_weather_model.modeling import (
+    extract_features_from_indices,
+    FEATURE_NAMES,
+)
+from ok_weather_model.processing import (
+    compute_thermodynamic_indices,
+    compute_kinematic_profile,
+    compute_moisture_return,
+    compute_modified_indices,
+)
+from ok_weather_model.processing.dryline_detector import detect_dryline
+from ok_weather_model.processing.risk_zone import compute_risk_zones_from_hrrr
+from ok_weather_model.storage import Database
 from textual.widgets import Footer, Header, RichLog, Static
 
 logger = logging.getLogger(__name__)
@@ -188,9 +210,6 @@ class KronosDashboard(App):
     @work(thread=True)
     def _fetch_hrrr(self) -> None:
         try:
-            from ok_weather_model.ingestion import HRRRClient
-            from ok_weather_model.processing.risk_zone import compute_risk_zones_from_hrrr
-
             now = datetime.now(tz=timezone.utc)
             with HRRRClient() as hc:
                 snap = hc.get_county_snapshot(now)
@@ -227,13 +246,6 @@ class KronosDashboard(App):
     @work(thread=True)
     def _fetch_environment(self) -> None:
         try:
-            from ok_weather_model.ingestion import SoundingClient
-            from ok_weather_model.models import OklahomaSoundingStation
-            from ok_weather_model.processing import (
-                compute_thermodynamic_indices,
-                compute_kinematic_profile,
-            )
-
             stn = OklahomaSoundingStation[self._station]
             with SoundingClient() as sc:
                 profile = sc.get_latest_sounding(stn)
@@ -268,8 +280,6 @@ class KronosDashboard(App):
     def _load_analogues(self, idx, kin) -> list:
         """Load top-5 analogues from the case database (best-effort)."""
         try:
-            from ok_weather_model.storage import Database
-            from ok_weather_model.modeling import extract_features_from_indices, FEATURE_NAMES
             import numpy as np
             import pandas as pd
 
@@ -307,18 +317,24 @@ class KronosDashboard(App):
     @work(thread=True)
     def _fetch_surface(self) -> None:
         try:
-            from ok_weather_model.ingestion import MesonetClient
-            from ok_weather_model.processing import compute_moisture_return
-            from ok_weather_model.processing.dryline_detector import detect_dryline
-
             now = datetime.now(tz=timezone.utc)
-            with MesonetClient() as mc:
-                obs = mc.get_snapshot_observations(now)
+            obs = None
+            # Walk back in 5-min steps — latest file may not be posted yet
+            for back_min in (0, 5, 10, 15, 20):
+                try:
+                    with MesonetClient() as mc:
+                        obs = mc.get_snapshot_observations(now - timedelta(minutes=back_min))
+                    if obs:
+                        break
+                except Exception as exc:
+                    if "404" in str(exc) or "Not Found" in str(exc) or "400" in str(exc):
+                        continue
+                    raise
 
-            if obs is None or not obs:
+            if not obs:
                 self.call_from_thread(
                     self.query_one("#dryline-panel", Static).update,
-                    "[dim]Mesonet unavailable[/dim]"
+                    "[dim]Mesonet: no recent file available[/dim]"
                 )
                 return
 
@@ -349,12 +365,6 @@ class KronosDashboard(App):
     @work(thread=True)
     def _fetch_spc(self) -> None:
         try:
-            from ok_weather_model.ingestion.spc_products import (
-                fetch_spc_outlook,
-                fetch_active_watches_warnings,
-                fetch_active_mds,
-            )
-
             outlook  = fetch_spc_outlook()
             alerts   = fetch_active_watches_warnings()
             mds      = fetch_active_mds()
@@ -454,7 +464,6 @@ class KronosDashboard(App):
             moisture = self._moisture
         if moisture is not None:
             try:
-                from ok_weather_model.processing import compute_modified_indices
                 td_f  = moisture.state_mean_dewpoint_f
                 td_c_val = (td_f - 32.0) / 1.8
                 surf_t_c = idx.LCL_height * 0.0065 + td_c_val + 2.0  # rough surface T
