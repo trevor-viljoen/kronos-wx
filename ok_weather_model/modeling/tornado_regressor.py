@@ -30,7 +30,7 @@ def _make_pipeline():
     from sklearn.ensemble import GradientBoostingRegressor
 
     return Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
+        ("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
         ("reg", GradientBoostingRegressor(
             n_estimators=300,
             learning_rate=0.05,
@@ -102,6 +102,11 @@ class TornadoRegressor:
         indices: ThermodynamicIndices,
         kinematics: KinematicProfile,
         convective_temp_gap: Optional[float] = None,
+        surface_dewpoint_f: Optional[float] = None,
+        moisture_return_gradient_f: Optional[float] = None,
+        gulf_moisture_fraction: Optional[float] = None,
+        modified_MLCAPE: Optional[float] = None,
+        modified_MLCIN: Optional[float] = None,
     ) -> dict:
         """
         Predict tornado count and a rough 80% prediction interval.
@@ -112,7 +117,14 @@ class TornadoRegressor:
         if self._pipeline is None:
             raise RuntimeError("Model not trained. Call train() or load from registry.")
 
-        feat = extract_features_from_indices(indices, kinematics, convective_temp_gap)
+        feat = extract_features_from_indices(
+            indices, kinematics, convective_temp_gap,
+            surface_dewpoint_f=surface_dewpoint_f,
+            moisture_return_gradient_f=moisture_return_gradient_f,
+            gulf_moisture_fraction=gulf_moisture_fraction,
+            modified_MLCAPE=modified_MLCAPE,
+            modified_MLCIN=modified_MLCIN,
+        )
         X = pd.DataFrame([feat], columns=FEATURE_NAMES)
         log_pred = float(self._pipeline.predict(X)[0])
 

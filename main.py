@@ -1335,6 +1335,92 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
         else:
             console.print("[dim]Dryline: not detected in current Mesonet network.[/dim]")
 
+    # ── Moisture return diagnostics ───────────────────────────────────────────
+    moisture_return = None
+    modified_indices = None
+    if snap_times_fetched and station_series:
+        from ok_weather_model.processing import compute_moisture_return
+        from ok_weather_model.processing.sounding_parser import compute_modified_indices
+
+        current_snap = snap_times_fetched[0]
+        current_obs = [
+            o for ts in station_series.values()
+            for o in ts.observations
+            if abs((o.valid_time - current_snap).total_seconds()) <= 7 * 60
+        ]
+
+        if current_obs:
+            moisture_return = compute_moisture_return(current_obs)
+
+            # Find current surface Td from the OUN-nearest station (Cleveland co.)
+            surface_td_f: float | None = None
+            for o in current_obs:
+                if o.county == OklahomaCounty.CLEVELAND:
+                    surface_td_f = o.dewpoint
+                    break
+            # Fallback: statewide mean Td
+            if surface_td_f is None and moisture_return is not None:
+                surface_td_f = moisture_return.state_mean_dewpoint_f
+
+            if surface_td_f is not None and surface_temp_c is not None:
+                surface_td_c = (surface_td_f - 32) * 5 / 9
+                try:
+                    modified_indices = compute_modified_indices(
+                        profile, surface_temp_c, surface_td_c
+                    )
+                except Exception as _me:
+                    logger.debug("Modified indices failed: %s", _me)
+
+    if moisture_return is not None:
+        console.rule("[bold]Surface Moisture / Return Flow[/bold]")
+        mr_tbl = Table(show_header=False, box=None, padding=(0, 2))
+        mr_tbl.add_column(style="dim")
+        mr_tbl.add_column()
+
+        td_color = (
+            "green" if moisture_return.state_mean_dewpoint_f >= 60
+            else "yellow" if moisture_return.state_mean_dewpoint_f >= 55
+            else "red"
+        )
+        mr_tbl.add_row(
+            "State-mean surface Td",
+            f"[{td_color}]{moisture_return.state_mean_dewpoint_f:.1f}°F[/{td_color}]"
+            f"  ({moisture_return.n_stations} stations)",
+        )
+        mr_tbl.add_row(
+            "South OK / North OK Td",
+            f"{moisture_return.south_ok_dewpoint_f:.1f}°F / {moisture_return.north_ok_dewpoint_f:.1f}°F"
+            f"  (gradient {moisture_return.moisture_return_gradient_f:+.1f}°F)",
+        )
+        gulf_color = (
+            "green" if moisture_return.gulf_moisture_fraction >= 0.60
+            else "yellow" if moisture_return.gulf_moisture_fraction >= 0.30
+            else "red"
+        )
+        mr_tbl.add_row(
+            "Gulf moisture coverage",
+            f"[{gulf_color}]{moisture_return.gulf_moisture_fraction:.0%}[/{gulf_color}]"
+            " of stations ≥ 60°F dewpoint",
+        )
+        if moisture_return.moisture_axis_lat is not None:
+            mr_tbl.add_row(
+                "60°F Td axis (est.)",
+                f"{moisture_return.moisture_axis_lat:.1f}°N",
+            )
+        if modified_indices is not None:
+            mcape_color = (
+                "red" if modified_indices.MLCAPE >= 2000
+                else "yellow" if modified_indices.MLCAPE >= 1000
+                else "green"
+            )
+            mr_tbl.add_row(
+                "Modified MLCAPE / MLCIN",
+                f"[{mcape_color}]{modified_indices.MLCAPE:.0f}[/{mcape_color}]"
+                f" / {modified_indices.MLCIN:.0f} J/kg"
+                f"  [dim](12Z sounding aloft + current surface Td)[/dim]",
+            )
+        console.print(mr_tbl)
+
     if fetched_hour == 12 and surface_temp_c is not None:
         ces = compute_ces_from_sounding(indices, surface_temp_c, today)
         cb  = ces["cap_behavior"]
@@ -1723,8 +1809,19 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
 
         if _clf is not None and _reg is not None:
             _ctg = ces.get("convective_temp_gap_12Z") if ces is not None else None
-            _clf_result = _clf.predict_proba(indices, kinematics, _ctg)
-            _reg_result = _reg.predict(indices, kinematics, _ctg)
+            _mr_kwargs = {}
+            if moisture_return is not None:
+                _mr_kwargs = {
+                    "surface_dewpoint_f":           moisture_return.state_mean_dewpoint_f,
+                    "moisture_return_gradient_f":   moisture_return.moisture_return_gradient_f,
+                    "gulf_moisture_fraction":       moisture_return.gulf_moisture_fraction,
+                }
+            if modified_indices is not None:
+                _mr_kwargs["modified_MLCAPE"] = modified_indices.MLCAPE
+                _mr_kwargs["modified_MLCIN"]  = modified_indices.MLCIN
+
+            _clf_result = _clf.predict_proba(indices, kinematics, _ctg, **_mr_kwargs)
+            _reg_result = _reg.predict(indices, kinematics, _ctg, **_mr_kwargs)
 
             sig_pct = _clf_result["significant"]
             sig_color = "red" if sig_pct >= 0.6 else "yellow" if sig_pct >= 0.35 else "green"

@@ -33,7 +33,7 @@ def _make_pipeline():
     from sklearn.ensemble import RandomForestClassifier
 
     return Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
+        ("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
         ("clf", RandomForestClassifier(
             n_estimators=300,
             class_weight="balanced",
@@ -98,16 +98,31 @@ class SeverityClassifier:
         indices: ThermodynamicIndices,
         kinematics: KinematicProfile,
         convective_temp_gap: Optional[float] = None,
+        surface_dewpoint_f: Optional[float] = None,
+        moisture_return_gradient_f: Optional[float] = None,
+        gulf_moisture_fraction: Optional[float] = None,
+        modified_MLCAPE: Optional[float] = None,
+        modified_MLCIN: Optional[float] = None,
     ) -> dict[str, float]:
         """
         Return probability estimates for a live environment snapshot.
+
+        The Mesonet moisture parameters are optional; when provided they
+        improve prediction by incorporating the current return flow state.
 
         Returns dict: {'significant': 0.0–1.0, 'weak': 0.0–1.0}
         """
         if self._pipeline is None:
             raise RuntimeError("Model not trained. Call train() or load from registry.")
 
-        feat = extract_features_from_indices(indices, kinematics, convective_temp_gap)
+        feat = extract_features_from_indices(
+            indices, kinematics, convective_temp_gap,
+            surface_dewpoint_f=surface_dewpoint_f,
+            moisture_return_gradient_f=moisture_return_gradient_f,
+            gulf_moisture_fraction=gulf_moisture_fraction,
+            modified_MLCAPE=modified_MLCAPE,
+            modified_MLCIN=modified_MLCIN,
+        )
         X = pd.DataFrame([feat], columns=FEATURE_NAMES)
         probs = self._pipeline.predict_proba(X)[0]
         prob_map = dict(zip(self._pipeline.classes_, probs))

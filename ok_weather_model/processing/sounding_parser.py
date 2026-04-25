@@ -162,6 +162,55 @@ def compute_thermodynamic_indices(
     )
 
 
+def compute_modified_indices(
+    profile: SoundingProfile,
+    surface_temp_c: float,
+    surface_dewpoint_c: float,
+) -> ThermodynamicIndices:
+    """
+    Compute thermodynamic indices with the surface level replaced by current
+    Mesonet observations (the "daytime modified sounding" technique).
+
+    The 12Z radiosonde surface level reflects pre-dawn conditions — cold, dry,
+    before the mixed layer has formed.  Substituting the current Mesonet surface
+    T and Td into the bottom level while keeping the 12Z thermodynamic profile
+    aloft gives an accurate estimate of afternoon CAPE and CIN.
+
+    This is the standard operational approach: use sounding aloft for lapse
+    rates and cap structure; use Mesonet surface for mixed-layer parcel origin.
+
+    Args:
+        profile:             12Z SoundingProfile (thermodynamic structure aloft)
+        surface_temp_c:      current Mesonet surface temperature in °C
+        surface_dewpoint_c:  current Mesonet surface dewpoint in °C
+
+    Returns:
+        ThermodynamicIndices reflecting the current daytime environment
+    """
+    if not profile.levels:
+        raise ValueError("Profile has no levels")
+
+    # Replace only the surface level — everything above stays as-is from the sounding.
+    surface = profile.levels[0]
+    modified_surface = SoundingLevel(
+        pressure=surface.pressure,
+        height=surface.height,
+        temperature=surface_temp_c,
+        dewpoint=surface_dewpoint_c,
+        wind_direction=surface.wind_direction,
+        wind_speed=surface.wind_speed,
+    )
+    modified_levels = [modified_surface] + list(profile.levels[1:])
+
+    modified_profile = SoundingProfile(
+        station=profile.station,
+        valid_time=profile.valid_time,
+        levels=modified_levels,
+        raw_source=profile.raw_source,
+    )
+    return compute_thermodynamic_indices(modified_profile)
+
+
 def compute_kinematic_profile(
     profile: SoundingProfile,
     thermodynamics: Optional[ThermodynamicIndices] = None,
