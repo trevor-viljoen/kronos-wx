@@ -124,6 +124,55 @@ async def _load_ok_counties() -> dict:
     return _ok_counties_geojson
 
 
+# ── Mesonet station coordinate registry (fetched once at startup) ─────────────
+_station_coords: dict[str, tuple[float, float]] = {}   # stid → (lat, lon)
+
+_MESONET_SITEINFO_URL = (
+    "https://www.mesonet.org/index.php/api/siteinfo/"
+    "from_all_active_with_geo_fields/format/csv"
+)
+
+
+async def _load_mesonet_stations() -> None:
+    """
+    Fetch the Mesonet siteinfo CSV and build a stid → (lat, lon) lookup.
+    Falls back silently — callers use county centroid when stid is absent.
+    """
+    global _station_coords
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(_MESONET_SITEINFO_URL)
+        resp.raise_for_status()
+        text = resp.text
+
+    coords: dict[str, tuple[float, float]] = {}
+    lines = text.splitlines()
+    if not lines:
+        return
+    header = [h.strip() for h in lines[0].split(",")]
+    try:
+        i_stid = header.index("stid")
+        i_nlat = header.index("nlat")
+        i_elon = header.index("elon")
+    except ValueError:
+        logger.warning("Mesonet siteinfo: unexpected CSV header %s", header[:10])
+        return
+
+    for line in lines[1:]:
+        parts = line.split(",")
+        if len(parts) <= max(i_stid, i_nlat, i_elon):
+            continue
+        try:
+            stid = parts[i_stid].strip().upper()
+            lat  = float(parts[i_nlat])
+            lon  = float(parts[i_elon])
+            coords[stid] = (lat, lon)
+        except (ValueError, IndexError):
+            continue
+
+    _station_coords = coords
+    logger.info("Loaded Mesonet station coords for %d stations", len(coords))
+
+
 # ── Helper: broadcast to all SSE subscribers ─────────────────────────────────
 
 async def _broadcast() -> None:
@@ -607,11 +656,14 @@ async def _task_surface() -> None:
             mesonet_obs_list = []
             for o in current_obs:
                 try:
+                    coords = _station_coords.get(o.station_id)
+                    lat = coords[0] if coords else o.county.lat
+                    lon = coords[1] if coords else o.county.lon
                     mesonet_obs_list.append({
                         "station_id":   o.station_id,
                         "county":       o.county.name,
-                        "lat":          o.county.lat,
-                        "lon":          o.county.lon,
+                        "lat":          lat,
+                        "lon":          lon,
                         "temp_f":       round(o.temperature, 1),
                         "dewpoint_f":   round(o.dewpoint, 1),
                         "wind_dir":     round(o.wind_direction, 0),
@@ -764,6 +816,12 @@ async def _lifespan(app: FastAPI):
         await _load_ok_counties()
     except Exception as exc:
         logger.warning("Could not load county GeoJSON: %s", exc)
+
+    # Fetch Mesonet station coordinates
+    try:
+        await _load_mesonet_stations()
+    except Exception as exc:
+        logger.warning("Could not load Mesonet station coords: %s", exc)
 
     # Start all background fetch tasks
     tasks = [
