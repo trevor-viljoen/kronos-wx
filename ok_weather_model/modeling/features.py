@@ -5,9 +5,21 @@ Builds a flat numeric feature vector from sounding-derived indices and
 kinematic profiles.  Missing optional fields are represented as NaN so that
 downstream estimators can apply imputation (scikit-learn SimpleImputer).
 
-Two entry points:
+Three entry points:
     extract_features(case)               — training path (HistoricalCase)
     extract_features_from_indices(...)   — inference path (live sounding objects)
+    extract_features_from_hrrr(pt)       — inference path (HRRR county forecast)
+
+Model cleanliness guarantee
+---------------------------
+extract_features_from_hrrr() is a *pure inference* helper.  It is never used
+during training.  Training always goes through extract_features() which reads
+from HistoricalCase sounding objects.  The HRRR path populates 12 of the 28
+features that have direct counterparts in HRRRCountyPoint and leaves the rest
+as NaN — these are imputed to their training-set median by the pipeline's
+SimpleImputer, exactly as optional sounding fields already are.  No new
+training features are introduced; models never need to be retrained when this
+function changes.
 """
 from __future__ import annotations
 
@@ -19,6 +31,7 @@ import pandas as pd
 from ..models.sounding import ThermodynamicIndices
 from ..models.kinematic import KinematicProfile
 from ..models.case import HistoricalCase
+from ..models.hrrr import HRRRCountyPoint
 
 
 # Canonical feature order — model artifacts depend on this order being stable.
@@ -183,3 +196,63 @@ def build_feature_matrix(
     X = pd.DataFrame(rows, columns=FEATURE_NAMES)
     y = pd.Series(targets, name=target)
     return X, y
+
+
+def extract_features_from_hrrr(pt: HRRRCountyPoint) -> dict[str, float]:
+    """
+    Build a model feature vector from a HRRRCountyPoint.
+
+    Inference-only — never used in training.  See module docstring for the
+    model cleanliness guarantee.
+
+    Direct HRRR mappings (12 of 28 features):
+      MLCAPE, MLCIN, SBCAPE, SBCIN
+      SRH_0_1km, SRH_0_3km, BWD_0_6km
+      EHI, STP
+      lapse_rate_700_500
+      LCL_height  (from LCL_height_m)
+      surface_dewpoint_f  (from dewpoint_2m_F — used as surface moisture proxy)
+
+    Unavailable fields (set to NaN, imputed to training median by pipeline):
+      MUCAPE, LFC_height, cap_strength, EML_depth
+      lapse_rate_850_500, precipitable_water, wet_bulb_zero
+      BWD_0_1km, SCP, LLJ_speed, mean_wind_0_6km
+      convective_temp_gap_12Z
+      moisture_return_gradient_f, gulf_moisture_fraction
+      modified_MLCAPE, modified_MLCIN
+    """
+    nan = float("nan")
+
+    def _f(v) -> float:
+        return float(v) if v is not None else nan
+
+    return {
+        "MLCAPE":                       float(pt.MLCAPE),
+        "MLCIN":                        float(pt.MLCIN),
+        "SBCAPE":                       float(pt.SBCAPE),
+        "SBCIN":                        float(pt.SBCIN),
+        "MUCAPE":                       nan,
+        "LCL_height":                   _f(pt.LCL_height_m),
+        "LFC_height":                   nan,
+        "cap_strength":                 nan,
+        "EML_depth":                    nan,
+        "lapse_rate_700_500":           _f(pt.lapse_rate_700_500),
+        "lapse_rate_850_500":           nan,
+        "precipitable_water":           nan,
+        "wet_bulb_zero":                nan,
+        "SRH_0_1km":                    float(pt.SRH_0_1km),
+        "SRH_0_3km":                    float(pt.SRH_0_3km),
+        "BWD_0_1km":                    nan,
+        "BWD_0_6km":                    float(pt.BWD_0_6km),
+        "EHI":                          _f(pt.EHI),
+        "STP":                          _f(pt.STP),
+        "SCP":                          nan,
+        "LLJ_speed":                    nan,
+        "mean_wind_0_6km":              nan,
+        "convective_temp_gap_12Z":      nan,
+        "surface_dewpoint_f":           float(pt.dewpoint_2m_F),
+        "moisture_return_gradient_f":   nan,
+        "gulf_moisture_fraction":       nan,
+        "modified_MLCAPE":              nan,
+        "modified_MLCIN":               nan,
+    }

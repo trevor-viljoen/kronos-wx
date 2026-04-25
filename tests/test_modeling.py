@@ -25,8 +25,11 @@ from ok_weather_model.modeling.features import (
     FEATURE_NAMES,
     extract_features,
     extract_features_from_indices,
+    extract_features_from_hrrr,
     build_feature_matrix,
 )
+from ok_weather_model.models.hrrr import HRRRCountyPoint
+from ok_weather_model.models.enums import OklahomaCounty
 from ok_weather_model.modeling.severity_classifier import SeverityClassifier
 from ok_weather_model.modeling.tornado_regressor import TornadoRegressor
 
@@ -369,3 +372,85 @@ class TestTornadoRegressor:
         result = reg.predict(_make_indices(), _make_kinematics())
         assert result["interval_low"] <= result["expected_count"]
         assert result["interval_high"] >= result["expected_count"]
+
+
+class TestExtractFeaturesFromHRRR:
+    """extract_features_from_hrrr() — inference-only HRRR path."""
+
+    def _make_county_point(self, **overrides) -> HRRRCountyPoint:
+        defaults = dict(
+            county=OklahomaCounty.CLEVELAND,
+            MLCAPE=3000.0, MLCIN=50.0,
+            SBCAPE=3200.0, SBCIN=40.0,
+            SRH_0_1km=200.0, SRH_0_3km=400.0,
+            BWD_0_6km=55.0,
+            lapse_rate_700_500=7.5,
+            dewpoint_2m_F=65.0,
+            LCL_height_m=800.0,
+            EHI=5.0, STP=4.0,
+        )
+        defaults.update(overrides)
+        return HRRRCountyPoint(**defaults)
+
+    def test_returns_all_feature_names(self):
+        pt = self._make_county_point()
+        feat = extract_features_from_hrrr(pt)
+        assert set(feat.keys()) == set(FEATURE_NAMES)
+
+    def test_hrrr_fields_mapped_correctly(self):
+        pt = self._make_county_point(MLCAPE=2500.0, SRH_0_1km=175.0, EHI=4.2)
+        feat = extract_features_from_hrrr(pt)
+        assert feat["MLCAPE"] == 2500.0
+        assert feat["SRH_0_1km"] == 175.0
+        assert feat["EHI"] == pytest.approx(4.2)
+
+    def test_unavailable_fields_are_nan(self):
+        import math
+        pt = self._make_county_point()
+        feat = extract_features_from_hrrr(pt)
+        for field in ("MUCAPE", "LFC_height", "cap_strength", "EML_depth",
+                      "lapse_rate_850_500", "precipitable_water", "wet_bulb_zero",
+                      "BWD_0_1km", "SCP", "LLJ_speed", "mean_wind_0_6km",
+                      "convective_temp_gap_12Z", "moisture_return_gradient_f",
+                      "gulf_moisture_fraction", "modified_MLCAPE", "modified_MLCIN"):
+            assert math.isnan(feat[field]), f"{field} should be NaN"
+
+    def test_none_optional_fields_become_nan(self):
+        import math
+        pt = self._make_county_point(EHI=None, STP=None, LCL_height_m=None,
+                                     lapse_rate_700_500=None)
+        feat = extract_features_from_hrrr(pt)
+        assert math.isnan(feat["EHI"])
+        assert math.isnan(feat["STP"])
+        assert math.isnan(feat["LCL_height"])
+        assert math.isnan(feat["lapse_rate_700_500"])
+
+    def test_models_accept_hrrr_features(self):
+        """Trained models must accept an HRRR-derived feature vector without error."""
+        cases = _make_synthetic_cases()
+        clf = SeverityClassifier()
+        clf.train(cases)
+        reg = TornadoRegressor()
+        reg.train(cases)
+
+        import pandas as pd
+        pt = self._make_county_point()
+        feat = extract_features_from_hrrr(pt)
+        X = pd.DataFrame([feat], columns=FEATURE_NAMES)
+
+        probs = clf._pipeline.predict_proba(X)[0]
+        assert len(probs) == 2
+        assert abs(sum(probs) - 1.0) < 1e-6
+
+        log_pred = float(reg._pipeline.predict(X)[0])
+        assert log_pred >= 0.0
+
+    def test_does_not_alter_training_data(self):
+        """Calling extract_features_from_hrrr must not affect training features."""
+        cases = _make_synthetic_cases()
+        from ok_weather_model.modeling.features import build_feature_matrix
+        X_before, _ = build_feature_matrix(cases)
+        pt = self._make_county_point()
+        extract_features_from_hrrr(pt)   # side-effect check
+        X_after, _ = build_feature_matrix(cases)
+        assert X_before.equals(X_after)

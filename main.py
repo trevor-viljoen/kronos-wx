@@ -1251,9 +1251,108 @@ def _analyze_now_forecast(forecast_hour: int, now_utc: datetime) -> None:
 
         console.print(drill_tbl)
 
+    # ── Per-county model predictions (HRRR inference path) ───────────────────
+    # Models were trained on 12Z sounding features. Here we feed HRRR county
+    # fields into the same feature vector (12/28 fields populated, rest NaN →
+    # imputed to training median). Predictions are labelled "(HRRR-based)" to
+    # signal the input source. Models are NOT retrained — inference only.
+    console.rule("[bold]Forecast Model Predictions (HRRR-based)[/bold]")
+    try:
+        from ok_weather_model.modeling import SeverityClassifier, TornadoRegressor, load_model
+        from ok_weather_model.modeling.features import extract_features_from_hrrr
+
+        _clf: SeverityClassifier = load_model("severity_classifier")
+        _reg: TornadoRegressor   = load_model("tornado_regressor")
+
+        if _clf is None or _reg is None:
+            console.print(
+                "[dim]No trained models found. Run [cyan]train-models[/cyan] first.[/dim]"
+            )
+        else:
+            # Score every threat county; display a compact table for elevated tiers
+            from ok_weather_model.processing.risk_zone import _TIER_COLOR as _TC2
+            import pandas as _pd
+
+            scored_counties: list[tuple[str, object, dict, dict]] = []
+            seen2: set = set()
+            for zone in risk_zones:
+                if zone.tier_rank < 2:   # MODERATE and above
+                    continue
+                for county in zone.counties:
+                    if county in seen2:
+                        continue
+                    seen2.add(county)
+                    pt = hrrr_fc.get(county)
+                    if pt is None:
+                        continue
+                    feat = extract_features_from_hrrr(pt)
+                    X_c  = _pd.DataFrame([feat], columns=_clf.feature_importances_.index.tolist()
+                                         if _clf.feature_importances_ is not None
+                                         else list(feat.keys()))
+                    # Use the pipelines directly (they include the imputer)
+                    probs = _clf._pipeline.predict_proba(
+                        _pd.DataFrame([feat],
+                                      columns=list(feat.keys()))
+                    )[0]
+                    prob_map = dict(zip(_clf._pipeline.classes_, probs))
+                    clf_result = {
+                        "significant": round(float(prob_map.get(1, 0.0)), 3),
+                        "weak":        round(float(prob_map.get(0, 0.0)), 3),
+                    }
+                    import math as _math
+                    log_pred   = float(_reg._pipeline.predict(
+                        _pd.DataFrame([feat], columns=list(feat.keys()))
+                    )[0])
+                    reg_result = {
+                        "expected_count": round(max(0.0, float(__import__("numpy").expm1(log_pred))), 1),
+                    }
+                    scored_counties.append((zone.tier, pt, clf_result, reg_result))
+
+            if scored_counties:
+                mdl_tbl = Table(
+                    title=(
+                        f"County Model Scores — HRRR F{best_fxx:02d}  "
+                        f"valid {valid_time.strftime('%H:%MZ')} {valid_date}  "
+                        f"[dim](12/28 features from HRRR; rest imputed to training median)[/dim]"
+                    ),
+                    show_lines=True,
+                )
+                mdl_tbl.add_column("County",      style="cyan", min_width=12)
+                mdl_tbl.add_column("Tier",                      min_width=14)
+                mdl_tbl.add_column("P(Sig.)",     justify="right")
+                mdl_tbl.add_column("Exp. Count",  justify="right")
+                mdl_tbl.add_column("EHI",         justify="right")
+                mdl_tbl.add_column("SRH 0–3",     justify="right")
+
+                for tier, pt, clf_r, reg_r in scored_counties:
+                    color   = _TC2.get(tier, "white")
+                    sig_p   = clf_r["significant"]
+                    sig_c   = "bright_red" if sig_p >= 0.60 else "red" if sig_p >= 0.40 else "yellow" if sig_p >= 0.25 else "white"
+                    ehi_str = f"{pt.EHI:.2f}" if pt.EHI is not None else "—"
+                    mdl_tbl.add_row(
+                        pt.county.name,
+                        f"[{color}]{tier}[/{color}]",
+                        f"[{sig_c}]{sig_p:.0%}[/{sig_c}]",
+                        f"{reg_r['expected_count']:.1f}",
+                        ehi_str,
+                        f"{pt.SRH_0_3km:.0f} m²/s²",
+                    )
+
+                console.print(mdl_tbl)
+                console.print(
+                    "[dim]Caveat: 16/28 features are NaN (no sounding available for "
+                    "forecast times). Probabilities are underestimates — "
+                    "the HRRR field magnitudes above are the primary signal.[/dim]"
+                )
+            else:
+                console.print("[dim]No MODERATE+ counties to score.[/dim]")
+    except Exception as _me:
+        logger.debug("Forecast model scoring failed: %s", _me)
+        console.print("[dim]Model scoring unavailable (run train-models first).[/dim]")
+
     console.print(
-        f"\n[dim]Note: HRRR forecast fields — not a sounding. "
-        f"CES, analogues, and model predictions are not shown in forecast mode.[/dim]"
+        f"\n[dim]CES and historical analogues require a sounding — "
+        f"not available in forecast mode.[/dim]"
     )
 
 

@@ -2,6 +2,7 @@ from .features import (
     FEATURE_NAMES,
     extract_features,
     extract_features_from_indices,
+    extract_features_from_hrrr,
     build_feature_matrix,
 )
 from .severity_classifier import SeverityClassifier
@@ -12,6 +13,7 @@ __all__ = [
     "FEATURE_NAMES",
     "extract_features",
     "extract_features_from_indices",
+    "extract_features_from_hrrr",
     "build_feature_matrix",
     "SeverityClassifier",
     "TornadoRegressor",
