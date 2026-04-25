@@ -31,6 +31,7 @@ from textual.reactive import reactive
 
 # ── Pipeline imports at module level (avoids import-lock deadlocks in threads) ─
 from ok_weather_model.ingestion import HRRRClient, MesonetClient, SoundingClient
+from ok_weather_model.models.mesonet import MesonetTimeSeries
 from ok_weather_model.ingestion.spc_products import (
     fetch_spc_outlook,
     fetch_active_watches_warnings,
@@ -211,13 +212,21 @@ class KronosDashboard(App):
     def _fetch_hrrr(self) -> None:
         try:
             now = datetime.now(tz=timezone.utc)
+            snap = None
+            # HRRR analysis posts ~45 min after run init; walk back up to 2 hours
             with HRRRClient() as hc:
-                snap = hc.get_county_snapshot(now)
+                for h_back in range(3):
+                    try:
+                        snap = hc.get_county_snapshot(now - timedelta(hours=h_back))
+                        if snap is not None:
+                            break
+                    except Exception:
+                        continue
 
             if snap is None:
                 self.call_from_thread(
                     self.query_one("#risk-panel", Static).update,
-                    "[red]HRRR unavailable[/red]"
+                    "[yellow]HRRR: no analysis posted yet — retrying in 15 min[/yellow]"
                 )
                 return
 
@@ -246,14 +255,24 @@ class KronosDashboard(App):
     @work(thread=True)
     def _fetch_environment(self) -> None:
         try:
-            stn = OklahomaSoundingStation[self._station]
+            stn   = OklahomaSoundingStation[self._station]
+            today = datetime.now(tz=timezone.utc).date()
+            # Try 12Z first (standard pre-convective sounding), then 00Z, then
+            # special-event hours 18Z / 21Z in case a severe-weather launch exists
+            profile = None
             with SoundingClient() as sc:
-                profile = sc.get_latest_sounding(stn)
+                for h in (12, 0, 18, 21):
+                    try:
+                        profile = sc.get_sounding(stn, today, h)
+                        if profile is not None:
+                            break
+                    except Exception:
+                        continue
 
             if profile is None:
                 self.call_from_thread(
                     self.query_one("#env-panel", Static).update,
-                    "[red]Sounding unavailable[/red]"
+                    "[yellow]Sounding: no data for today yet[/yellow]"
                 )
                 return
 
@@ -265,9 +284,7 @@ class KronosDashboard(App):
                 self._indices_oun    = idx
                 self._kinematics_oun = kin
 
-            # Try to get analogues
             analogues = self._load_analogues(idx, kin)
-
             self.call_from_thread(self._render_environment, profile, idx, kin, analogues)
 
         except Exception as exc:
@@ -318,33 +335,61 @@ class KronosDashboard(App):
     def _fetch_surface(self) -> None:
         try:
             now = datetime.now(tz=timezone.utc)
-            obs = None
-            # Walk back in 5-min steps — latest file may not be posted yet
-            for back_min in (0, 5, 10, 15, 20):
-                try:
-                    with MesonetClient() as mc:
-                        obs = mc.get_snapshot_observations(now - timedelta(minutes=back_min))
-                    if obs:
-                        break
-                except Exception as exc:
-                    if "404" in str(exc) or "Not Found" in str(exc) or "400" in str(exc):
-                        continue
-                    raise
 
-            if not obs:
+            # Build station_series dict from up to two snapshots (current + 1h ago)
+            # detect_dryline needs dict[str, MesonetTimeSeries]; compute_moisture_return
+            # needs list[MesonetObservation].  Both are derived from the same snapshots.
+            station_series: dict[str, MesonetTimeSeries] = {}
+            current_obs: list = []
+            current_snap_time: Optional[datetime] = None
+
+            with MesonetClient() as mc:
+                for h_back in (0, 1):
+                    target = now - timedelta(hours=h_back)
+                    for back_min in (0, 5, 10, 15, 20):
+                        snap_time = target - timedelta(minutes=back_min)
+                        try:
+                            snap_obs = mc.get_snapshot_observations(snap_time)
+                        except Exception as exc:
+                            if any(s in str(exc) for s in ("404", "Not Found", "400")):
+                                continue
+                            break  # unexpected error — skip this hour
+                        if not snap_obs:
+                            continue
+                        # Accumulate into station_series
+                        for o in snap_obs:
+                            stid = o.station_id
+                            if stid not in station_series:
+                                station_series[stid] = MesonetTimeSeries(
+                                    station_id=stid,
+                                    county=o.county,
+                                    start_time=snap_time,
+                                    end_time=snap_time,
+                                    observations=[],
+                                )
+                            station_series[stid].observations.append(o)
+                            station_series[stid].end_time = max(
+                                station_series[stid].end_time, snap_time
+                            )
+                        if h_back == 0 and current_snap_time is None:
+                            current_obs = snap_obs
+                            current_snap_time = snap_time
+                        break  # got this hour's snapshot
+
+            if not station_series or current_snap_time is None:
                 self.call_from_thread(
                     self.query_one("#dryline-panel", Static).update,
-                    "[dim]Mesonet: no recent file available[/dim]"
+                    "[yellow]Mesonet: no recent observations available[/yellow]"
                 )
                 return
 
-            moisture = compute_moisture_return(obs)
+            moisture = compute_moisture_return(current_obs)
 
             prev_dl = None
             with self._lock:
                 prev_dl = self._dryline
 
-            dl = detect_dryline(obs)
+            dl = detect_dryline(station_series, current_snap_time)
 
             with self._lock:
                 self._dryline_prev = prev_dl
