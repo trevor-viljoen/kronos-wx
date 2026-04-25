@@ -19,14 +19,23 @@ const ALERT_STYLE: Record<string, { color: string; fillOpacity: number }> = {
   'Severe Thunderstorm Warning': { color: '#ffcc00', fillOpacity: 0.20 },
 }
 
-// Traditional SPC categorical colors
+// Traditional SPC categorical colors (official palette)
 const SPC_CAT_STYLE: Record<string, { color: string; fillOpacity: number }> = {
-  HIGH:  { color: '#ff00ff', fillOpacity: 0.30 },
-  MDT:   { color: '#ff0000', fillOpacity: 0.28 },
-  ENH:   { color: '#ff8c00', fillOpacity: 0.25 },
-  SLGT:  { color: '#ffff00', fillOpacity: 0.20 },
-  MRGL:  { color: '#008B00', fillOpacity: 0.18 },
-  TSTM:  { color: '#80c0e0', fillOpacity: 0.10 },
+  HIGH:  { color: '#ff00ff', fillOpacity: 0.50 },
+  MDT:   { color: '#ff0000', fillOpacity: 0.45 },
+  ENH:   { color: '#ff8c00', fillOpacity: 0.38 },
+  SLGT:  { color: '#ffff00', fillOpacity: 0.30 },
+  MRGL:  { color: '#008b00', fillOpacity: 0.25 },
+  TSTM:  { color: '#c1e9c1', fillOpacity: 0.15 },  // light green, not blue
+}
+
+const SPC_CAT_DESC: Record<string, string> = {
+  HIGH:  'High Risk — Particularly dangerous situation likely',
+  MDT:   'Moderate Risk — Significant severe weather expected',
+  ENH:   'Enhanced Risk — Numerous severe storms likely',
+  SLGT:  'Slight Risk — Isolated to scattered severe',
+  MRGL:  'Marginal Risk — Isolated severe possible',
+  TSTM:  'General Thunder — Non-severe convection likely',
 }
 
 const LEGEND_TIERS: Array<{ tier: Tier; label: string }> = [
@@ -40,12 +49,13 @@ const LEGEND_TIERS: Array<{ tier: Tier; label: string }> = [
 const OK_BOUNDS: L.LatLngBoundsExpression = [[33.5, -103.1], [37.1, -94.4]]
 
 // ── Overlay keys ──────────────────────────────────────────────────────────────
-type OverlayKey = 'counties' | 'spc' | 'warnings' | 'mesonet' | 'dryline'
+type OverlayKey = 'counties' | 'spc' | 'warnings' | 'watches' | 'mesonet' | 'dryline'
 
 const OVERLAY_LABELS: Record<OverlayKey, string> = {
   counties: 'County Tiers',
   spc:      'SPC Outlook',
   warnings: 'Warnings',
+  watches:  'Watches',
   mesonet:  'Mesonet',
   dryline:  'Dryline',
 }
@@ -197,12 +207,90 @@ function OutlookLayer({ geojson }: OutlookLayerProps) {
 
   const onEachOutlook = (feature: GeoJSON.Feature, layer: L.Layer) => {
     const label = (feature?.properties?.LABEL2 ?? feature?.properties?.LABEL ?? '').toUpperCase()
-    if (label && label !== 'TSTM') {
-      ;(layer as L.Path).bindTooltip(`<strong>SPC D1: ${label}</strong>`, { sticky: true, opacity: 1 })
-    }
+    if (!label) return
+    const style = SPC_CAT_STYLE[label]
+    const desc  = SPC_CAT_DESC[label] ?? `SPC D1: ${label}`
+    const color = style?.color ?? '#888'
+    ;(layer as L.Path).bindTooltip(
+      `<strong style="color:${color}">SPC D1 — ${label}</strong><br/><span style="font-size:11px">${desc}</span>`,
+      { sticky: true, opacity: 1 },
+    )
   }
 
   return <GeoJSON key="outlook" data={geojson} style={styleOutlook} onEachFeature={onEachOutlook} />
+}
+
+// ── Tornado/SVR watch county overlay ─────────────────────────────────────────
+function parseWatchCounties(areaDesc: string): Set<string> {
+  const names = new Set<string>()
+  for (const part of areaDesc.split(/[,;]/)) {
+    const noState = part.trim().replace(/,?\s+[A-Z]{2}\s*$/, '').trim()
+    const name    = noState.replace(/\s+County\s*$/i, '').trim().toUpperCase()
+    if (name) names.add(name)
+  }
+  return names
+}
+
+interface WatchLayerProps {
+  alerts: DashboardState['spc']['alerts']
+  countiesGeoJSON: GeoJSON.FeatureCollection
+}
+
+function WatchLayer({ alerts, countiesGeoJSON }: WatchLayerProps) {
+  // Build county → watch metadata map
+  const watchMap = useMemo(() => {
+    const m = new Map<string, { color: string; label: string; num?: number }>()
+    for (const a of alerts) {
+      if (a.event !== 'Tornado Watch' && a.event !== 'Severe Thunderstorm Watch') continue
+      const color = a.event === 'Tornado Watch' ? '#ff6600' : '#ffcc00'
+      const label = a.event === 'Tornado Watch' ? 'TORNADO WATCH' : 'SVR TSTM WATCH'
+      for (const county of parseWatchCounties(a.area_desc)) {
+        m.set(county, { color, label, num: a.watch_number ?? undefined })
+      }
+    }
+    return m
+  }, [alerts])
+
+  const filteredGJ = useMemo(() => ({
+    ...countiesGeoJSON,
+    features: countiesGeoJSON.features.filter(f =>
+      watchMap.has((f.properties?.NAME ?? '').toUpperCase())
+    ),
+  }), [watchMap, countiesGeoJSON])
+
+  if (watchMap.size === 0 || filteredGJ.features.length === 0) return null
+
+  const style = (feature?: GeoJSON.Feature): L.PathOptions => {
+    const w = watchMap.get((feature?.properties?.NAME ?? '').toUpperCase())
+    if (!w) return { fillOpacity: 0, opacity: 0, weight: 0 }
+    return {
+      fillColor:    w.color,
+      fillOpacity:  0.22,
+      color:        w.color,
+      weight:       2.5,
+      opacity:      0.95,
+      dashArray:    '8 5',
+    }
+  }
+
+  const onEach = (feature: GeoJSON.Feature, layer: L.Layer) => {
+    const w = watchMap.get((feature?.properties?.NAME ?? '').toUpperCase())
+    if (!w) return
+    const numStr = w.num != null ? ` #${w.num}` : ''
+    ;(layer as L.Path).bindTooltip(
+      `<strong style="color:${w.color}">${w.label}${numStr}</strong><br/>${feature.properties?.NAME} Co.`,
+      { sticky: true, opacity: 1 },
+    )
+  }
+
+  return (
+    <GeoJSON
+      key={[...watchMap.keys()].sort().join(',')}
+      data={filteredGJ as GeoJSON.FeatureCollection}
+      style={style}
+      onEachFeature={onEach}
+    />
+  )
 }
 
 // ── Mesonet station plot layer ────────────────────────────────────────────────
@@ -318,6 +406,7 @@ export function RiskMap({ state, onCountyClick }: Props) {
     counties: true,
     spc:      true,
     warnings: true,
+    watches:  true,
     mesonet:  false,
     dryline:  true,
   })
@@ -386,8 +475,13 @@ export function RiskMap({ state, onCountyClick }: Props) {
           />
         )}
 
-        {/* NWS warning / watch polygons */}
+        {/* NWS warning polygons */}
         {overlays.warnings && alertGJ && <AlertLayer geojson={alertGJ} />}
+
+        {/* Watch county overlay (county-based; NWS watch features lack polygon geometry) */}
+        {overlays.watches && countiesGeoJSON && state?.spc?.alerts && (
+          <WatchLayer alerts={state.spc.alerts} countiesGeoJSON={countiesGeoJSON} />
+        )}
 
         {/* Mesonet station plots */}
         {overlays.mesonet && mesoObs.length > 0 && (
@@ -415,6 +509,18 @@ export function RiskMap({ state, onCountyClick }: Props) {
               <span>{label.replace('_', ' ')}</span>
             </div>
           ))}
+          {overlays.watches && state?.spc?.alerts?.some(a => a.event === 'Tornado Watch') && (
+            <div className="legend-row">
+              <div className="legend-swatch" style={{ background: '#ff6600', opacity: 0.5, border: '2px dashed #ff6600' }} />
+              <span style={{ color: '#ff6600' }}>Tor Watch</span>
+            </div>
+          )}
+          {overlays.watches && state?.spc?.alerts?.some(a => a.event === 'Severe Thunderstorm Watch') && (
+            <div className="legend-row">
+              <div className="legend-swatch" style={{ background: '#ffcc00', opacity: 0.5, border: '2px dashed #ffcc00' }} />
+              <span style={{ color: '#ffcc00' }}>SVR Watch</span>
+            </div>
+          )}
           {overlays.dryline && drylinePositions.length > 0 && (
             <div className="legend-row">
               <div className="legend-swatch" style={{ background: 'transparent', border: '2px dashed #ff8800' }} />
