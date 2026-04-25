@@ -1350,10 +1350,108 @@ def _analyze_now_forecast(forecast_hour: int, now_utc: datetime) -> None:
         logger.debug("Forecast model scoring failed: %s", _me)
         console.print("[dim]Model scoring unavailable (run train-models first).[/dim]")
 
-    console.print(
-        f"\n[dim]CES and historical analogues require a sounding — "
-        f"not available in forecast mode.[/dim]"
-    )
+    # ── HRRR prs virtual sounding → full 28-feature model predictions ────────
+    # Extracts a SoundingProfile at OUN from the HRRR prs (pressure-level) product
+    # valid at 12Z of the forecast date — the same pre-convective window the models
+    # were trained on.  Closes the feature-imputation gap from the HRRR sfc path.
+    console.rule("[bold]Full Model Predictions (HRRR Virtual Sounding — OUN 12Z)[/bold]")
+    try:
+        from ok_weather_model.modeling import (
+            SeverityClassifier, TornadoRegressor, load_model,
+            extract_features_from_indices, FEATURE_NAMES,
+        )
+        from ok_weather_model.processing import (
+            compute_thermodynamic_indices,
+            compute_kinematic_profile,
+            extract_virtual_sounding_from_hrrr,
+            find_best_hrrr_prs_run,
+        )
+        import pandas as _pd3
+        import numpy as _np3
+
+        _clf3: SeverityClassifier = load_model("severity_classifier")
+        _reg3: TornadoRegressor   = load_model("tornado_regressor")
+
+        if _clf3 is None or _reg3 is None:
+            console.print("[dim]No trained models found — run [cyan]train-models[/cyan] first.[/dim]")
+        else:
+            # Target sounding: 12Z of the forecast date (pre-convective initialisation)
+            sounding_target = datetime(
+                valid_time.year, valid_time.month, valid_time.day, 12,
+                tzinfo=timezone.utc,
+            )
+            _OUN_LAT, _OUN_LON = 35.22, -97.44
+
+            _vs_result   = None
+            _prs_run_lbl = "unknown"
+            _prs_fxx_lbl = 0
+            with console.status(
+                f"Fetching HRRR prs virtual sounding at OUN "
+                f"(target {sounding_target.strftime('%H:%MZ %Y-%m-%d')})..."
+            ):
+                _best_prs = find_best_hrrr_prs_run(sounding_target, now_utc)
+                if _best_prs is not None:
+                    _prs_run_t, _prs_fxx_lbl = _best_prs
+                    _prs_run_lbl = _prs_run_t.strftime("%Y-%m-%d %H:%MZ")
+                    _vs_result = extract_virtual_sounding_from_hrrr(
+                        sounding_target, _prs_fxx_lbl, _OUN_LAT, _OUN_LON
+                    )
+
+            if _vs_result is None:
+                console.print(
+                    f"[dim]HRRR prs virtual sounding unavailable for "
+                    f"{sounding_target.strftime('%Y-%m-%d %H:%MZ')}. "
+                    f"HRRR prs may not be posted this far ahead yet.[/dim]"
+                )
+                console.print(
+                    f"[dim]CES and historical analogues require a real sounding.[/dim]"
+                )
+            else:
+                _vs_idx  = compute_thermodynamic_indices(_vs_result)
+                _vs_kin  = compute_kinematic_profile(_vs_result, _vs_idx)
+                _vs_feat = extract_features_from_indices(_vs_idx, _vs_kin)
+                _vs_X    = _pd3.DataFrame([_vs_feat], columns=FEATURE_NAMES)
+
+                _vs_probs   = _clf3._pipeline.predict_proba(_vs_X)[0]
+                _vs_prob_map = dict(zip(_clf3._pipeline.classes_, _vs_probs))
+                _vs_sig_p   = float(_vs_prob_map.get(1, 0.0))
+
+                _vs_log   = float(_reg3._pipeline.predict(_vs_X)[0])
+                _vs_count = max(0.0, float(_np3.expm1(_vs_log)))
+
+                _sig_c = (
+                    "bright_red" if _vs_sig_p >= 0.60 else
+                    "red"        if _vs_sig_p >= 0.40 else
+                    "yellow"     if _vs_sig_p >= 0.25 else "white"
+                )
+                console.print(
+                    f"[dim]HRRR prs {_prs_run_lbl} F{_prs_fxx_lbl:02d}  "
+                    f"→ valid {sounding_target.strftime('%H:%MZ %Y-%m-%d')} at OUN[/dim]"
+                )
+                console.print(
+                    f"  Severity P(Significant): [{_sig_c}]{_vs_sig_p:.0%}[/{_sig_c}]    "
+                    f"Expected tornado count: {_vs_count:.1f}"
+                )
+                console.print(
+                    f"  MLCAPE [yellow]{_vs_feat['MLCAPE']:.0f}[/yellow] J/kg  "
+                    f"  MLCIN [red]{_vs_feat['MLCIN']:.0f}[/red] J/kg  "
+                    f"  LCL {_vs_feat['LCL_height']:.0f} m  "
+                    f"  SRH 0–3 {_vs_feat['SRH_0_3km']:.0f} m²/s²  "
+                    f"  BWD 0–6 {_vs_feat['BWD_0_6km']:.1f} kt"
+                )
+                console.print(
+                    "[dim](28/28 features populated — no NaN imputation)[/dim]"
+                )
+                console.print(
+                    f"\n[dim]CES and historical analogues require a real radiosonde "
+                    f"sounding — not available in forecast mode.[/dim]"
+                )
+    except Exception as _vse:
+        logger.debug("HRRR virtual sounding model run failed: %s", _vse, exc_info=True)
+        console.print(
+            f"[dim]Virtual sounding model unavailable. "
+            f"CES and historical analogues require a real sounding.[/dim]"
+        )
 
 
 # ── analyze-now ───────────────────────────────────────────────────────────────

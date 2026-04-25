@@ -47,12 +47,12 @@ class SoundingProfile(BaseModel):
     station: OklahomaSoundingStation
     valid_time: datetime                 # UTC
     levels: list[SoundingLevel]
-    raw_source: str                      # "wyoming" | "rap" | "virtual"
+    raw_source: str                      # "wyoming" | "rap" | "virtual" | "hrrr-virtual"
 
     @field_validator("raw_source")
     @classmethod
     def valid_source(cls, v: str) -> str:
-        allowed = {"wyoming", "rap", "virtual"}
+        allowed = {"wyoming", "rap", "virtual", "hrrr-virtual"}
         if v not in allowed:
             raise ValueError(f"raw_source must be one of {allowed}, got '{v}'")
         return v

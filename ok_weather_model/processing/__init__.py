@@ -21,6 +21,10 @@ from .era5_diagnostics import (
     compute_synoptic_cap_forcing,
     extract_virtual_sounding,
 )
+from .hrrr_sounding import (
+    extract_virtual_sounding_from_hrrr,
+    find_best_hrrr_prs_run,
+)
 from .dryline_detector import (
     detect_dryline,
     compute_dryline_surge_rate,
@@ -50,6 +54,8 @@ __all__ = [
     "compute_thermal_advection",
     "compute_synoptic_cap_forcing",
     "extract_virtual_sounding",
+    "extract_virtual_sounding_from_hrrr",
+    "find_best_hrrr_prs_run",
     "detect_dryline",
     "compute_dryline_surge_rate",
     "analyze_dryline_from_mesonet",
