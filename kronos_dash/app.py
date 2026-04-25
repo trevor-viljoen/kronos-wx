@@ -1,28 +1,29 @@
 """
 KRONOS-WX TUI Dashboard — real-time severe weather situational awareness.
 
-Layout (120+ column terminal):
-  ┌─ Risk Zones ──────────┬─ Environment ──┬─ Dryline/Moisture ──┐
-  │ HRRR county tiers     │ OUN/LMN indices│ Mesonet surface     │
-  │ (refresh 15 min)      │ (refresh 60min)│ (refresh 5 min)     │
-  ├─── Tendency ──────────────────────────────────────────────────┤
-  │ ΔMLCIN / ΔCAPE / ΔSRH per threat county (15 min)              │
-  ├─── SPC Products ──────────────────────────────────────────────┤
-  │ Outlook / Watches / MDs (15 min)                              │
-  ├─── Alert Log ─────────────────────────────────────────────────┤
-  │ Scrolling tier changes and alert events                       │
-  └───────────────────────────────────────────────────────────────┘
+Layout (130+ column terminal):
+  ┌─ Risk Zones ──────────────────┬─ Environment ──────┬─ Surface / Dryline ──┐
+  │ DataTable: county risk tiers  │ OUN │ LMN columns   │ Moisture return      │
+  │ (refresh 15 min)              │ (refresh 60 min)   │ (refresh 5 min)      │
+  ├─── Tendency ──────────────────────── baseline → current ───────────────────┤
+  │ County │ Tier │ ΔCIN │ ΔCAPE │ ΔSRH-1 │ ΔSRH-3 │ ΔEHI │ Trend             │
+  ├─── SPC Products ───────────────────────────────────────────────────────────┤
+  │ D1 Outlook │ Tornado Warnings │ Watches │ MDs                              │
+  ├─── Alert Log ───────────────────────────────────────────────────────────────┤
+  │ Scrolling tier changes and alert events                                    │
+  └─────────────────────────────────────────────────────────────────────────────┘
 
 Key bindings: R = refresh all, Q = quit
 """
 from __future__ import annotations
 
 import logging
+import math
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from rich.table import Table
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
@@ -41,6 +42,7 @@ from ok_weather_model.models import OklahomaSoundingStation
 from ok_weather_model.modeling import (
     extract_features_from_indices,
     FEATURE_NAMES,
+    load_model,
 )
 from ok_weather_model.processing import (
     compute_thermodynamic_indices,
@@ -48,10 +50,17 @@ from ok_weather_model.processing import (
     compute_moisture_return,
     compute_modified_indices,
 )
-from ok_weather_model.processing.dryline_detector import detect_dryline
-from ok_weather_model.processing.risk_zone import compute_risk_zones_from_hrrr
+from ok_weather_model.processing.cap_calculator import compute_ces_from_sounding
+from ok_weather_model.processing.dryline_detector import (
+    detect_dryline,
+    compute_dryline_surge_rate,
+)
+from ok_weather_model.processing.risk_zone import (
+    compute_risk_zones_from_hrrr,
+    _TIER_RANK,
+)
 from ok_weather_model.storage import Database
-from textual.widgets import Footer, Header, RichLog, Static
+from textual.widgets import DataTable, Footer, Header, RichLog, Static
 
 logger = logging.getLogger(__name__)
 
@@ -64,24 +73,12 @@ _TIER_COLOR = {
     "MARGINAL":          "green",
     "LOW":               "dim white",
 }
-_TIER_RANK = {
-    "EXTREME": 5, "HIGH": 4, "DANGEROUS_CAPPED": 3,
-    "MODERATE": 2, "MARGINAL": 1, "LOW": 0,
-}
 
+# ── Design tokens (DESIGN.md) ─────────────────────────────────────────────────
 CSS = """
 Screen {
     background: #050510;
     color: #d0d8e8;
-}
-
-#header-bar {
-    height: 1;
-    background: #0e2040;
-    color: #7ec8e3;
-    text-style: bold;
-    content-align: center middle;
-    dock: top;
 }
 
 #top-row {
@@ -91,8 +88,21 @@ Screen {
 #risk-panel {
     width: 2fr;
     border: solid #1e3a5f;
-    padding: 0 1;
     overflow-y: scroll;
+}
+
+#risk-panel > DataTable {
+    background: #080820;
+    height: 1fr;
+}
+
+#risk-panel > DataTable > .datatable--header {
+    background: #0e2040;
+    color: #7ec8e3;
+}
+
+#risk-panel > DataTable > .datatable--cursor {
+    background: #080820;
 }
 
 #env-panel {
@@ -100,6 +110,7 @@ Screen {
     border: solid #1e3a5f;
     padding: 0 1;
     overflow-y: scroll;
+    background: #080820;
 }
 
 #dryline-panel {
@@ -107,24 +118,29 @@ Screen {
     border: solid #1e3a5f;
     padding: 0 1;
     overflow-y: scroll;
+    background: #080820;
 }
 
 #tendency-row {
-    height: 8;
+    height: 13;
     border: solid #1e3a5f;
     padding: 0 1;
     overflow-x: scroll;
+    background: #080820;
 }
 
 #spc-row {
-    height: 5;
-    border: solid #2d1b5f;
+    height: 7;
+    border: solid #5f3a1e;
     padding: 0 1;
+    overflow-y: scroll;
+    background: #080820;
 }
 
 #alert-log {
     height: 10;
     border: solid #1e3a5f;
+    background: #080820;
 }
 
 Footer {
@@ -132,6 +148,23 @@ Footer {
     background: #0e2040;
 }
 """
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _fmt(val, fmt: str, fallback: str = "—") -> str:
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return fallback
+    return fmt.format(val)
+
+
+def _abbrev_counties(area_desc: str, max_counties: int = 8) -> str:
+    """Shorten a comma-separated county list for one-line display."""
+    parts = [p.strip() for p in area_desc.replace(";", ",").split(",") if p.strip()]
+    clean = [re.sub(r",?\s*[A-Z]{2}$", "", p).strip() for p in parts]
+    clean = [c for c in clean if c]
+    if len(clean) <= max_counties:
+        return ", ".join(clean)
+    return ", ".join(clean[:max_counties]) + f" +{len(clean) - max_counties}"
 
 
 class KronosDashboard(App):
@@ -146,21 +179,26 @@ class KronosDashboard(App):
     CSS = CSS
 
     # ── Mutable state (written from worker threads via call_from_thread) ───────
-    _hrrr_base: Optional[object]  = None   # first snapshot (baseline)
-    _hrrr_now:  Optional[object]  = None   # most recent snapshot
-    _risk_zones: list             = []
-    _profile_oun: Optional[object] = None  # raw SoundingProfile
+    _hrrr_base: Optional[object]   = None
+    _hrrr_now:  Optional[object]   = None
+    _risk_zones: list              = []
+    _profile_oun: Optional[object] = None
     _indices_oun: Optional[object] = None
     _kinematics_oun: Optional[object] = None
-    _moisture: Optional[object]   = None
-    _dryline: Optional[object]    = None
+    _indices_lmn: Optional[object] = None
+    _kinematics_lmn: Optional[object] = None
+    _ces: Optional[dict]           = None
+    _moisture: Optional[object]    = None
+    _dryline: Optional[object]     = None
     _dryline_prev: Optional[object] = None
+    _dryline_surge: Optional[float] = None
     _spc_outlook: Optional[object] = None
-    _nws_alerts: list             = []
-    _spc_mds: list                = []
-    _prev_tier_map: dict          = {}      # county → tier (for diff)
-    _prev_md_numbers: set         = set()
-    _prev_alert_keys: set         = set()
+    _nws_alerts: list              = []
+    _spc_mds: list                 = []
+    _prev_tier_map: dict           = {}
+    _prev_md_numbers: set          = set()
+    _prev_alert_keys: set          = set()
+    _risk_table_ready: bool        = False
 
     def __init__(self, station: str = "OUN", **kwargs):
         super().__init__(**kwargs)
@@ -172,7 +210,8 @@ class KronosDashboard(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal(id="top-row"):
-            yield Static("Loading risk zones…", id="risk-panel")
+            with Vertical(id="risk-panel"):
+                yield DataTable(id="risk-table", cursor_type="none", show_header=True)
             yield Static("Loading environment…", id="env-panel")
             yield Static("Loading surface…", id="dryline-panel")
         yield Static("Loading tendency…", id="tendency-row")
@@ -182,10 +221,23 @@ class KronosDashboard(App):
 
     def on_mount(self) -> None:
         self._alert_log = self.query_one("#alert-log", RichLog)
-        self._log(f"[bold cyan]KRONOS-WX dashboard started — station {self._station}[/bold cyan]")
-        # Kick off all four data workers immediately
+
+        # Set border titles per DESIGN.md
+        self.query_one("#risk-panel").border_title = "Risk Zones"
+        self.query_one("#env-panel", Static).border_title = "Environment"
+        self.query_one("#dryline-panel", Static).border_title = "Surface / Dryline"
+        self.query_one("#tendency-row", Static).border_title = "Tendency"
+        self.query_one("#spc-row", Static).border_title = "SPC Products"
+        self.query_one("#alert-log", RichLog).border_title = "Alert Log"
+
+        # Set up DataTable columns for risk zones
+        tbl = self.query_one("#risk-table", DataTable)
+        tbl.add_columns("County", "Tier", "CAPE", "CIN", "SRH-1", "SRH-3", "EHI", "STP")
+        self._risk_table_ready = True
+
+        self._log(f"[bold cyan]KRONOS-WX started — station {self._station}[/bold cyan]")
         self.action_refresh_all()
-        # Set independent timers
+
         self.set_interval(5  * 60, self._fetch_surface)
         self.set_interval(15 * 60, self._fetch_hrrr)
         self.set_interval(15 * 60, self._fetch_spc)
@@ -213,7 +265,6 @@ class KronosDashboard(App):
         try:
             now = datetime.now(tz=timezone.utc)
             snap = None
-            # HRRR analysis posts ~45 min after run init; walk back up to 2 hours
             with HRRRClient() as hc:
                 for h_back in range(3):
                     try:
@@ -224,10 +275,8 @@ class KronosDashboard(App):
                         continue
 
             if snap is None:
-                self.call_from_thread(
-                    self.query_one("#risk-panel", Static).update,
-                    "[yellow]HRRR: no analysis posted yet — retrying in 15 min[/yellow]"
-                )
+                self.call_from_thread(self._set_risk_loading,
+                                      "[yellow]HRRR: no analysis posted yet[/yellow]")
                 return
 
             with self._lock:
@@ -235,7 +284,10 @@ class KronosDashboard(App):
                     self._hrrr_base = snap
                 self._hrrr_now = snap
 
-            zones = compute_risk_zones_from_hrrr(snap, min_tier="MARGINAL")
+            with self._lock:
+                dryline = self._dryline
+
+            zones = compute_risk_zones_from_hrrr(snap, dryline=dryline, min_tier="MARGINAL")
             with self._lock:
                 self._risk_zones = zones
 
@@ -245,10 +297,14 @@ class KronosDashboard(App):
 
         except Exception as exc:
             logger.debug("HRRR fetch error: %s", exc, exc_info=True)
-            self.call_from_thread(
-                self.query_one("#risk-panel", Static).update,
-                f"[red]HRRR error: {exc}[/red]"
-            )
+            self.call_from_thread(self._set_risk_loading, f"[red]HRRR error: {exc}[/red]")
+
+    def _set_risk_loading(self, msg: str) -> None:
+        """Show a status message in the risk panel when DataTable has no data."""
+        # Clear the table and add a single informational row
+        tbl = self.query_one("#risk-table", DataTable)
+        tbl.clear()
+        tbl.add_row(Text(msg, style="yellow"), "", "", "", "", "", "", "")
 
     # ── Worker: soundings + thermodynamic indices ─────────────────────────────
 
@@ -257,14 +313,15 @@ class KronosDashboard(App):
         try:
             stn   = OklahomaSoundingStation[self._station]
             today = datetime.now(tz=timezone.utc).date()
-            # Try 12Z first (standard pre-convective sounding), then 00Z, then
-            # special-event hours 18Z / 21Z in case a severe-weather launch exists
             profile = None
+            fetched_hour = None
             with SoundingClient() as sc:
                 for h in (12, 0, 18, 21):
                     try:
-                        profile = sc.get_sounding(stn, today, h)
-                        if profile is not None:
+                        p = sc.get_sounding(stn, today, h)
+                        if p is not None:
+                            profile = p
+                            fetched_hour = h
                             break
                     except Exception:
                         continue
@@ -279,13 +336,60 @@ class KronosDashboard(App):
             idx = compute_thermodynamic_indices(profile)
             kin = compute_kinematic_profile(profile, idx)
 
+            # Fetch LMN sounding for dual-column display (best-effort)
+            lmn_idx = lmn_kin = None
+            if stn == OklahomaSoundingStation.OUN and fetched_hour is not None:
+                try:
+                    with SoundingClient() as sc2:
+                        lmn_profile = sc2.get_sounding(
+                            OklahomaSoundingStation.LMN, today, fetched_hour
+                        )
+                    if lmn_profile is not None:
+                        lmn_idx = compute_thermodynamic_indices(lmn_profile)
+                        lmn_kin = compute_kinematic_profile(lmn_profile, lmn_idx)
+                except Exception:
+                    pass
+
+            # CES projection for 12Z sounding
+            ces = None
             with self._lock:
-                self._profile_oun    = profile
-                self._indices_oun    = idx
-                self._kinematics_oun = kin
+                moisture = self._moisture
+            if fetched_hour == 12:
+                try:
+                    # Estimate surface T from moisture if available
+                    surf_t_c = None
+                    if moisture is not None:
+                        td_f = moisture.state_mean_dewpoint_f
+                        td_c = (td_f - 32.0) / 1.8
+                        surf_t_c = td_c + 2.0 + idx.LCL_height * 0.0065
+                    if surf_t_c is not None:
+                        ces_traj = compute_ces_from_sounding(idx, surf_t_c, today)
+                        if ces_traj is not None:
+                            ces = {
+                                "cap_behavior":           ces_traj.cap_behavior,
+                                "convective_temp_gap_12Z": getattr(ces_traj, "convective_temp_gap_12Z", None),
+                                "convective_temp_gap_18Z": getattr(ces_traj, "convective_temp_gap_18Z", None),
+                                "erosion_hour":            getattr(ces_traj, "erosion_hour_utc", None),
+                            }
+                except Exception:
+                    pass
+
+            # Model predictions (best-effort; may not be trained yet)
+            model_pred = self._load_model_predictions(idx, kin)
+
+            with self._lock:
+                self._profile_oun     = profile
+                self._indices_oun     = idx
+                self._kinematics_oun  = kin
+                self._indices_lmn     = lmn_idx
+                self._kinematics_lmn  = lmn_kin
+                self._ces             = ces
 
             analogues = self._load_analogues(idx, kin)
-            self.call_from_thread(self._render_environment, profile, idx, kin, analogues)
+            self.call_from_thread(
+                self._render_environment, profile, idx, kin,
+                lmn_idx, lmn_kin, ces, model_pred, analogues
+            )
 
         except Exception as exc:
             logger.debug("Environment fetch error: %s", exc, exc_info=True)
@@ -294,11 +398,23 @@ class KronosDashboard(App):
                 f"[red]Environment error: {exc}[/red]"
             )
 
+    def _load_model_predictions(self, idx, kin) -> Optional[dict]:
+        """Load severity + count predictions from trained models (best-effort)."""
+        try:
+            clf = load_model("severity_classifier")
+            reg = load_model("tornado_regressor")
+            if clf is None or reg is None:
+                return None
+            proba = clf.predict_proba(idx, kin)
+            count = reg.predict(idx, kin)
+            return {"proba": proba, "count": count}
+        except Exception:
+            return None
+
     def _load_analogues(self, idx, kin) -> list:
-        """Load top-5 analogues from the case database (best-effort)."""
+        """Load top-4 analogues from the case database (best-effort)."""
         try:
             import numpy as np
-            import pandas as pd
 
             feat = extract_features_from_indices(idx, kin)
             feat_vec = np.array([feat.get(f, float("nan")) for f in FEATURE_NAMES])
@@ -313,7 +429,6 @@ class KronosDashboard(App):
                 try:
                     cf = extract_features_from_indices(case.sounding_12Z, case.kinematics_12Z)
                     cv = np.array([cf.get(f, float("nan")) for f in FEATURE_NAMES])
-                    # Euclidean distance on normalised key features
                     key_idx = [FEATURE_NAMES.index(k) for k in
                                ["MLCAPE", "MLCIN", "cap_strength", "SRH_0_3km", "BWD_0_6km", "EHI"]
                                if k in FEATURE_NAMES]
@@ -325,7 +440,7 @@ class KronosDashboard(App):
                     continue
 
             scored.sort(key=lambda x: x[0])
-            return [(d, c) for d, c in scored[:5]]
+            return [(d, c) for d, c in scored[:4]]
         except Exception:
             return []
 
@@ -335,13 +450,10 @@ class KronosDashboard(App):
     def _fetch_surface(self) -> None:
         try:
             now = datetime.now(tz=timezone.utc)
-
-            # Build station_series dict from up to two snapshots (current + 1h ago)
-            # detect_dryline needs dict[str, MesonetTimeSeries]; compute_moisture_return
-            # needs list[MesonetObservation].  Both are derived from the same snapshots.
             station_series: dict[str, MesonetTimeSeries] = {}
             current_obs: list = []
             current_snap_time: Optional[datetime] = None
+            prev_snap_time: Optional[datetime] = None
 
             with MesonetClient() as mc:
                 for h_back in (0, 1):
@@ -353,10 +465,9 @@ class KronosDashboard(App):
                         except Exception as exc:
                             if any(s in str(exc) for s in ("404", "Not Found", "400")):
                                 continue
-                            break  # unexpected error — skip this hour
+                            break
                         if not snap_obs:
                             continue
-                        # Accumulate into station_series
                         for o in snap_obs:
                             stid = o.station_id
                             if stid not in station_series:
@@ -374,7 +485,9 @@ class KronosDashboard(App):
                         if h_back == 0 and current_snap_time is None:
                             current_obs = snap_obs
                             current_snap_time = snap_time
-                        break  # got this hour's snapshot
+                        elif h_back == 1 and prev_snap_time is None:
+                            prev_snap_time = snap_time
+                        break
 
             if not station_series or current_snap_time is None:
                 self.call_from_thread(
@@ -385,18 +498,26 @@ class KronosDashboard(App):
 
             moisture = compute_moisture_return(current_obs)
 
-            prev_dl = None
             with self._lock:
                 prev_dl = self._dryline
 
             dl = detect_dryline(station_series, current_snap_time)
 
+            # Compute surge rate from previous dryline observation
+            surge: Optional[float] = None
+            if prev_dl is not None and dl is not None:
+                try:
+                    surge = compute_dryline_surge_rate(prev_dl, dl)
+                except Exception:
+                    pass
+
             with self._lock:
                 self._dryline_prev = prev_dl
                 self._dryline      = dl
+                self._dryline_surge = surge
                 self._moisture     = moisture
 
-            self.call_from_thread(self._render_dryline, moisture, dl)
+            self.call_from_thread(self._render_dryline, moisture, dl, surge)
 
         except Exception as exc:
             logger.debug("Surface fetch error: %s", exc, exc_info=True)
@@ -429,117 +550,195 @@ class KronosDashboard(App):
                 f"[red]SPC error: {exc}[/red]"
             )
 
-    # ── Render: risk zones ────────────────────────────────────────────────────
+    # ── Render: risk zones (DataTable) ────────────────────────────────────────
 
     def _render_risk_zones(self, snap, zones) -> None:
+        if not self._risk_table_ready:
+            return
+
         vt = getattr(snap, "valid_time", None)
         ts = vt.strftime("%H:%MZ") if vt else "?Z"
+        self.query_one("#risk-panel").border_title = f"Risk Zones  [dim]{ts} HRRR[/dim]"
 
-        lines: list[str] = [f"[bold cyan]RISK ZONES[/bold cyan]  [dim]{ts} HRRR[/dim]\n"]
+        tbl = self.query_one("#risk-table", DataTable)
+        tbl.clear()
 
         if not zones:
-            lines.append("[dim]No elevated risk[/dim]")
-        else:
-            for zone in zones:
-                style = _TIER_COLOR.get(zone.tier, "white")
-                cnames = ", ".join(c.name for c in zone.counties[:5])
-                if len(zone.counties) > 5:
-                    cnames += f" +{len(zone.counties)-5}"
-                ehi_s = f"  EHI {zone.peak_EHI:.1f}" if zone.peak_EHI else ""
-                lines.append(
-                    f"[{style}]{zone.tier}[/{style}]\n"
-                    f"  {cnames}\n"
-                    f"  CAPE {zone.peak_MLCAPE:.0f}  CIN {zone.peak_MLCIN:.0f}"
-                    f"  SRH1 {zone.peak_SRH_0_1km:.0f}{ehi_s}\n"
+            tbl.add_row(Text("No elevated risk", style="dim white"),
+                        "", "", "", "", "", "", "")
+            return
+
+        for zone in zones:
+            style = _TIER_COLOR.get(zone.tier, "white")
+            # Build per-county rows (one per county, collapsed to zone for brevity)
+            for county in zone.counties:
+                pt = snap.get(county) if snap else None
+                if pt is None:
+                    continue
+                ehi_s = f"{pt.EHI:.2f}" if pt.EHI is not None else "—"
+                stp_s = f"{pt.STP:.2f}" if hasattr(pt, "STP") and pt.STP is not None else "—"
+                cape_v = pt.MLCAPE
+                cin_v  = pt.MLCIN
+
+                cape_c = ("bright_red" if cape_v >= 3000 else "red" if cape_v >= 2000
+                          else "yellow" if cape_v >= 1000 else "white")
+                cin_c  = ("bright_red" if cin_v >= 200 else "red" if cin_v >= 100
+                          else "yellow" if cin_v >= 50 else "green")
+
+                tbl.add_row(
+                    Text(county.name, style=style),
+                    Text(zone.tier, style=style),
+                    Text(f"{cape_v:.0f}", style=cape_c),
+                    Text(f"{cin_v:.0f}", style=cin_c),
+                    Text(f"{pt.SRH_0_1km:.0f}"),
+                    Text(f"{pt.SRH_0_3km:.0f}"),
+                    Text(ehi_s),
+                    Text(stp_s),
                 )
 
-        self.query_one("#risk-panel", Static).update("\n".join(lines))
+    # ── Render: environment (OUN + LMN dual-column) ───────────────────────────
 
-    # ── Render: environment ───────────────────────────────────────────────────
-
-    def _render_environment(self, profile, idx, kin, analogues) -> None:
+    def _render_environment(self, profile, idx, kin,
+                             lmn_idx, lmn_kin, ces, model_pred, analogues) -> None:
         vt = getattr(profile, "valid_time", None)
         ts = vt.strftime("%H:%MZ") if vt else "?Z"
         stn = getattr(profile, "station", self._station)
         stn_name = stn.value if hasattr(stn, "value") else str(stn)
 
+        self.query_one("#env-panel", Static).border_title = f"Environment  [dim]{stn_name} {ts}[/dim]"
+
+        has_lmn = lmn_idx is not None and lmn_kin is not None
+        w = 8  # column width
+
         def _r(v, fmt=".0f"):
-            if v is None or v != v:  # nan check
+            if v is None or (isinstance(v, float) and math.isnan(v)):
                 return "—"
             return format(float(v), fmt)
 
-        lfc_s  = _r(idx.LFC_height)
-        eml_s  = _r(idx.EML_depth) if idx.EML_depth else "—"
-        ehi_s  = _r(kin.EHI,  ".2f") if kin.EHI  else "—"
-        stp_s  = _r(kin.STP,  ".2f") if kin.STP  else "—"
-        scp_s  = _r(kin.SCP,  ".1f") if kin.SCP  else "—"
-        llj_s  = _r(kin.LLJ_speed) if kin.LLJ_speed else "—"
+        def cin_c(v):
+            return "bright_red" if v >= 200 else "red" if v >= 100 else "yellow" if v >= 50 else "green"
+        def cape_c(v):
+            return "bright_red" if v >= 3000 else "red" if v >= 2000 else "yellow" if v >= 1000 else "white"
+        def srh_c(v):
+            return "bright_red" if v >= 400 else "red" if v >= 250 else "yellow" if v >= 150 else "white"
+        def ehi_c(v):
+            return "bright_red" if v >= 4.0 else "red" if v >= 2.5 else "yellow" if v >= 1.5 else "white"
 
-        # Colour-code by severity
-        cape_c = "bright_red" if idx.MLCAPE > 2500 else "red" if idx.MLCAPE > 1500 else "yellow" if idx.MLCAPE > 500 else "white"
-        cin_c  = "bright_red" if idx.MLCIN  > 150  else "red" if idx.MLCIN  > 75   else "yellow" if idx.MLCIN  > 30  else "green"
-        srh_c  = "bright_red" if kin.SRH_0_3km > 400 else "red" if kin.SRH_0_3km > 250 else "yellow" if kin.SRH_0_3km > 150 else "white"
-        sh_c   = "bright_red" if kin.BWD_0_6km > 55 else "red" if kin.BWD_0_6km > 40 else "yellow" if kin.BWD_0_6km > 25 else "white"
+        def _cv(val, color_fn, fmt=".0f"):
+            """Format value with color."""
+            s = _r(val, fmt)
+            if val is not None and not (isinstance(val, float) and math.isnan(val)):
+                c = color_fn(float(val))
+                return f"[{c}]{s}[/{c}]"
+            return s
 
-        txt = (
-            f"[bold cyan]ENVIRONMENT[/bold cyan]  [dim]{stn_name} {ts}[/dim]\n\n"
-            f"[bold]CAPE/CIN[/bold]\n"
-            f"  MLCAPE  [{cape_c}]{idx.MLCAPE:.0f}[/{cape_c}] J/kg\n"
-            f"  MLCIN   [{cin_c}]{idx.MLCIN:.0f}[/{cin_c}] J/kg\n"
-            f"  SBCAPE  {idx.SBCAPE:.0f} J/kg\n"
-            f"  MUCAPE  {idx.MUCAPE:.0f} J/kg\n\n"
-            f"[bold]CAP / PARCEL[/bold]\n"
-            f"  Cap     {idx.cap_strength:.1f} °C\n"
-            f"  LCL     {idx.LCL_height:.0f} m\n"
-            f"  LFC     {lfc_s} m\n"
-            f"  EML     {eml_s} m\n\n"
-            f"[bold]KINEMATICS[/bold]\n"
-            f"  SRH 0-1 {kin.SRH_0_1km:.0f} m²/s²\n"
-            f"  SRH 0-3 [{srh_c}]{kin.SRH_0_3km:.0f}[/{srh_c}] m²/s²\n"
-            f"  Sh 0-6  [{sh_c}]{kin.BWD_0_6km:.0f}[/{sh_c}] kt\n\n"
-            f"[bold]COMPOSITES[/bold]\n"
-            f"  EHI     {ehi_s}\n"
-            f"  STP     {stp_s}\n"
-            f"  SCP     {scp_s}\n"
-            f"  LLJ     {llj_s} kt\n"
-        )
+        def row(label, oun_val, lmn_val, fmt=".0f", color_fn=None):
+            ov = _cv(oun_val, color_fn, fmt) if color_fn else _r(oun_val, fmt)
+            if has_lmn:
+                lv = _r(lmn_val, fmt)
+                return f"{label:<16} {ov:>{w}}  {lv:>{w}}"
+            return f"{label:<16} {ov:>{w}}"
 
-        # Modified indices using current Mesonet surface moisture
+        lines = []
+        if has_lmn:
+            lines.append(f"{'':16} {'OUN':>{w}}  {'LMN':>{w}}")
+            lines.append("─" * (16 + w * 2 + 4))
+        else:
+            lines.append(f"{'':16} {'OUN':>{w}}")
+            lines.append("─" * (16 + w + 2))
+
+        lines.append(row("MLCAPE (J/kg)",  idx.MLCAPE,         getattr(lmn_idx, "MLCAPE", None),         ".0f", cape_c))
+        lines.append(row("MLCIN  (J/kg)",  idx.MLCIN,          getattr(lmn_idx, "MLCIN", None),          ".0f", cin_c))
+        lines.append(row("SBCAPE (J/kg)",  getattr(idx, "SBCAPE", None),  getattr(lmn_idx, "SBCAPE", None)))
+        lines.append(row("Cap    (°C)",    idx.cap_strength,   getattr(lmn_idx, "cap_strength", None),   ".1f"))
+        lines.append(row("LCL    (m)",     idx.LCL_height,     getattr(lmn_idx, "LCL_height", None)))
+        lines.append(row("LFC    (m)",     idx.LFC_height,     getattr(lmn_idx, "LFC_height", None)))
+        lines.append("")
+        lines.append(row("SRH 0-1 (m²/s²)", kin.SRH_0_1km,   getattr(lmn_kin, "SRH_0_1km", None),     ".0f", srh_c))
+        lines.append(row("SRH 0-3 (m²/s²)", kin.SRH_0_3km,   getattr(lmn_kin, "SRH_0_3km", None),     ".0f", srh_c))
+        lines.append(row("Shear 0-6 (kt)",  kin.BWD_0_6km,    getattr(lmn_kin, "BWD_0_6km", None)))
+        lines.append(row("EHI",             kin.EHI,          getattr(lmn_kin, "EHI", None),           ".2f", ehi_c))
+        lines.append(row("STP",             kin.STP,          getattr(lmn_kin, "STP", None),           ".2f"))
+
+        # ── CES projection ────────────────────────────────────────────────────
+        if ces:
+            lines.append("\n[bold]── CES Projection ──[/bold]")
+            cb = ces.get("cap_behavior")
+            cb_str = cb.value if cb is not None and hasattr(cb, "value") else str(cb) if cb else "—"
+            cb_color = {
+                "CLEAN_EROSION":    "bright_green",
+                "EARLY_EROSION":    "green",
+                "LATE_EROSION":     "yellow",
+                "NO_EROSION":       "red",
+                "BOUNDARY_FORCED":  "cyan",
+            }.get(cb_str, "white")
+            lines.append(f"[{cb_color}]{cb_str}[/{cb_color}]")
+            erosion_h = ces.get("erosion_hour")
+            if erosion_h is not None:
+                lines.append(f"Erosion hour: [cyan]{erosion_h:02d}Z[/cyan]")
+            for key, label_s in [
+                ("convective_temp_gap_12Z", "12Z Tc gap"),
+                ("convective_temp_gap_18Z", "18Z Tc gap"),
+            ]:
+                val = ces.get(key)
+                if val is not None:
+                    gc = "green" if val < 0 else ("yellow" if val < 10 else "red")
+                    lines.append(f"{label_s}: [{gc}]{val:+.1f}°F[/{gc}]")
+
+        # ── Model predictions ─────────────────────────────────────────────────
+        if model_pred is not None:
+            lines.append("\n[bold]── Model Forecast ──[/bold]")
+            proba = model_pred.get("proba", {})
+            count = model_pred.get("count", {})
+            sig_pct = proba.get("significant", 0) * 100
+            sig_c = "bright_red" if sig_pct >= 60 else "red" if sig_pct >= 40 else "yellow" if sig_pct >= 20 else "green"
+            lines.append(f"Severity: [{sig_c}]{sig_pct:.0f}% SIGNIFICANT[/{sig_c}]")
+            if count:
+                exp = count.get("expected_count", 0)
+                lo  = count.get("interval_low", 0)
+                hi  = count.get("interval_high", 0)
+                lines.append(f"Count:    {exp:.0f} expected  (80% PI: {lo:.0f}–{hi:.0f})")
+        else:
+            lines.append("\n[dim]Models not trained — run train-models[/dim]")
+
+        # ── Modified indices with live Mesonet moisture ───────────────────────
         with self._lock:
             moisture = self._moisture
         if moisture is not None:
             try:
-                td_f  = moisture.state_mean_dewpoint_f
+                td_f = moisture.state_mean_dewpoint_f
                 td_c_val = (td_f - 32.0) / 1.8
-                surf_t_c = idx.LCL_height * 0.0065 + td_c_val + 2.0  # rough surface T
+                surf_t_c = idx.LCL_height * 0.0065 + td_c_val + 2.0
                 mod = compute_modified_indices(profile, surf_t_c, td_c_val)
                 if mod is not None:
                     mcape_c = "bright_red" if mod.MLCAPE > 2500 else "red" if mod.MLCAPE > 1500 else "yellow"
-                    txt += (
-                        f"\n[bold]MODIFIED (Mesonet Td={td_f:.0f}°F)[/bold]\n"
+                    lines.append(
+                        f"\n[bold]Modified (Mesonet Td={td_f:.0f}°F)[/bold]\n"
                         f"  Mod MLCAPE [{mcape_c}]{mod.MLCAPE:.0f}[/{mcape_c}] J/kg\n"
-                        f"  Mod MLCIN  {mod.MLCIN:.0f} J/kg\n"
+                        f"  Mod MLCIN  {mod.MLCIN:.0f} J/kg"
                     )
             except Exception:
                 pass
 
+        # ── Top analogues ─────────────────────────────────────────────────────
         if analogues:
-            txt += "\n[bold]TOP ANALOGUES[/bold]\n"
-            for dist, case in analogues[:4]:
+            lines.append("\n[bold]Top Analogues[/bold]")
+            for dist, case in analogues:
                 cls_s = case.event_class.value if case.event_class else "?"
                 cls_c = "bright_red" if "SIGNIFICANT" in cls_s else "yellow"
-                txt += (
+                lines.append(
                     f"  {case.case_id}  "
                     f"[{cls_c}]{cls_s.replace('_OUTBREAK','').replace('_',' ')}[/{cls_c}]  "
-                    f"dist={dist:.3f}  n={case.tornado_count}\n"
+                    f"dist={dist:.3f}  n={case.tornado_count}"
                 )
 
-        self.query_one("#env-panel", Static).update(txt)
+        self.query_one("#env-panel", Static).update("\n".join(lines))
 
     # ── Render: dryline / moisture ────────────────────────────────────────────
 
-    def _render_dryline(self, moisture, dryline) -> None:
+    def _render_dryline(self, moisture, dryline, surge: Optional[float]) -> None:
         now = datetime.now(tz=timezone.utc).strftime("%H:%MZ")
+        self.query_one("#dryline-panel", Static).border_title = f"Surface / Dryline  [dim]{now}[/dim]"
 
         td_f  = moisture.state_mean_dewpoint_f
         grad  = moisture.moisture_return_gradient_f
@@ -548,14 +747,13 @@ class KronosDashboard(App):
         td_c  = "bright_red" if td_f >= 65 else "red" if td_f >= 60 else "yellow" if td_f >= 55 else "white"
         gf_c  = "bright_red" if gf >= 0.5 else "red" if gf >= 0.3 else "yellow" if gf >= 0.1 else "dim white"
 
-        txt = (
-            f"[bold cyan]SURFACE / DRYLINE[/bold cyan]  [dim]{now}[/dim]\n\n"
-            f"[bold]MOISTURE RETURN[/bold]\n"
-            f"  Td mean  [{td_c}]{td_f:.1f}[/{td_c}] °F\n"
-            f"  S/N grad {grad:+.1f} °F\n"
-            f"  Gulf cov [{gf_c}]{gf*100:.0f}%[/{gf_c}]\n"
-            f"  Stations {ns}\n"
-        )
+        lines = [
+            "[bold]MOISTURE RETURN[/bold]",
+            f"  Td mean  [{td_c}]{td_f:.1f}[/{td_c}] °F",
+            f"  S/N grad {grad:+.1f} °F",
+            f"  Gulf cov [{gf_c}]{gf*100:.0f}%[/{gf_c}]",
+            f"  Stations {ns}",
+        ]
 
         if dryline is not None:
             conf_c = "green" if dryline.confidence > 0.7 else "yellow" if dryline.confidence > 0.4 else "dim white"
@@ -568,30 +766,31 @@ class KronosDashboard(App):
                 )
             else:
                 pos_s = "detected"
+            lines += ["", "[bold]DRYLINE[/bold]", f"  Position {pos_s}",
+                      f"  Conf     [{conf_c}]{dryline.confidence:.2f}[/{conf_c}]"]
+            if surge is not None:
+                direction = "eastward" if surge > 0 else "retrograding"
+                sc = "red" if abs(surge) > 15 else "yellow" if abs(surge) > 5 else "green"
+                lines.append(f"  Surge    [{sc}]{surge:+.0f} mph ({direction})[/{sc}]")
             counties = ", ".join(c.name for c in (dryline.counties_intersected or [])[:4])
-            txt += (
-                f"\n[bold]DRYLINE[/bold]\n"
-                f"  Position {pos_s}\n"
-                f"  Conf     [{conf_c}]{dryline.confidence:.2f}[/{conf_c}]\n"
-            )
             if counties:
-                txt += f"  Counties {counties}\n"
+                lines.append(f"  Counties {counties}")
         else:
-            txt += "\n[dim]No dryline detected[/dim]\n"
+            lines += ["", "[dim]No dryline detected[/dim]"]
 
-        self.query_one("#dryline-panel", Static).update(txt)
+        self.query_one("#dryline-panel", Static).update("\n".join(lines))
 
-    # ── Render: tendency ──────────────────────────────────────────────────────
+    # ── Render: tendency (composite scoring → ▲▲/▲/→/▼) ─────────────────────
 
     def _render_tendency(self) -> None:
         with self._lock:
-            base = self._hrrr_base
-            now  = self._hrrr_now
+            base  = self._hrrr_base
+            now   = self._hrrr_now
             zones = self._risk_zones
 
         if base is None or now is None or not zones:
             self.query_one("#tendency-row", Static).update(
-                "[bold cyan]TENDENCY[/bold cyan]  [dim]waiting for two snapshots…[/dim]"
+                "[dim]Waiting for two HRRR snapshots…[/dim]"
             )
             return
 
@@ -599,16 +798,15 @@ class KronosDashboard(App):
         vt_n = getattr(now,  "valid_time", None)
         ts_b = vt_b.strftime("%H:%MZ") if vt_b else "?"
         ts_n = vt_n.strftime("%H:%MZ") if vt_n else "?"
-
-        def _arrow(delta: float, threshold: float = 0) -> str:
-            if delta > threshold:  return "↑"
-            if delta < -threshold: return "↓"
-            return "→"
+        self.query_one("#tendency-row", Static).border_title = f"Tendency  [dim]{ts_b} → {ts_n}[/dim]"
 
         def _sign(v: float) -> str:
             return f"+{v:.0f}" if v >= 0 else f"{v:.0f}"
 
-        lines = [f"[bold cyan]TENDENCY[/bold cyan]  [dim]{ts_b} → {ts_n}[/dim]\n"]
+        lines = [
+            f"{'County':<13}{'Tier':<20}{'ΔCIN':>6}{'ΔCAPE':>7}{'ΔSRH-1':>7}{'ΔSRH-3':>7}{'ΔEHI':>6}  Trend",
+            "─" * 72,
+        ]
 
         threat_counties: list = []
         seen: set = set()
@@ -627,70 +825,117 @@ class KronosDashboard(App):
         if not threat_counties:
             lines.append("[dim]No threat counties above MODERATE[/dim]")
         else:
-            for tier, county, pt_b, pt_n in threat_counties[:8]:
+            for tier, county, pt_b, pt_n in threat_counties[:10]:
                 d_cin  = pt_n.MLCIN  - pt_b.MLCIN
                 d_cape = pt_n.MLCAPE - pt_b.MLCAPE
                 d_srh1 = pt_n.SRH_0_1km - pt_b.SRH_0_1km
                 d_srh3 = pt_n.SRH_0_3km - pt_b.SRH_0_3km
-                ehi_n  = pt_n.EHI or 0
-                ehi_b  = pt_b.EHI or 0
-                d_ehi  = ehi_n - ehi_b
+                d_ehi  = (pt_n.EHI or 0.0) - (pt_b.EHI or 0.0)
+
+                cin_c  = "green" if d_cin  <= -10 else "red"    if d_cin  >= 10  else "yellow"
+                srh_c  = "green" if d_srh1 >=  20 else "red"    if d_srh1 <= -20 else "yellow"
+                cape_c = "green" if d_cape >= 200  else "red"   if d_cape <= -200 else "yellow"
+
+                # Composite score → trend arrow (DESIGN.md formula)
+                score = (
+                    (1 if d_cin  <= -10 else 0) + (1 if d_cin  <= -30 else 0) +
+                    (1 if d_srh1 >=  20 else 0) + (1 if d_cape >= 200  else 0) +
+                    (-1 if d_cin  >= 10  else 0) + (-1 if d_srh1 <= -20 else 0)
+                )
+                arrow = (
+                    "[bright_green]▲▲[/bright_green]" if score >= 3 else
+                    "[green]▲[/green]"                if score == 2 else
+                    "[yellow]→[/yellow]"              if score >= 0 else
+                    "[red]▼[/red]"
+                )
 
                 style = _TIER_COLOR.get(tier, "white")
-                cin_c  = "red" if d_cin > 30 else "green" if d_cin < -30 else "white"
-                cape_c = "green" if d_cape > 200 else "red" if d_cape < -200 else "white"
-                srh_c  = "green" if d_srh3 > 50 else "red" if d_srh3 < -50 else "white"
-
                 lines.append(
-                    f"[{style}]{county.name:<14}[/{style}]  "
-                    f"ΔCIN [{cin_c}]{_sign(d_cin):>6}[/{cin_c}] {_arrow(-d_cin, 20)}  "
-                    f"ΔCAPE [{cape_c}]{_sign(d_cape):>6}[/{cape_c}] {_arrow(d_cape, 100)}  "
-                    f"ΔSRH-1 [{srh_c}]{_sign(d_srh1):>5}[/{srh_c}]  "
-                    f"ΔSRH-3 [{srh_c}]{_sign(d_srh3):>5}[/{srh_c}]  "
-                    f"ΔEHI {_sign(d_ehi)}"
+                    f"[{style}]{county.name:<13}[/{style}]"
+                    f"[{style}]{tier:<20}[/{style}]"
+                    f"[{cin_c}]{d_cin:>+5.0f}[/{cin_c}]"
+                    f"[{cape_c}]{d_cape:>+6.0f}[/{cape_c}]"
+                    f"[{srh_c}]{d_srh1:>+6.0f}[/{srh_c}]"
+                    f"[{srh_c}]{d_srh3:>+6.0f}[/{srh_c}]"
+                    f"{d_ehi:>+5.2f}  {arrow}"
                 )
 
         self.query_one("#tendency-row", Static).update("\n".join(lines))
 
-    # ── Render: SPC products ──────────────────────────────────────────────────
+    # ── Render: SPC products (categorized) ───────────────────────────────────
+
+    _CAT_COLOR = {
+        "HIGH":  "bright_red",
+        "PDS":   "bright_red",
+        "MDT":   "red",
+        "ENH":   "yellow",
+        "SLGT":  "yellow",
+        "MRGL":  "green",
+        "TSTM":  "dim white",
+        "NONE":  "dim white",
+    }
 
     def _render_spc(self, outlook, alerts, mds) -> None:
-        parts: list[str] = ["[bold magenta]SPC[/bold magenta]  "]
+        now_s = datetime.now(tz=timezone.utc).strftime("%H:%MZ")
+        self.query_one("#spc-row", Static).border_title = f"SPC Products  [dim]{now_s}[/dim]"
 
+        lines: list[str] = []
+
+        # ── D1 Outlook ────────────────────────────────────────────────────────
         if outlook:
             cat = outlook.category or "?"
-            cat_c = {
-                "PDS": "bold bright_red", "MDT": "bold red",
-                "ENH": "red", "SLGT": "yellow",
-                "MRGL": "green", "TSTM": "dim white",
-            }.get(cat, "white")
+            cat_c = self._CAT_COLOR.get(cat, "white")
             torn_pct = int((outlook.max_tornado_prob or 0) * 100)
-            hatch_s  = "  [bold bright_red]⚠ SIG TOR[/bold bright_red]" if outlook.sig_tornado_hatched else ""
-            parts.append(f"[{cat_c}]{cat}[/{cat_c}]  Torn {torn_pct}%{hatch_s}")
+            hatch_s = "  [bold bright_red]⚠ SIG TOR[/bold bright_red]" if outlook.sig_tornado_hatched else ""
+            lines.append(f"D1: [{cat_c}]{cat}[/{cat_c}]  torn {torn_pct}%{hatch_s}")
         else:
-            parts.append("[dim]No outlook[/dim]")
+            lines.append("[dim]D1 Outlook: unavailable[/dim]")
 
-        lines = ["".join(parts)]
+        # ── Tornado Warnings ──────────────────────────────────────────────────
+        tor_warnings  = [a for a in alerts if "Tornado Warning" in a.event]
+        tor_watches   = [a for a in alerts if "Tornado Watch"   in a.event]
+        svr_warnings  = [a for a in alerts if "Severe Thunderstorm Warning" in a.event]
 
-        # Active watches / warnings
-        tornado_alerts = [a for a in alerts if "tornado" in a.product_type.lower()]
-        if tornado_alerts:
-            for a in tornado_alerts:
-                lines.append(f"  [bold bright_red]🌪  {a.headline}[/bold bright_red]")
-        else:
-            lines.append("  [dim]No active tornado watches/warnings[/dim]")
+        if tor_warnings:
+            for a in tor_warnings:
+                counties = _abbrev_counties(a.area_desc, max_counties=4)
+                exp_s = getattr(a, "expires_label", "")
+                lines.append(
+                    f"[bold bright_red]TORNADO WARNING[/bold bright_red]"
+                    f"  {counties}  exp {exp_s}"
+                )
+        if tor_watches:
+            for a in tor_watches:
+                num_str  = f" #{a.watch_number}" if getattr(a, "watch_number", None) else ""
+                counties = _abbrev_counties(a.area_desc, max_counties=8)
+                exp_s    = getattr(a, "expires_label", "")
+                lines.append(
+                    f"[bold red]TORNADO WATCH{num_str}[/bold red]"
+                    f"  {counties}  exp {exp_s}"
+                )
+        if svr_warnings:
+            counties = _abbrev_counties(
+                "; ".join(a.area_desc for a in svr_warnings), max_counties=6
+            )
+            lines.append(
+                f"[yellow]{len(svr_warnings)} SVR TSTM WARNING{'S' if len(svr_warnings)>1 else ''}[/yellow]"
+                f"  {counties}"
+            )
+        if not tor_warnings and not tor_watches and not svr_warnings:
+            lines.append("[dim]No active warnings or watches[/dim]")
 
-        # Active MDs
+        # ── Mesoscale Discussions ─────────────────────────────────────────────
         if mds:
             for md in mds:
-                pct = md.prob_watch_next_2h or 0
-                pct_c = "bright_red" if pct >= 60 else "red" if pct >= 40 else "yellow"
+                md_num = getattr(md, "md_number", None) or getattr(md, "number", "?")
+                pct    = getattr(md, "prob_watch_next_2h", None) or 0
+                pct_c  = "bright_red" if pct >= 60 else "red" if pct >= 40 else "yellow"
+                hl     = (getattr(md, "headline", None) or "")[:60]
                 lines.append(
-                    f"  [cyan]MD #{md.md_number}[/cyan]  [{pct_c}]{pct}% watch[/{pct_c}]  "
-                    f"{(md.headline or '')[:60]}"
+                    f"[cyan]MD #{md_num}[/cyan]  [{pct_c}]{pct}% watch[/{pct_c}]  {hl}"
                 )
         else:
-            lines.append("  [dim]No active MDs[/dim]")
+            lines.append("[dim]No active MDs[/dim]")
 
         self.query_one("#spc-row", Static).update("\n".join(lines))
 
@@ -708,34 +953,52 @@ class KronosDashboard(App):
 
         for county, tier in new_map.items():
             old_tier = prev.get(county, "LOW")
-            if old_tier != tier:
-                style = _TIER_COLOR.get(tier, "white")
-                old_style = _TIER_COLOR.get(old_tier, "dim white")
-                self._log(
-                    f"[{style}]{county.name}[/{style}]  "
-                    f"[{old_style}]{old_tier}[/{old_style}] → "
-                    f"[{style}]{tier}[/{style}]"
-                )
+            if old_tier == tier:
+                continue
+            old_rank = _TIER_RANK.get(old_tier, 0)
+            new_rank = _TIER_RANK.get(tier, 0)
+            if max(old_rank, new_rank) < 2:
+                continue
+            style     = _TIER_COLOR.get(tier, "white")
+            old_style = _TIER_COLOR.get(old_tier, "dim white")
+            arrow = "▲" if new_rank > old_rank else "▼"
+            self._log(
+                f"[{style}]{arrow} {county.name}[/{style}]  "
+                f"[{old_style}]{old_tier}[/{old_style}] → "
+                f"[{style}]{tier}[/{style}]"
+            )
 
     def _check_spc_changes(self, alerts, mds) -> None:
         with self._lock:
             prev_alerts = set(self._prev_alert_keys)
             prev_mds    = set(self._prev_md_numbers)
 
-        new_alert_keys = set()
+        new_alert_keys: set = set()
         for a in alerts:
-            key = f"{a.product_type}:{a.headline}"
+            key = f"{a.event}:{getattr(a, 'watch_number', '')}:{a.area_desc}"
             new_alert_keys.add(key)
             if key not in prev_alerts:
-                self._log(f"[bold bright_red]🚨 NEW ALERT: {a.product_type} — {a.headline}[/bold bright_red]")
+                if "Tornado Warning" in a.event:
+                    counties = _abbrev_counties(a.area_desc, max_counties=4)
+                    self._log(
+                        f"[bold bright_red]🌪 TORNADO WARNING[/bold bright_red]  "
+                        f"{counties}  exp {getattr(a, 'expires_label', '')}"
+                    )
+                elif "Tornado Watch" in a.event:
+                    num_str = f" #{a.watch_number}" if getattr(a, "watch_number", None) else ""
+                    self._log(
+                        f"[bold red]📋 TORNADO WATCH{num_str} issued[/bold red]  "
+                        f"exp {getattr(a, 'expires_label', '')}"
+                    )
 
-        new_md_numbers = set()
+        new_md_numbers: set = set()
         for md in mds:
-            new_md_numbers.add(md.md_number)
-            if md.md_number not in prev_mds:
-                self._log(
-                    f"[bold cyan]📋 NEW MD #{md.md_number}: {(md.headline or '')[:80]}[/bold cyan]"
-                )
+            md_num = getattr(md, "md_number", None) or getattr(md, "number", None)
+            if md_num is not None:
+                new_md_numbers.add(md_num)
+                if md_num not in prev_mds:
+                    concerning = getattr(md, "concerning", None) or getattr(md, "headline", None) or "active"
+                    self._log(f"[bold cyan]📋 NEW MD #{md_num}: {concerning[:80]}[/bold cyan]")
 
         with self._lock:
             self._prev_alert_keys  = new_alert_keys
