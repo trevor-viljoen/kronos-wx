@@ -2272,7 +2272,10 @@ def dashboard(station: str):
               help="Minimum tier change that triggers an alert")
 @click.option("--station", default="OUN", show_default=True,
               help="Primary sounding station")
-def watch_now(interval: int, min_tier: str, station: str):
+@click.option("--notify", is_flag=True, default=False,
+              help="Send macOS system notifications on EXTREME tier, new Tornado Warnings, "
+                   "and PDS Watch issuances (macOS only; uses osascript).")
+def watch_now(interval: int, min_tier: str, station: str, notify: bool):
     """
     Continuously monitor conditions and alert on meaningful changes.
 
@@ -2312,7 +2315,27 @@ def watch_now(interval: int, min_tier: str, station: str):
     prev_hrrr_valid:   datetime | None = None
     prev_trend: str = "steady"
     prev_dryline_lon:  float | None = None   # last known dryline center longitude
+    prev_alert_keys:   set[str] = set()      # seen NWS alert headlines
+    prev_md_numbers:   set[int] = set()      # seen SPC MD numbers
     cycle = 0
+
+    def _macos_notify(title: str, message: str) -> None:
+        """Send a macOS system notification via osascript. No-op on other platforms."""
+        if not notify:
+            return
+        import subprocess, sys
+        if sys.platform != "darwin":
+            return
+        try:
+            script = (
+                f'display notification "{message}" '
+                f'with title "{title}" '
+                f'sound name "Sosumi"'
+            )
+            subprocess.run(["osascript", "-e", script],
+                           capture_output=True, timeout=5)
+        except Exception:
+            pass
 
     def _classify_trend(tend_counties) -> str:
         if not tend_counties:
@@ -2463,9 +2486,24 @@ def watch_now(interval: int, min_tier: str, station: str):
                 if pt_now and pt_base and curr_valid != base_valid:
                     tend_counties.append((zone.tier, pt_now, pt_base))
 
+        # ── SPC / NWS active products ─────────────────────────────────────────
+        from ok_weather_model.ingestion import fetch_active_watches_warnings
+        from ok_weather_model.ingestion.spc_products import fetch_active_mds
+        nws_alerts = []
+        spc_mds    = []
+        try:
+            nws_alerts = fetch_active_watches_warnings()
+        except Exception:
+            pass
+        try:
+            spc_mds = fetch_active_mds()
+        except Exception:
+            pass
+
         return (curr_snap, curr_valid, hrrr_baseline, base_valid,
                 risk_zones, base_risk_zones, tend_counties, fetched_hour,
-                current_dryline, prev_dryline, surface_temp_c)
+                current_dryline, prev_dryline, surface_temp_c,
+                nws_alerts, spc_mds)
 
     # ── Main watch loop ───────────────────────────────────────────────────────
     from rich.table import Table as _RichTable
@@ -2518,7 +2556,8 @@ def watch_now(interval: int, min_tier: str, station: str):
 
             (curr_snap, curr_valid, base_snap, base_valid,
              risk_zones, base_zones, tend_counties, snd_hour,
-             current_dryline, prev_dryline, surface_temp_c) = result
+             current_dryline, prev_dryline, surface_temp_c,
+             nws_alerts, spc_mds) = result
 
             curr_valid_str = curr_valid.strftime("%H:%MZ")
 
@@ -2590,10 +2629,19 @@ def watch_now(interval: int, min_tier: str, station: str):
                     f"Trend flip: {prev_trend.upper()} → {curr_trend.upper()}"
                 )
 
+            # ── NWS / SPC alert change detection ──────────────────────────────
+            curr_alert_keys: set[str] = {a.headline for a in nws_alerts}
+            curr_md_numbers: set[int] = {md.number for md in spc_mds}
+
+            new_alerts  = [a for a in nws_alerts if a.headline not in prev_alert_keys]
+            new_mds     = [md for md in spc_mds  if md.number  not in prev_md_numbers]
+            gone_alerts = prev_alert_keys - curr_alert_keys   # expired products
+
             # ── Print output only when something changed ───────────────────────
             has_elevated = any(z.tier_rank >= min_rank for z in risk_zones)
-            should_print = bool(tier_changes) or trend_flip or (
-                cycle == 1  # always print full picture on first run
+            should_print = (
+                bool(tier_changes) or trend_flip or bool(new_alerts) or
+                bool(new_mds) or cycle == 1
             )
 
             if should_print:
@@ -2647,9 +2695,91 @@ def watch_now(interval: int, min_tier: str, station: str):
                         border_style=trend_color,
                     ))
 
-                # Other alerts
+                # ── NWS active alerts ──────────────────────────────────────────
+                if new_alerts:
+                    lines = []
+                    for a in sorted(new_alerts, key=lambda x: -x.priority):
+                        expires = f"  expires {a.expires_label}" if a.expires_label else ""
+                        if a.priority == 4:   # Tornado Warning
+                            color = "bright_red"
+                        elif a.priority == 3: # Tornado Watch
+                            color = "red"
+                        else:                 # SVR Warning
+                            color = "yellow"
+                        lines.append(f"[{color}]{a.event}[/{color}]  {a.headline}{expires}")
+                        lines.append(f"  [dim]{a.area_desc[:120]}[/dim]")
+                        # Notify for Tornado Warning or Tornado Watch
+                        if a.priority >= 3:
+                            _macos_notify(
+                                f"KRONOS-WX: {a.event}",
+                                a.headline[:80],
+                            )
+                    console.print(Panel(
+                        "\n".join(lines),
+                        title="[bold red on white] ⚡  NEW NWS ALERTS [/bold red on white]",
+                        border_style="bright_red",
+                        padding=(1, 2),
+                    ))
+
+                # Expired alerts
+                if gone_alerts and cycle > 1:
+                    for headline in gone_alerts:
+                        console.print(f"[dim]{now_str}  Alert expired/cancelled: {headline[:80]}[/dim]")
+
+                # All currently active alerts (compact, every print cycle)
+                if nws_alerts and (new_alerts or cycle == 1):
+                    al_tbl = Table(title="Active NWS Alerts — Oklahoma",
+                                   show_lines=False, box=None, padding=(0, 2))
+                    al_tbl.add_column("Product",  style="bold", min_width=28)
+                    al_tbl.add_column("Expires",  justify="right", min_width=8)
+                    al_tbl.add_column("Area (truncated)")
+                    for a in sorted(nws_alerts, key=lambda x: -x.priority):
+                        if a.priority == 4:   color = "bright_red"
+                        elif a.priority == 3: color = "red"
+                        else:                 color = "yellow"
+                        al_tbl.add_row(
+                            f"[{color}]{a.event}[/{color}]",
+                            a.expires_label,
+                            a.area_desc[:70],
+                        )
+                    console.print(al_tbl)
+
+                # ── SPC Mesoscale Discussions ──────────────────────────────────
+                if new_mds:
+                    for md in new_mds:
+                        ok_tag = " [OK]" if md.mentions_oklahoma else ""
+                        body_preview = "  ".join(md.body_lines[:3]) if md.body_lines else ""
+                        console.print(Panel(
+                            f"[bold]MD #{md.number}{ok_tag}[/bold]  {md.areas_affected}\n"
+                            f"[italic]{md.concerning}[/italic]\n\n"
+                            f"{body_preview}\n\n"
+                            f"[dim]{md.url}[/dim]",
+                            title="[bold yellow on black] 🔔  NEW SPC MESOSCALE DISCUSSION [/bold yellow on black]",
+                            border_style="yellow",
+                            padding=(1, 2),
+                        ))
+                        if md.mentions_oklahoma:
+                            _macos_notify(
+                                f"KRONOS-WX: SPC MD #{md.number}",
+                                f"{md.concerning[:80]}",
+                            )
+
+                # Other alerts (new HRRR run, dryline)
                 for a in alerts:
                     console.print(f"[dim]{now_str}  {a}[/dim]")
+
+                # EXTREME tier notification
+                extreme_counties = [
+                    z for z in risk_zones if z.tier == "EXTREME"
+                ]
+                if extreme_counties and _TR.get("EXTREME", 5) >= min_rank:
+                    names = ", ".join(
+                        c.name for z in extreme_counties for c in z.counties[:4]
+                    )
+                    _macos_notify(
+                        "KRONOS-WX: EXTREME TIER",
+                        f"{names} — violent tornado environment",
+                    )
 
                 # Current risk snapshot (elevated counties only)
                 if has_elevated:
@@ -2659,6 +2789,8 @@ def watch_now(interval: int, min_tier: str, station: str):
                     snap_tbl.add_column("MLCAPE",   justify="right")
                     snap_tbl.add_column("MLCIN",    justify="right")
                     snap_tbl.add_column("SRH 0–1",  justify="right")
+                    snap_tbl.add_column("SRH 0–3",  justify="right")
+                    snap_tbl.add_column("Shear",    justify="right")
                     snap_tbl.add_column("EHI",      justify="right")
                     snap_tbl.add_column("STP",      justify="right")
 
@@ -2676,6 +2808,8 @@ def watch_now(interval: int, min_tier: str, station: str):
                                 f"{pt.MLCAPE:.0f}",
                                 f"{pt.MLCIN:.0f}",
                                 f"{pt.SRH_0_1km:.0f}",
+                                f"{pt.SRH_0_3km:.0f}",
+                                f"{pt.BWD_0_6km:.0f} kt",
                                 f"{pt.EHI:.2f}" if pt.EHI else "—",
                                 f"{pt.STP:.2f}" if pt.STP else "—",
                             )
@@ -2702,6 +2836,8 @@ def watch_now(interval: int, min_tier: str, station: str):
             prev_hrrr_valid   = curr_valid
             prev_trend        = curr_trend
             prev_dryline_lon  = curr_dl_lon
+            prev_alert_keys   = curr_alert_keys
+            prev_md_numbers   = curr_md_numbers
 
             time.sleep(interval * 60)
 
