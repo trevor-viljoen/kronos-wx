@@ -631,7 +631,7 @@ async def _task_surface() -> None:
                 continue
 
             moisture = await asyncio.to_thread(compute_moisture_return, current_obs)
-            dl = await asyncio.to_thread(detect_dryline, station_series, snap_time)
+            dl = await asyncio.to_thread(detect_dryline, station_series, snap_time, _station_coords)
 
             # Compute surge vs previous
             prev_dl = _dryline_obj

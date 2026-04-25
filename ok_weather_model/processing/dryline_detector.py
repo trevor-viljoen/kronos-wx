@@ -41,17 +41,22 @@ from ..models.mesonet import MesonetTimeSeries
 MIN_TD_GRADIENT_F_PER_DEG: float = 8.0
 
 # Minimum *absolute* Td drop (°F) across the boundary pair (filters noise between
-# two nearly-equal stations that happen to be far apart)
-MIN_TD_ABSOLUTE_DROP_F: float = 10.0
+# two nearly-equal stations that happen to be far apart).
+# Lowered from 10°F → 8°F to pair with the raised DRY_SECTOR_TD_MAX_F; the 2°F
+# reduction is safe because DRY_SECTOR_TD_MAX_F=52 already blocks moist-sector pairs.
+MIN_TD_ABSOLUTE_DROP_F: float = 8.0
 
 # A gradient this strong (°F/deg lon) is assigned confidence = 1.0 from gradient alone
 STRONG_GRADIENT_F_PER_DEG: float = 20.0
 
 # The western station of a candidate pair must be in the dry sector (Td below this).
 # Outflow boundaries occur in the moist sector — both stations have high dewpoints.
-# Rain-cooled outflow can push Td to 45–52°F but not into genuine dry-sector range.
-# Classic OK dry-sector dewpoints: 20–45°F.
-DRY_SECTOR_TD_MAX_F: float = 45.0
+# Classic OK dry-sector dewpoints: 20–45°F, but early-season or weak drylines can
+# sit at 48–52°F in the transition zone when Gulf moisture hasn't fully surged west.
+# Raised from 45°F → 52°F to capture weak/early-season drylines; the absolute-drop
+# filter below keeps outflow boundaries (which have similar Td on both sides) from
+# registering as drylines.
+DRY_SECTOR_TD_MAX_F: float = 52.0
 
 # Max station-pair separation to consider (degrees longitude).
 # Allows skipping one station that has missing/bad data.
@@ -190,6 +195,7 @@ def _counties_near_polyline(
 def detect_dryline(
     station_series: dict[str, MesonetTimeSeries],
     valid_time: datetime,
+    station_coords: Optional[dict[str, tuple[float, float]]] = None,
 ) -> Optional[BoundaryObservation]:
     """
     Detect the dryline position from Mesonet observations at valid_time.
@@ -212,8 +218,12 @@ def detect_dryline(
         ob = _nearest_obs(ts, valid_time)
         if ob is None:
             continue
-        lat = ts.county.lat
-        lon = ts.county.lon
+        # Use actual station coordinates when available; fall back to county centroid.
+        if station_coords and ts.station_id in station_coords:
+            lat, lon = station_coords[ts.station_id]
+        else:
+            lat = ts.county.lat
+            lon = ts.county.lon
         for lat_min, lat_max, _rep, band_name in _LAT_BANDS:
             if lat_min <= lat < lat_max:
                 band_data[band_name].append((lon, lat, ob.dewpoint))
