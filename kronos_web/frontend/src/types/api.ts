@@ -152,6 +152,18 @@ export interface AlertLogEntry {
   msg: string
 }
 
+export interface StationObs {
+  station_id: string
+  county: string
+  lat: number
+  lon: number
+  temp_f: number
+  dewpoint_f: number
+  wind_dir: number
+  wind_speed: number
+  wind_gust: number | null
+}
+
 export interface DashboardState {
   updated_at: string | null
   hrrr_valid: string | null
@@ -166,6 +178,7 @@ export interface DashboardState {
   spc: SPCData
   alert_geojson: GeoJSON.FeatureCollection | null
   outlook_geojson: GeoJSON.FeatureCollection | null
+  mesonet_obs: StationObs[]
   model_forecast: ModelForecast | null
   alert_log: AlertLogEntry[]
 }

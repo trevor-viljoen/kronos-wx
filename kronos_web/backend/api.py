@@ -77,6 +77,7 @@ _state: dict[str, Any] = {
     "spc":             {"outlook": None, "alerts": [], "mds": []},
     "alert_geojson":   None,    # raw NWS FeatureCollection (polygon geometry)
     "outlook_geojson": None,    # SPC Day1 categorical FeatureCollection
+    "mesonet_obs":     [],      # list[dict] — current Mesonet station observations
     "model_forecast":  None,
     "alert_log":       [],
 }
@@ -597,9 +598,28 @@ async def _task_surface() -> None:
 
             _dryline_obj = dl
 
+            # Serialize current Mesonet observations for map station plots
+            mesonet_obs_list = []
+            for o in current_obs:
+                try:
+                    mesonet_obs_list.append({
+                        "station_id":   o.station_id,
+                        "county":       o.county.name,
+                        "lat":          o.county.lat,
+                        "lon":          o.county.lon,
+                        "temp_f":       round(o.temperature, 1),
+                        "dewpoint_f":   round(o.dewpoint, 1),
+                        "wind_dir":     round(o.wind_direction, 0),
+                        "wind_speed":   round(o.wind_speed, 1),
+                        "wind_gust":    round(o.wind_gust, 1) if o.wind_gust is not None else None,
+                    })
+                except Exception:
+                    continue
+
             async with _lock:
                 _state["moisture"]      = _ser_moisture(moisture)
                 _state["dryline"]       = _ser_dryline(dl, surge)
+                _state["mesonet_obs"]   = mesonet_obs_list
 
             await _broadcast()
 

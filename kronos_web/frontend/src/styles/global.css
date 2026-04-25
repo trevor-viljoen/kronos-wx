@@ -200,7 +200,7 @@ html, body, #root {
 
 /* ── Leaflet overrides ───────────────────────────────────────────────────── */
 .leaflet-container { background: #050510 !important; }
-.leaflet-tile { filter: brightness(0.85) saturate(0.8); }
+.leaflet-tile { filter: brightness(1.0) saturate(0.9); }
 
 .leaflet-popup-content-wrapper,
 .leaflet-popup-tip {
@@ -508,4 +508,105 @@ html, body, #root {
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50%       { opacity: 0.4; transform: scale(0.8); }
+}
+
+/* ── Mesonet station plots ───────────────────────────────────────────────── */
+.station-plot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  pointer-events: none;
+}
+.sta-temp {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: #ff8c69;
+  line-height: 1;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+}
+.sta-wind {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+}
+.sta-dew {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+}
+
+/* ── Tornado warning flash banner ────────────────────────────────────────── */
+.warning-flash {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 800;
+  background: rgba(180, 0, 0, 0.92);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 6px 18px;
+  border-radius: var(--radius-md);
+  border: 1px solid #ff4444;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  animation: warning-flash 1s ease-in-out infinite;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 0 20px rgba(255,0,0,0.5);
+}
+.flash-icon { font-size: 16px; }
+.flash-count {
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.85;
+  margin-left: 4px;
+}
+@keyframes warning-flash {
+  0%, 100% { opacity: 1; box-shadow: 0 0 20px rgba(255,0,0,0.5); }
+  50%       { opacity: 0.75; box-shadow: 0 0 32px rgba(255,0,0,0.85); }
+}
+
+/* ── Overlay toggle controls ─────────────────────────────────────────────── */
+.overlay-controls {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 700;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.overlay-btn {
+  background: rgba(8,8,32,0.88);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 3px 8px;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  text-align: left;
+}
+.overlay-btn:hover {
+  background: rgba(14,32,64,0.9);
+  color: var(--color-text);
+}
+.overlay-btn.active {
+  background: rgba(14,32,64,0.9);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
 }
