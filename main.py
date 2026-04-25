@@ -1040,29 +1040,58 @@ def _analyze_now_forecast(forecast_hour: int, now_utc: datetime) -> None:
     )
 
     # Find the best posted HRRR run for this valid time.
-    # "Posted" means the run initialized at least 60 min ago.
-    # We want the most recently initialized run (smallest fxx) within 1–48 h.
+    # HRRR posts runs incrementally — not all fxx hours are available immediately.
+    # Strategy: build a ranked list of (run_time, fxx) candidates (most recently
+    # initialized first, i.e. smallest fxx), then probe each with Herbie until we
+    # find one whose GRIB file is actually on S3.
+    try:
+        from herbie import Herbie as _Herbie
+    except ImportError:
+        console.print("[red]herbie-data is not installed.[/red]")
+        return
+
     now_floor  = now_utc.replace(minute=0, second=0, microsecond=0)
     posted_cut = now_floor - timedelta(hours=1)   # ~60-min posting lag
 
-    best_run_time: datetime | None = None
-    best_fxx: int | None = None
-    for h_back in range(49):
+    # Build candidate list: iterate h_back from 0 (most recent) to 47 (oldest)
+    candidates: list[tuple[datetime, int]] = []
+    for h_back in range(48):
         run_try  = posted_cut - timedelta(hours=h_back)
         fxx_try  = int((valid_time - run_try).total_seconds() / 3600)
         if 1 <= fxx_try <= 48:
-            best_run_time = run_try
-            best_fxx = fxx_try
-            break
+            candidates.append((run_try, fxx_try))
 
-    if best_fxx is None:
+    if not candidates:
         console.print(
             f"[red]Cannot map F+{forecast_hour} to any HRRR run within the "
             f"1–48 h forecast window.[/red]"
         )
         return
 
-    run_label  = best_run_time.strftime("%Y-%m-%d %H:%MZ")   # type: ignore[union-attr]
+    # Probe candidates until we find one with GRIB files on S3
+    best_run_time: datetime | None = None
+    best_fxx: int | None = None
+    with console.status(f"Locating best posted HRRR run for F+{forecast_hour}..."):
+        for run_try, fxx_try in candidates[:8]:   # check up to 8 candidates
+            run_str = run_try.strftime("%Y-%m-%d %H:%M")
+            try:
+                H_probe = _Herbie(run_str, model="hrrr", product="sfc",
+                                  fxx=fxx_try, verbose=False)
+                if H_probe.grib is not None:
+                    best_run_time = run_try
+                    best_fxx = fxx_try
+                    break
+            except Exception:
+                continue
+
+    if best_fxx is None or best_run_time is None:
+        console.print(
+            f"[red]No posted HRRR run found for valid {valid_time.strftime('%H:%MZ')} "
+            f"{valid_date}. Try again in a few minutes.[/red]"
+        )
+        return
+
+    run_label = best_run_time.strftime("%Y-%m-%d %H:%MZ")
     console.print(
         f"[dim]Using HRRR run {run_label}  F{best_fxx:02d}  "
         f"→ valid {valid_time.strftime('%H:%MZ')} {valid_date}[/dim]"
@@ -1081,9 +1110,8 @@ def _analyze_now_forecast(forecast_hour: int, now_utc: datetime) -> None:
 
     if hrrr_fc is None:
         console.print(
-            f"[red]HRRR data not available for run {run_label} F{best_fxx:02d}. "
-            f"The run may not be posted yet — try again in a few minutes or "
-            f"reduce --forecast-hour.[/red]"
+            f"[red]HRRR fields could not be extracted for run {run_label} F{best_fxx:02d}. "
+            f"Try again in a few minutes.[/red]"
         )
         return
 
