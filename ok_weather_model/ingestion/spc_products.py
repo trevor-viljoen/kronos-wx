@@ -30,6 +30,8 @@ _MD_BASE_URL  = "https://www.spc.noaa.gov"
 
 _D1_CAT_URL   = "https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson"
 _D1_TORN_URL  = "https://www.spc.noaa.gov/products/outlook/day1otlk_torn.nolyr.geojson"
+_D1_WIND_URL  = "https://www.spc.noaa.gov/products/outlook/day1otlk_wind.nolyr.geojson"
+_D1_HAIL_URL  = "https://www.spc.noaa.gov/products/outlook/day1otlk_hail.nolyr.geojson"
 _NWS_ALERT_URL = "https://api.weather.gov/alerts/active?area=OK"
 _NWS_UA        = "kronos-wx/0.1 trevor.viljoen@gmail.com"
 

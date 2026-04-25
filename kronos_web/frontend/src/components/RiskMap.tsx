@@ -49,11 +49,14 @@ const LEGEND_TIERS: Array<{ tier: Tier; label: string }> = [
 const OK_BOUNDS: L.LatLngBoundsExpression = [[33.5, -103.1], [37.1, -94.4]]
 
 // ── Overlay keys ──────────────────────────────────────────────────────────────
-type OverlayKey = 'counties' | 'spc' | 'warnings' | 'watches' | 'mesonet' | 'dryline'
+type OverlayKey = 'counties' | 'spc' | 'tornado' | 'wind' | 'hail' | 'warnings' | 'watches' | 'mesonet' | 'dryline'
 
 const OVERLAY_LABELS: Record<OverlayKey, string> = {
   counties: 'County Tiers',
-  spc:      'SPC Outlook',
+  spc:      'SPC Cat.',
+  tornado:  'Torn. Prob.',
+  wind:     'Wind Prob.',
+  hail:     'Hail Prob.',
   warnings: 'Warnings',
   watches:  'Watches',
   mesonet:  'Mesonet',
@@ -218,6 +221,79 @@ function OutlookLayer({ geojson }: OutlookLayerProps) {
   }
 
   return <GeoJSON key="outlook" data={geojson} style={styleOutlook} onEachFeature={onEachOutlook} />
+}
+
+// ── SPC probabilistic threat layer (tornado / wind / hail) ───────────────────
+// Standard SPC probability contour colors
+const SPC_PROB_COLORS: Record<string, string> = {
+  '0.02': '#008b00',
+  '0.05': '#8b4513',
+  '0.10': '#ffff00',
+  '0.15': '#ff8c00',
+  '0.30': '#ff0000',
+  '0.45': '#ff00ff',
+  '0.60': '#8b0000',
+  'SIGN': '#000000',   // significant severe hatch — rendered as dark overlay
+  // Also handle integer-percent labels some files use
+  '2':  '#008b00',
+  '5':  '#8b4513',
+  '10': '#ffff00',
+  '15': '#ff8c00',
+  '30': '#ff0000',
+  '45': '#ff00ff',
+  '60': '#8b0000',
+}
+
+const THREAT_LABEL: Record<string, string> = {
+  tornado: 'Tornado',
+  wind:    'Damaging Wind',
+  hail:    'Large Hail',
+}
+
+interface ThreatLayerProps {
+  geojson: GeoJSON.FeatureCollection
+  threatType: 'tornado' | 'wind' | 'hail'
+}
+
+function ThreatLayer({ geojson, threatType }: ThreatLayerProps) {
+  const style = (feature?: GeoJSON.Feature): L.PathOptions => {
+    const label = (feature?.properties?.LABEL ?? '').toString().toUpperCase()
+    // SPC sometimes uses the GeoJSON fill/stroke fields directly
+    const fill  = feature?.properties?.fill ?? feature?.properties?.stroke
+    const color = SPC_PROB_COLORS[label.toLowerCase()] ?? (fill ?? '#888888')
+    const isSig = label === 'SIGN'
+    return {
+      fillColor:   color,
+      fillOpacity: isSig ? 0.12 : 0.35,
+      color:       color,
+      weight:      isSig ? 1 : 1.5,
+      opacity:     isSig ? 0.5 : 0.85,
+      dashArray:   isSig ? '3 3' : undefined,
+    }
+  }
+
+  const onEach = (feature: GeoJSON.Feature, layer: L.Layer) => {
+    const raw   = (feature?.properties?.LABEL ?? '').toString()
+    const label = raw.toUpperCase()
+    if (!label) return
+    const color  = SPC_PROB_COLORS[raw.toLowerCase()] ?? '#888'
+    const threat = THREAT_LABEL[threatType]
+    const isSig  = label === 'SIGN'
+    const probStr = isSig ? 'Significant (10%+ hatched)' : `${Math.round(parseFloat(raw) * 100)}% probability`
+    ;(layer as L.Path).bindTooltip(
+      `<strong style="color:${color}">D1 ${threat}</strong><br/><span style="font-size:11px">${probStr}</span>`,
+      { sticky: true, opacity: 1 },
+    )
+  }
+
+  return (
+    <GeoJSON
+      key={`${threatType}-${geojson.features.length}`}
+      data={geojson}
+      style={style}
+      onEachFeature={onEach}
+    />
+  )
 }
 
 // ── Tornado/SVR watch county overlay ─────────────────────────────────────────
@@ -405,6 +481,9 @@ export function RiskMap({ state, onCountyClick }: Props) {
   const [overlays, setOverlays] = useState<Record<OverlayKey, boolean>>({
     counties: true,
     spc:      true,
+    tornado:  true,
+    wind:     false,
+    hail:     false,
     warnings: true,
     watches:  true,
     mesonet:  false,
@@ -433,6 +512,9 @@ export function RiskMap({ state, onCountyClick }: Props) {
   const dryline   = state?.dryline
   const alertGJ   = state?.alert_geojson
   const outlookGJ = state?.outlook_geojson
+  const tornGJ    = state?.torn_geojson
+  const windGJ    = state?.wind_geojson
+  const hailGJ    = state?.hail_geojson
   const mesoObs   = state?.mesonet_obs ?? []
 
   const drylinePositions = useMemo<L.LatLngExpression[]>(() => {
@@ -464,6 +546,11 @@ export function RiskMap({ state, onCountyClick }: Props) {
 
         {/* SPC Day1 outlook (bottom-most overlay) */}
         {overlays.spc && outlookGJ && <OutlookLayer geojson={outlookGJ} />}
+
+        {/* SPC probabilistic threat overlays */}
+        {overlays.tornado && tornGJ && <ThreatLayer geojson={tornGJ} threatType="tornado" />}
+        {overlays.wind    && windGJ && <ThreatLayer geojson={windGJ} threatType="wind" />}
+        {overlays.hail    && hailGJ && <ThreatLayer geojson={hailGJ} threatType="hail" />}
 
         {/* County choropleth */}
         {overlays.counties && countiesGeoJSON && (

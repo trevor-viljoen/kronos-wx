@@ -37,6 +37,8 @@ from ok_weather_model.ingestion.spc_products import (
     fetch_spc_outlook,
     _D1_CAT_URL,
     _D1_TORN_URL,
+    _D1_WIND_URL,
+    _D1_HAIL_URL,
     _NWS_ALERT_URL,
     _NWS_UA,
     _OK_LAT_MIN, _OK_LAT_MAX, _OK_LON_MIN, _OK_LON_MAX,
@@ -77,6 +79,9 @@ _state: dict[str, Any] = {
     "spc":             {"outlook": None, "alerts": [], "mds": []},
     "alert_geojson":   None,    # raw NWS FeatureCollection (polygon geometry)
     "outlook_geojson": None,    # SPC Day1 categorical FeatureCollection
+    "torn_geojson":    None,    # SPC Day1 tornado probability FeatureCollection
+    "wind_geojson":    None,    # SPC Day1 wind probability FeatureCollection
+    "hail_geojson":    None,    # SPC Day1 hail probability FeatureCollection
     "mesonet_obs":     [],      # list[dict] — current Mesonet station observations
     "model_forecast":  None,
     "alert_log":       [],
@@ -664,6 +669,21 @@ async def _task_spc() -> None:
                 except Exception:
                     outlook_geojson = None
 
+                # SPC Day1 probabilistic threat GeoJSONs (tornado / wind / hail)
+                async def _fetch_threat(url: str):
+                    try:
+                        r = await client.get(url)
+                        r.raise_for_status()
+                        data = r.json()
+                        feats = _filter_geojson_ok(data)
+                        return {"type": "FeatureCollection", "features": feats}
+                    except Exception:
+                        return None
+
+                torn_geojson = await _fetch_threat(_D1_TORN_URL)
+                wind_geojson = await _fetch_threat(_D1_WIND_URL)
+                hail_geojson = await _fetch_threat(_D1_HAIL_URL)
+
             # Alert diffing
             new_alert_set: set = set()
             for a in alerts:
@@ -696,6 +716,9 @@ async def _task_spc() -> None:
                 }
                 _state["alert_geojson"]   = alert_geojson
                 _state["outlook_geojson"] = outlook_geojson
+                _state["torn_geojson"]    = torn_geojson
+                _state["wind_geojson"]    = wind_geojson
+                _state["hail_geojson"]    = hail_geojson
 
             await _broadcast()
             logger.info("SPC updated: %s, %d alerts, %d MDs",

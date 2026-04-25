@@ -178,6 +178,9 @@ export interface DashboardState {
   spc: SPCData
   alert_geojson: GeoJSON.FeatureCollection | null
   outlook_geojson: GeoJSON.FeatureCollection | null
+  torn_geojson: GeoJSON.FeatureCollection | null
+  wind_geojson: GeoJSON.FeatureCollection | null
+  hail_geojson: GeoJSON.FeatureCollection | null
   mesonet_obs: StationObs[]
   model_forecast: ModelForecast | null
   alert_log: AlertLogEntry[]
