@@ -257,31 +257,29 @@ interface ThreatLayerProps {
 
 function ThreatLayer({ geojson, threatType }: ThreatLayerProps) {
   const style = (feature?: GeoJSON.Feature): L.PathOptions => {
-    const label = (feature?.properties?.LABEL ?? '').toString().toUpperCase()
-    // SPC sometimes uses the GeoJSON fill/stroke fields directly
-    const fill  = feature?.properties?.fill ?? feature?.properties?.stroke
-    const color = SPC_PROB_COLORS[label.toLowerCase()] ?? (fill ?? '#888888')
-    const isSig = label === 'SIGN'
+    // Use official SPC fill/stroke colors embedded in the GeoJSON
+    const fill   = feature?.properties?.fill   ?? '#888888'
+    const stroke = feature?.properties?.stroke ?? fill
+    const label  = (feature?.properties?.LABEL ?? '').toString().toUpperCase()
+    const isMeta = label === 'SIGN' || label.startsWith('CIG')
     return {
-      fillColor:   color,
-      fillOpacity: isSig ? 0.12 : 0.35,
-      color:       color,
-      weight:      isSig ? 1 : 1.5,
-      opacity:     isSig ? 0.5 : 0.85,
-      dashArray:   isSig ? '3 3' : undefined,
+      fillColor:   fill,
+      fillOpacity: isMeta ? 0.15 : 0.38,
+      color:       stroke,
+      weight:      1.5,
+      opacity:     isMeta ? 0.60 : 0.85,
+      dashArray:   isMeta ? '4 4' : undefined,
     }
   }
 
   const onEach = (feature: GeoJSON.Feature, layer: L.Layer) => {
-    const raw   = (feature?.properties?.LABEL ?? '').toString()
-    const label = raw.toUpperCase()
-    if (!label) return
-    const color  = SPC_PROB_COLORS[raw.toLowerCase()] ?? '#888'
+    const label2 = (feature?.properties?.LABEL2 ?? '').toString()
+    const raw    = (feature?.properties?.LABEL  ?? '').toString()
+    if (!raw) return
+    const stroke = feature?.properties?.stroke ?? '#888'
     const threat = THREAT_LABEL[threatType]
-    const isSig  = label === 'SIGN'
-    const probStr = isSig ? 'Significant (10%+ hatched)' : `${Math.round(parseFloat(raw) * 100)}% probability`
     ;(layer as L.Path).bindTooltip(
-      `<strong style="color:${color}">D1 ${threat}</strong><br/><span style="font-size:11px">${probStr}</span>`,
+      `<strong style="color:${stroke}">D1 ${threat}</strong><br/><span style="font-size:11px">${label2 || raw}</span>`,
       { sticky: true, opacity: 1 },
     )
   }
