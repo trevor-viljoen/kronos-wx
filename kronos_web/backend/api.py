@@ -415,8 +415,10 @@ def _compute_tendency(snap, tier_map: dict) -> list[dict]:
     """Compute delta fields for all MODERATE+ counties."""
     global _hrrr_base
     base = _hrrr_base
-    if base is None or base is snap:
+    if base is None:
         return []
+    # First cycle: base IS snap — show counties with zero deltas (no trend yet)
+    first_cycle = base is snap
 
     rows = []
     seen: set = set()
@@ -437,23 +439,29 @@ def _compute_tendency(snap, tier_map: dict) -> list[dict]:
         except KeyError:
             continue
         pt_n = snap.get(county_enum)
-        pt_b = base.get(county_enum)
-        if pt_n is None or pt_b is None:
+        if pt_n is None:
             continue
 
-        d_cin  = pt_n.MLCIN  - pt_b.MLCIN
-        d_cape = pt_n.MLCAPE - pt_b.MLCAPE
-        d_srh1 = pt_n.SRH_0_1km - pt_b.SRH_0_1km
-        d_srh3 = pt_n.SRH_0_3km - pt_b.SRH_0_3km
-        d_ehi  = (pt_n.EHI or 0.0) - (pt_b.EHI or 0.0)
-
-        score = (
-            (1 if d_cin <= -10 else 0) + (1 if d_cin <= -30 else 0) +
-            (1 if d_srh1 >= 20 else 0) + (1 if d_cape >= 200 else 0) +
-            (-1 if d_cin >= 10 else 0) + (-1 if d_srh1 <= -20 else 0)
-        )
-        trend = "▲▲" if score >= 3 else "▲" if score == 2 else "→" if score >= 0 else "▼"
-        trend_level = "improving2" if score >= 3 else "improving" if score == 2 else "steady" if score >= 0 else "degrading"
+        if first_cycle:
+            d_cin = d_cape = d_srh1 = d_srh3 = d_ehi = 0.0
+            trend = "→"
+            trend_level = "steady"
+        else:
+            pt_b = base.get(county_enum)
+            if pt_b is None:
+                continue
+            d_cin  = pt_n.MLCIN  - pt_b.MLCIN
+            d_cape = pt_n.MLCAPE - pt_b.MLCAPE
+            d_srh1 = pt_n.SRH_0_1km - pt_b.SRH_0_1km
+            d_srh3 = pt_n.SRH_0_3km - pt_b.SRH_0_3km
+            d_ehi  = (pt_n.EHI or 0.0) - (pt_b.EHI or 0.0)
+            score = (
+                (1 if d_cin <= -10 else 0) + (1 if d_cin <= -30 else 0) +
+                (1 if d_srh1 >= 20 else 0) + (1 if d_cape >= 200 else 0) +
+                (-1 if d_cin >= 10 else 0) + (-1 if d_srh1 <= -20 else 0)
+            )
+            trend = "▲▲" if score >= 3 else "▲" if score == 2 else "→" if score >= 0 else "▼"
+            trend_level = "improving2" if score >= 3 else "improving" if score == 2 else "steady" if score >= 0 else "degrading"
 
         rows.append({
             "county": cname,
