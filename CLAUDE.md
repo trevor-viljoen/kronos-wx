@@ -28,6 +28,11 @@ python main.py build-bust-database
 python main.py classify-boundary-forced --start-year 1994 --end-year 2024
 python main.py classify-boundary-forced --dry-run   # preview without writing
 
+# Forecast models
+python main.py train-models                          # train severity classifier + count regressor
+python main.py evaluate-models                       # leave-one-year-out cross-validation
+python main.py predict-day 19990503_OK               # apply models to a historical case
+
 # Real-time situational awareness
 python main.py analyze-now                        # one-shot: current cap + HRRR county risk
 python main.py analyze-now --mode kinematics      # weight shear/SRH in analogue scoring
@@ -88,7 +93,15 @@ Then steps through an Oklahoma climatological heating curve (sinusoidal 12Z→21
 
 **Ground truth validation case**: May 3, 1999 Oklahoma tornado outbreak (`VALIDATION_CASE_ID = "19990503_OK"`). Published benchmark values for OUN 12Z sounding are documented in `sounding_parser.py`.
 
-**5. Visualization** (`kronos_viz/`)
+**5. Forecast Models** (`ok_weather_model/modeling/`)
+- `features.py` — `extract_features(case)` and `extract_features_from_indices(indices, kinematics, ctg)` produce a 23-feature dict (NaN for missing optional fields). `build_feature_matrix()` builds `(X, y)` DataFrames for training.
+- `severity_classifier.py` — `SeverityClassifier`: RandomForestClassifier (balanced weights, 300 trees) predicting SIGNIFICANT_OUTBREAK vs WEAK_OUTBREAK. `predict_proba()` returns `{'significant': p, 'weak': 1-p}`.
+- `tornado_regressor.py` — `TornadoRegressor`: GradientBoostingRegressor on log1p(tornado_count). `predict()` returns expected count + 80% prediction interval.
+- `registry.py` — `save_model(name, obj)` / `load_model(name)` via joblib under `data/models/`.
+- LOYO cross-validation (30 year folds): severity ROC-AUC 0.649, tornado count MAE ~3.2 tornadoes. Models integrate into `analyze-now` automatically when artifacts exist.
+- Feature importances: kinematics (SRH, BWD, SCP, mean wind) dominate over thermodynamics — consistent with supercell climatology.
+
+**6. Visualization** (`kronos_viz/`)
 - Standalone package — no reverse dependency on the pipeline. Imports `ok_weather_model` types but the core package never imports `kronos_viz`.
 - `CapErosionScene` — builder pattern; accumulate layers with `add_*` methods, render with `show()` or `save("file.html")`.
 - Coordinate system: **x = longitude, y = latitude** (real WGS-84 degrees), **z = height in km** derived from pressure via ICAO standard atmosphere. Every feature is at its actual geographic position.

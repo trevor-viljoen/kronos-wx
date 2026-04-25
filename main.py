@@ -1714,6 +1714,41 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
                         f"{baseline_label}."
                     )
 
+    # ── Model predictions ─────────────────────────────────────────────────────
+    console.rule("[bold]Forecast Model Predictions[/bold]")
+    try:
+        from ok_weather_model.modeling import SeverityClassifier, TornadoRegressor, load_model
+        _clf: SeverityClassifier = load_model("severity_classifier")
+        _reg: TornadoRegressor   = load_model("tornado_regressor")
+
+        if _clf is not None and _reg is not None:
+            _ctg = ces.get("convective_temp_gap_12Z") if ces is not None else None
+            _clf_result = _clf.predict_proba(indices, kinematics, _ctg)
+            _reg_result = _reg.predict(indices, kinematics, _ctg)
+
+            sig_pct = _clf_result["significant"]
+            sig_color = "red" if sig_pct >= 0.6 else "yellow" if sig_pct >= 0.35 else "green"
+
+            model_table = Table(show_header=True, header_style="bold", box=None)
+            model_table.add_column("Model")
+            model_table.add_column("Prediction", justify="right")
+            model_table.add_column("Detail")
+            model_table.add_row(
+                "Severity",
+                f"[{sig_color}]{sig_pct:.0%} SIGNIFICANT[/{sig_color}]",
+                f"WEAK {_clf_result['weak']:.0%}  (n={_clf.n_training_cases_} training cases)",
+            )
+            model_table.add_row(
+                "Tornado count",
+                f"{_reg_result['expected_count']:.1f}",
+                f"80% PI: {_reg_result['interval_low']:.0f}–{_reg_result['interval_high']:.0f}",
+            )
+            console.print(model_table)
+        else:
+            console.print("[dim]No trained models found. Run [cyan]train-models[/cyan] to enable predictions.[/dim]")
+    except Exception as _model_exc:
+        logger.debug("Model prediction skipped: %s", _model_exc)
+
     # ── Historical analogues ──────────────────────────────────────────────────
     console.rule("[bold]Historical Analogues[/bold]")
 
@@ -2263,7 +2298,16 @@ def compute_ces(start_year: int, end_year: int, force: bool):
             valid_time = datetime(
                 case.date.year, case.date.month, case.date.day, 12, 0, tzinfo=timezone.utc
             )
-            sounding = db.load_sounding(OklahomaSoundingStation.OUN, valid_time)
+            # Try the case's own sounding station first (may be LMN for some cases),
+            # then fall back to OUN — avoids skipping cases where OUN Parquet is
+            # missing but an adjacent-station sounding was stored instead.
+            preferred_station = (
+                case.sounding_12Z.station if case.sounding_12Z is not None
+                else OklahomaSoundingStation.OUN
+            )
+            sounding = db.load_sounding(preferred_station, valid_time)
+            if sounding is None or not sounding.levels:
+                sounding = db.load_sounding(OklahomaSoundingStation.OUN, valid_time)
 
             if sounding is None or not sounding.levels:
                 logger.debug("No sounding Parquet for %s — skipping CES", case.case_id)
@@ -2665,6 +2709,232 @@ def _classify_cap_behavior(
         return CapBehavior.LATE_EROSION
     else:
         return CapBehavior.NO_EROSION
+
+
+# ── train-models ─────────────────────────────────────────────────────────────
+
+@cli.command("train-models")
+@click.option("--start-year", default=CASE_LIBRARY_START_YEAR, show_default=True,
+              help="First year of training data")
+@click.option("--end-year", default=CASE_LIBRARY_END_YEAR, show_default=True,
+              help="Last year of training data")
+def train_models(start_year: int, end_year: int):
+    """
+    Train the severity classifier and tornado count regressor on the case library.
+
+    Saves trained model artifacts to data/models/ for use by analyze-now and
+    predict-day.  Prints training metrics (optimistic — use evaluate-models for
+    honest leave-one-year-out performance).
+    """
+    from ok_weather_model.storage.database import Database
+    from ok_weather_model.modeling import SeverityClassifier, TornadoRegressor, save_model
+
+    db = Database()
+    cases = db.query_parameter_space({
+        "start_date": str(date(start_year, 1, 1)),
+        "end_date": str(date(end_year, 12, 31)),
+        "min_completeness": 0.3,
+    })
+    console.print(f"Loaded [cyan]{len(cases)}[/cyan] cases ({start_year}–{end_year}).")
+
+    # ── Severity classifier ───────────────────────────────────────────────────
+    console.print("\n[bold]Training severity classifier (SIGNIFICANT vs WEAK)[/bold]")
+    clf = SeverityClassifier()
+    clf_metrics = clf.train(cases)
+    save_model("severity_classifier", clf)
+
+    clf_table = Table(show_header=False, box=None)
+    clf_table.add_column(style="dim")
+    clf_table.add_column()
+    clf_table.add_row("Cases trained",     str(clf_metrics["n_cases"]))
+    clf_table.add_row("  SIGNIFICANT",     str(clf_metrics["n_significant"]))
+    clf_table.add_row("  WEAK",            str(clf_metrics["n_weak"]))
+    clf_table.add_row("Train accuracy",    f"{clf_metrics['train_accuracy']:.1%}")
+    console.print(clf_table)
+
+    console.print("\n[bold]Top 10 features (severity classifier)[/bold]")
+    top_feats = clf.feature_importances_.head(10)
+    for feat, imp in top_feats.items():
+        bar = "█" * int(imp * 80)
+        console.print(f"  {feat:<28} {imp:.3f}  [green]{bar}[/green]")
+
+    # ── Tornado count regressor ───────────────────────────────────────────────
+    console.print("\n[bold]Training tornado count regressor[/bold]")
+    reg = TornadoRegressor()
+    reg_metrics = reg.train(cases)
+    save_model("tornado_regressor", reg)
+
+    reg_table = Table(show_header=False, box=None)
+    reg_table.add_column(style="dim")
+    reg_table.add_column()
+    reg_table.add_row("Cases trained", str(reg_metrics["n_cases"]))
+    reg_table.add_row("Train RMSE",    f"{reg_metrics['train_rmse']:.1f} tornadoes")
+    reg_table.add_row("Train MAE",     f"{reg_metrics['train_mae']:.1f} tornadoes")
+    console.print(reg_table)
+
+    console.print("\n[bold]Top 10 features (tornado regressor)[/bold]")
+    top_feats = reg.feature_importances_.head(10)
+    for feat, imp in top_feats.items():
+        bar = "█" * int(imp * 80)
+        console.print(f"  {feat:<28} {imp:.3f}  [green]{bar}[/green]")
+
+    console.print(
+        "\n[bold green]Models saved to data/models/.[/bold green] "
+        "Run [cyan]evaluate-models[/cyan] for honest cross-validated metrics."
+    )
+
+
+# ── evaluate-models ───────────────────────────────────────────────────────────
+
+@cli.command("evaluate-models")
+@click.option("--start-year", default=CASE_LIBRARY_START_YEAR, show_default=True)
+@click.option("--end-year", default=CASE_LIBRARY_END_YEAR, show_default=True)
+def evaluate_models(start_year: int, end_year: int):
+    """
+    Leave-one-year-out cross-validation for both forecast models.
+
+    Trains on all years except the held-out year, evaluates on the held-out
+    year, and aggregates metrics across all folds.  This is the honest estimate
+    of out-of-sample performance — training metrics from train-models are
+    optimistic (in-sample).
+    """
+    from ok_weather_model.storage.database import Database
+    from ok_weather_model.modeling import SeverityClassifier, TornadoRegressor
+
+    db = Database()
+    cases = db.query_parameter_space({
+        "start_date": str(date(start_year, 1, 1)),
+        "end_date": str(date(end_year, 12, 31)),
+        "min_completeness": 0.3,
+    })
+    console.print(
+        f"Evaluating on [cyan]{len(cases)}[/cyan] cases via leave-one-year-out CV..."
+    )
+
+    # ── Severity classifier ───────────────────────────────────────────────────
+    console.print("\n[bold]Severity classifier (SIGNIFICANT vs WEAK)[/bold]")
+    clf = SeverityClassifier()
+    with console.status("Running LOYO folds..."):
+        clf_eval = clf.evaluate(cases)
+
+    if "error" in clf_eval:
+        console.print(f"[red]{clf_eval['error']}[/red]")
+    else:
+        clf_table = Table(show_header=False, box=None)
+        clf_table.add_column(style="dim")
+        clf_table.add_column()
+        clf_table.add_row("LOYO accuracy",   f"{clf_eval['loyo_accuracy']:.1%}")
+        clf_table.add_row("LOYO ROC-AUC",    f"{clf_eval['loyo_roc_auc']:.3f}")
+        clf_table.add_row("Folds",           str(clf_eval["n_folds"]))
+        clf_table.add_row("Predictions",     str(clf_eval["n_predictions"]))
+        console.print(clf_table)
+        console.print("\n" + clf_eval["classification_report"])
+
+    # ── Tornado count regressor ───────────────────────────────────────────────
+    console.print("\n[bold]Tornado count regressor[/bold]")
+    reg = TornadoRegressor()
+    with console.status("Running LOYO folds..."):
+        reg_eval = reg.evaluate(cases)
+
+    if "error" in reg_eval:
+        console.print(f"[red]{reg_eval['error']}[/red]")
+    else:
+        reg_table = Table(show_header=False, box=None)
+        reg_table.add_column(style="dim")
+        reg_table.add_column()
+        reg_table.add_row("LOYO MAE",   f"{reg_eval['loyo_mae_counts']:.1f} tornadoes")
+        reg_table.add_row("LOYO RMSE",  f"{reg_eval['loyo_rmse_counts']:.1f} tornadoes")
+        reg_table.add_row("LOYO MAE (log-space)", f"{reg_eval['loyo_mae_log']:.3f}")
+        reg_table.add_row("Folds",      str(reg_eval["n_folds"]))
+        reg_table.add_row("Predictions", str(reg_eval["n_predictions"]))
+        console.print(reg_table)
+
+
+# ── predict-day ───────────────────────────────────────────────────────────────
+
+@cli.command("predict-day")
+@click.argument("case_ref")
+def predict_day(case_ref: str):
+    """
+    Apply trained forecast models to a historical case.
+
+    CASE_REF: case_id (e.g. 19990503_OK) or date string (YYYYMMDD).
+
+    Useful for sanity-checking model outputs on known events — compare
+    model predictions against the documented outcome.
+    """
+    from ok_weather_model.storage.database import Database
+    from ok_weather_model.modeling import SeverityClassifier, TornadoRegressor, load_model
+
+    # Normalize case_ref
+    if not case_ref.endswith("_OK"):
+        case_ref = f"{case_ref}_OK"
+
+    db = Database()
+    case = db.load_case(case_ref)
+    if case is None:
+        console.print(f"[red]Case not found: {case_ref}[/red]")
+        raise SystemExit(1)
+
+    if case.sounding_12Z is None or case.kinematics_12Z is None:
+        console.print(f"[red]No sounding data for {case_ref} — cannot predict.[/red]")
+        raise SystemExit(1)
+
+    # Load trained models
+    clf: SeverityClassifier = load_model("severity_classifier")
+    reg: TornadoRegressor   = load_model("tornado_regressor")
+
+    if clf is None or reg is None:
+        console.print(
+            "[yellow]Models not found. Run [cyan]train-models[/cyan] first.[/yellow]"
+        )
+        raise SystemExit(1)
+
+    # Run predictions
+    ctg = case.convective_temp_gap_12Z
+    clf_result = clf.predict_proba(case.sounding_12Z, case.kinematics_12Z, ctg)
+    reg_result = reg.predict(case.sounding_12Z, case.kinematics_12Z, ctg)
+
+    # Display
+    console.print(f"\n[bold]Model predictions for [cyan]{case_ref}[/cyan][/bold]")
+    console.print(f"  Date: {case.date}  |  Actual outcome: [bold]{case.event_class.value}[/bold]  |  Actual tornadoes: {case.tornado_count}")
+
+    from rich.table import Table as RTable
+    pred_table = RTable(show_header=True, header_style="bold")
+    pred_table.add_column("Model")
+    pred_table.add_column("Prediction", justify="right")
+    pred_table.add_column("Detail")
+
+    sig_pct = clf_result["significant"]
+    sig_color = "red" if sig_pct >= 0.6 else "yellow" if sig_pct >= 0.35 else "green"
+    pred_table.add_row(
+        "Severity classifier",
+        f"[{sig_color}]{sig_pct:.0%} SIGNIFICANT[/{sig_color}]",
+        f"WEAK {clf_result['weak']:.0%}",
+    )
+    pred_table.add_row(
+        "Tornado count",
+        f"{reg_result['expected_count']:.1f}",
+        f"80% PI: {reg_result['interval_low']:.0f}–{reg_result['interval_high']:.0f}",
+    )
+    console.print(pred_table)
+
+    # Feature summary
+    console.print("\n[dim]Key environment (12Z sounding)[/dim]")
+    s = case.sounding_12Z
+    k = case.kinematics_12Z
+    env_table = Table(show_header=False, box=None)
+    env_table.add_column(style="dim")
+    env_table.add_column()
+    env_table.add_row("MLCAPE / MLCIN", f"{s.MLCAPE:.0f} / {s.MLCIN:.0f} J/kg")
+    env_table.add_row("Cap strength",   f"{s.cap_strength:.1f}°C")
+    env_table.add_row("SRH 0-3km",      f"{k.SRH_0_3km:.0f} m²/s²")
+    env_table.add_row("BWD 0-6km",      f"{k.BWD_0_6km:.0f} kt")
+    if k.STP is not None:
+        env_table.add_row("STP", f"{k.STP:.2f}")
+    if ctg is not None:
+        env_table.add_row("Tc gap 12Z", f"{ctg:+.1f}°F")
+    console.print(env_table)
 
 
 if __name__ == "__main__":
