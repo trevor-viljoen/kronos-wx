@@ -311,8 +311,9 @@ class KronosDashboard(App):
             from ok_weather_model.processing import compute_moisture_return
             from ok_weather_model.processing.dryline_detector import detect_dryline
 
+            now = datetime.now(tz=timezone.utc)
             with MesonetClient() as mc:
-                obs = mc.get_snapshot_observations()
+                obs = mc.get_snapshot_observations(now)
 
             if obs is None or not obs:
                 self.call_from_thread(
