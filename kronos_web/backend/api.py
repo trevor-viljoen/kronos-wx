@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
@@ -755,7 +755,7 @@ async def get_state():
 
 
 @app.get("/api/stream")
-async def stream(request):
+async def stream(request: Request):
     """Server-Sent Events stream — pushes DashboardState on every data update."""
     q: asyncio.Queue = asyncio.Queue(maxsize=10)
     _subscribers.append(q)
