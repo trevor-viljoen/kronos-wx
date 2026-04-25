@@ -36,6 +36,7 @@ python main.py predict-day 19990503_OK               # apply models to a histori
 # Real-time situational awareness
 python main.py analyze-now                        # one-shot: current cap + HRRR county risk
 python main.py analyze-now --mode kinematics      # weight shear/SRH in analogue scoring
+python main.py analyze-now --forecast-hour 24     # HRRR county risk map for valid time = now+24h
 python main.py watch-now                          # continuous: alerts on tier changes / trend flips
 python main.py watch-now --interval 10 --min-tier HIGH   # tighter alert threshold
 ```
@@ -72,7 +73,7 @@ KRONOS-WX is an Oklahoma severe weather case library and analysis system. The pi
   - `HRRRCountyPoint` / `HRRRCountySnapshot` — HRRR analysis at a single county centroid / all 77 counties at one valid time
 
 **Real-time analysis** (`main.py`)
-- `analyze-now`: fetches latest OUN+LMN soundings, Mesonet snapshot, dryline, two HRRR snapshots (sounding-hour baseline + most-recent current). Outputs: multi-station comparison, DANGEROUS_CAPPED warning, dryline table, CES projection, county risk zones, per-county drill-down, environment tendency table (ΔMLCIN/ΔCAPE/ΔSRH per threat county), historical analogues.
+- `analyze-now`: fetches latest OUN+LMN soundings, Mesonet snapshot, dryline, two HRRR snapshots (sounding-hour baseline + most-recent current). Outputs: multi-station comparison, DANGEROUS_CAPPED warning, dryline table, CES projection, county risk zones, per-county drill-down, environment tendency table (ΔMLCIN/ΔCAPE/ΔSRH per threat county), historical analogues. With `--forecast-hour N`: skips sounding/CES/analogues, fetches the most recently posted HRRR run with fxx such that valid time = now+N hours, and shows county risk zones + drill-down for the future valid time.
 - `watch-now`: polls on a timer, diffs risk tiers and tendency direction each cycle, prints alerts only on tier changes or trend flips. Quiet cycles print a one-line status. First cycle always prints full risk snapshot.
 - `DANGEROUS_CAPPED` flag (`_dangerous_capped_flag`): fires when MLCIN ≥ 80 J/kg AND (SRH 0-1km > 150 OR EHI > 2.5 OR SRH 0-3km > 300 OR shear > 50kt) — the April 23, 2026 boundary-forced miss pattern.
 - Analogue `mode` options: `cap` (default, weights MLCIN/cap/Tc-gap), `kinematics` (weights SRH/shear/EHI), `full` (blended).
