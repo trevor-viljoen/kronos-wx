@@ -1,5 +1,9 @@
 @import "./tokens.css";
 
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body, #root {
@@ -249,6 +253,71 @@ html, body, #root {
   font-size: 11px;
   color: var(--color-text-dim);
   line-height: 1.6;
+}
+
+/* ── MD popup ────────────────────────────────────────────────────────────── */
+.md-popup-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.md-popup {
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  width: 100%;
+  max-width: 680px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.md-popup-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--color-panel-raised);
+  border-bottom: 1px solid var(--color-border);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.md-popup-close {
+  background: none;
+  border: none;
+  color: var(--color-text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  line-height: 1;
+}
+.md-popup-close:hover { color: var(--color-text); }
+
+.md-popup-meta {
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--color-text);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.md-popup-body {
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-text);
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-y: auto;
+  flex: 1;
 }
 
 /* ── County drawer ───────────────────────────────────────────────────────── */

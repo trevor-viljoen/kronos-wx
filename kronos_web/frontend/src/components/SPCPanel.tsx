@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { SPCData, AlertData, MDData } from '../types/api'
 
 interface Props {
@@ -54,24 +55,77 @@ function SvrWarning({ alerts }: { alerts: AlertData[] }) {
 }
 
 function MDCard({ md }: { md: MDData }) {
+  const [open, setOpen] = useState(false)
   const probPct = md.prob_watch != null ? md.prob_watch : null
   const probColor = probPct != null
     ? probPct >= 60 ? '#ff2222' : probPct >= 40 ? '#ff6600' : '#ffcc00'
     : 'var(--color-text-dim)'
   return (
-    <div className="alert-card md-card">
-      <div className="event-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
-        <span style={{ color: 'var(--warning-md)' }}>MD #{md.number}</span>
-        {probPct != null && (
-          <span className="mono" style={{ fontSize: 11, color: probColor }}>
-            {probPct}% watch
-          </span>
+    <>
+      <div
+        className="alert-card md-card"
+        style={{ cursor: 'pointer' }}
+        onClick={() => setOpen(true)}
+        title="Click to read full discussion"
+      >
+        <div className="event-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
+          <span style={{ color: 'var(--warning-md)' }}>MD #{md.number}</span>
+          {probPct != null && (
+            <span className="mono" style={{ fontSize: 11, color: probColor }}>
+              {probPct}% watch
+            </span>
+          )}
+        </div>
+        {md.concerning && (
+          <div className="area" style={{ marginTop: 2 }}>{md.concerning.slice(0, 80)}</div>
         )}
+        <div style={{ fontSize: 10, color: 'var(--color-text-dim)', marginTop: 4 }}>
+          click to read ↗
+        </div>
       </div>
-      {md.concerning && (
-        <div className="area" style={{ marginTop: 2 }}>{md.concerning.slice(0, 80)}</div>
+
+      {open && (
+        <div className="md-popup-overlay" onClick={() => setOpen(false)}>
+          <div className="md-popup" onClick={e => e.stopPropagation()}>
+            <div className="md-popup-header">
+              <span style={{ color: 'var(--warning-md)', fontWeight: 700 }}>
+                Mesoscale Discussion #{md.number}
+              </span>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <a
+                  href={md.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ fontSize: 11, color: 'var(--color-accent)' }}
+                >
+                  SPC ↗
+                </a>
+                <button className="md-popup-close" onClick={() => setOpen(false)}>✕</button>
+              </div>
+            </div>
+            {md.areas_affected && (
+              <div className="md-popup-meta">
+                <span style={{ color: 'var(--color-text-dim)' }}>Areas:</span> {md.areas_affected}
+              </div>
+            )}
+            {md.concerning && (
+              <div className="md-popup-meta">
+                <span style={{ color: 'var(--color-text-dim)' }}>Concerning:</span> {md.concerning}
+              </div>
+            )}
+            {probPct != null && (
+              <div className="md-popup-meta">
+                <span style={{ color: 'var(--color-text-dim)' }}>Watch probability:</span>{' '}
+                <span style={{ color: probColor, fontWeight: 700 }}>{probPct}%</span>
+              </div>
+            )}
+            <pre className="md-popup-body">
+              {md.body_lines.join('\n') || 'No discussion text available.'}
+            </pre>
+          </div>
+        </div>
       )}
-    </div>
+    </>
   )
 }
 

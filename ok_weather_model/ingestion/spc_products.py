@@ -325,7 +325,7 @@ def _fetch_single_md(
             break
 
         # Collect body lines
-        if past_valid and len(body_lines) < 6:
+        if past_valid and len(body_lines) < 50:
             body_lines.append(line)
 
     # Check only the content fields — not the raw text, which always contains

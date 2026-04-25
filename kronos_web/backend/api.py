@@ -271,7 +271,7 @@ def _ser_md(md) -> dict:
         "url":             getattr(md, "url", ""),
         "areas_affected":  getattr(md, "areas_affected", ""),
         "concerning":      getattr(md, "concerning", ""),
-        "body_lines":      getattr(md, "body_lines", [])[:3],
+        "body_lines":      getattr(md, "body_lines", []),
         "prob_watch":      getattr(md, "prob_watch_next_2h", None),
     }
 
