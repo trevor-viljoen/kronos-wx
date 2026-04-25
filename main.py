@@ -1009,6 +1009,226 @@ def find_analogues(case_ref: str, top: int, mode: str, min_year: int | None):
     _print_analogues(console, case_id, top_analogues)
 
 
+# ── analyze-now forecast helper ──────────────────────────────────────────────
+
+def _analyze_now_forecast(forecast_hour: int, now_utc: datetime) -> None:
+    """
+    Fetch an HRRR forecast snapshot for a future valid time and display county
+    risk zones.  Called by analyze-now when --forecast-hour N is given.
+
+    Finds the most recently initialized HRRR run whose fxx reaches the desired
+    valid time within the 1–48 h forecast window, then calls
+    compute_risk_zones_from_hrrr() exactly as the current-conditions path does.
+    """
+    from ok_weather_model.ingestion import HRRRClient
+    from ok_weather_model.processing.risk_zone import (
+        compute_risk_zones_from_hrrr,
+        _TIER_RANK as _TR,
+        _TIER_COLOR as _TC,
+    )
+
+    # Desired valid time (round to the current whole hour, then add offset)
+    valid_time = (
+        now_utc.replace(minute=0, second=0, microsecond=0)
+        + timedelta(hours=forecast_hour)
+    )
+    valid_date = valid_time.date()
+
+    console.rule(
+        f"[bold]HRRR County Forecast — F+{forecast_hour}  "
+        f"valid {valid_time.strftime('%Y-%m-%d %H:%MZ')}[/bold]"
+    )
+
+    # Find the best posted HRRR run for this valid time.
+    # "Posted" means the run initialized at least 60 min ago.
+    # We want the most recently initialized run (smallest fxx) within 1–48 h.
+    now_floor  = now_utc.replace(minute=0, second=0, microsecond=0)
+    posted_cut = now_floor - timedelta(hours=1)   # ~60-min posting lag
+
+    best_run_time: datetime | None = None
+    best_fxx: int | None = None
+    for h_back in range(49):
+        run_try  = posted_cut - timedelta(hours=h_back)
+        fxx_try  = int((valid_time - run_try).total_seconds() / 3600)
+        if 1 <= fxx_try <= 48:
+            best_run_time = run_try
+            best_fxx = fxx_try
+            break
+
+    if best_fxx is None:
+        console.print(
+            f"[red]Cannot map F+{forecast_hour} to any HRRR run within the "
+            f"1–48 h forecast window.[/red]"
+        )
+        return
+
+    run_label  = best_run_time.strftime("%Y-%m-%d %H:%MZ")   # type: ignore[union-attr]
+    console.print(
+        f"[dim]Using HRRR run {run_label}  F{best_fxx:02d}  "
+        f"→ valid {valid_time.strftime('%H:%MZ')} {valid_date}[/dim]"
+    )
+
+    hrrr_fc: object | None = None
+    with console.status(
+        f"Fetching HRRR {run_label} F{best_fxx:02d}  "
+        f"(valid {valid_time.strftime('%H:%MZ')})..."
+    ):
+        try:
+            with HRRRClient() as hc:
+                hrrr_fc = hc.get_county_snapshot(valid_time, fxx=best_fxx)
+        except Exception as exc:
+            logger.debug("HRRR forecast fetch failed: %s", exc)
+
+    if hrrr_fc is None:
+        console.print(
+            f"[red]HRRR data not available for run {run_label} F{best_fxx:02d}. "
+            f"The run may not be posted yet — try again in a few minutes or "
+            f"reduce --forecast-hour.[/red]"
+        )
+        return
+
+    # ── Risk zones ────────────────────────────────────────────────────────────
+    risk_zones = compute_risk_zones_from_hrrr(hrrr_fc, min_tier="MARGINAL")
+
+    def _cape_c(v):
+        if v >= 3000: return "bright_red"
+        if v >= 2000: return "red"
+        if v >= 1000: return "yellow"
+        return "white"
+
+    def _cin_c(v):
+        if v >= 200: return "bright_red"
+        if v >= 100: return "red"
+        if v >= 50:  return "yellow"
+        return "green"
+
+    def _srh_c(v):
+        if v >= 400: return "bright_red"
+        if v >= 250: return "red"
+        if v >= 150: return "yellow"
+        return "white"
+
+    def _ehi_c(v):
+        if v >= 4.0: return "bright_red"
+        if v >= 2.5: return "red"
+        if v >= 1.5: return "yellow"
+        return "white"
+
+    if not risk_zones:
+        console.print("[dim]No elevated risk areas identified in the HRRR forecast.[/dim]")
+        return
+
+    rz_tbl = Table(
+        title=(
+            f"HRRR Forecast Risk Zones — {run_label} F{best_fxx:02d}  "
+            f"valid {valid_time.strftime('%H:%MZ')} {valid_date}"
+        ),
+        show_lines=True,
+    )
+    rz_tbl.add_column("Tier",       style="bold", min_width=18)
+    rz_tbl.add_column("Counties",               min_width=8)
+    rz_tbl.add_column("Center",     justify="right")
+    rz_tbl.add_column("Span",       justify="right")
+    rz_tbl.add_column("Peak CAPE",  justify="right")
+    rz_tbl.add_column("Peak CIN",   justify="right")
+    rz_tbl.add_column("Peak SRH1",  justify="right")
+    rz_tbl.add_column("Peak EHI",   justify="right")
+
+    for zone in risk_zones:
+        county_names = ", ".join(c.name for c in zone.counties[:6])
+        if len(zone.counties) > 6:
+            county_names += f" +{len(zone.counties) - 6} more"
+        rz_tbl.add_row(
+            f"[{zone.color}]{zone.tier}[/{zone.color}]",
+            county_names,
+            f"{zone.center_lat:.1f}°N, {abs(zone.center_lon):.1f}°W",
+            f"{zone.span_ew_mi:.0f}×{zone.span_ns_mi:.0f} mi",
+            f"{zone.peak_MLCAPE:.0f} J/kg",
+            f"{zone.peak_MLCIN:.0f} J/kg",
+            f"{zone.peak_SRH_0_1km:.0f} m²/s²",
+            f"{zone.peak_EHI:.2f}",
+        )
+
+    console.print(rz_tbl)
+
+    # Narrative for highest tier
+    top = risk_zones[0]
+    if top.tier_rank >= 3:
+        county_list = ", ".join(c.name for c in top.counties[:8])
+        if len(top.counties) > 8:
+            county_list += f" and {len(top.counties) - 8} others"
+        console.print(
+            f"\n[bold {top.color}]Primary risk corridor:[/bold {top.color}] "
+            f"{county_list}\n"
+            f"  ~{top.span_ew_mi:.0f} mi wide × {top.span_ns_mi:.0f} mi tall, "
+            f"centered {top.center_lat:.1f}°N / {abs(top.center_lon):.1f}°W"
+        )
+
+    # ── Per-county drill-down (elevated tiers only) ───────────────────────────
+    if any(z.tier_rank >= 3 for z in risk_zones):
+        threat_counties: list[tuple[str, object]] = []
+        seen: set = set()
+        for zone in risk_zones:
+            if zone.tier_rank < 3:
+                continue
+            for county in zone.counties:
+                if county in seen:
+                    continue
+                seen.add(county)
+                pt = hrrr_fc.get(county)
+                if pt is not None:
+                    threat_counties.append((zone.tier, pt))
+
+        threat_counties.sort(
+            key=lambda x: (_TR.get(x[0], 0), x[1].SRH_0_1km),
+            reverse=True,
+        )
+
+        drill_tbl = Table(
+            title=(
+                f"County Drill-Down — HRRR F{best_fxx:02d}  "
+                f"valid {valid_time.strftime('%H:%MZ')} {valid_date}"
+            ),
+            show_lines=True,
+        )
+        drill_tbl.add_column("County",   style="cyan",  min_width=12)
+        drill_tbl.add_column("Tier",                    min_width=14)
+        drill_tbl.add_column("Lat",      justify="right")
+        drill_tbl.add_column("MLCAPE",   justify="right")
+        drill_tbl.add_column("MLCIN",    justify="right")
+        drill_tbl.add_column("SRH 0–1",  justify="right")
+        drill_tbl.add_column("SRH 0–3",  justify="right")
+        drill_tbl.add_column("Shear 6",  justify="right")
+        drill_tbl.add_column("EHI",      justify="right")
+        drill_tbl.add_column("STP",      justify="right")
+        drill_tbl.add_column("Td 2m",    justify="right")
+
+        for tier, pt in threat_counties:
+            color   = _TC.get(tier, "white")
+            ehi_str = f"{pt.EHI:.2f}" if pt.EHI is not None else "—"
+            stp_str = f"{pt.STP:.2f}" if pt.STP is not None else "—"
+            drill_tbl.add_row(
+                pt.county.name,
+                f"[{color}]{tier}[/{color}]",
+                f"{pt.county.lat:.1f}°N",
+                f"[{_cape_c(pt.MLCAPE)}]{pt.MLCAPE:.0f}[/{_cape_c(pt.MLCAPE)}]",
+                f"[{_cin_c(pt.MLCIN)}]{pt.MLCIN:.0f}[/{_cin_c(pt.MLCIN)}]",
+                f"[{_srh_c(pt.SRH_0_1km)}]{pt.SRH_0_1km:.0f}[/{_srh_c(pt.SRH_0_1km)}]",
+                f"[{_srh_c(pt.SRH_0_3km)}]{pt.SRH_0_3km:.0f}[/{_srh_c(pt.SRH_0_3km)}]",
+                f"{pt.BWD_0_6km:.0f} kt",
+                f"[{_ehi_c(pt.EHI or 0)}]{ehi_str}[/{_ehi_c(pt.EHI or 0)}]",
+                stp_str,
+                f"{pt.dewpoint_2m_F:.0f}°F",
+            )
+
+        console.print(drill_tbl)
+
+    console.print(
+        f"\n[dim]Note: HRRR forecast fields — not a sounding. "
+        f"CES, analogues, and model predictions are not shown in forecast mode.[/dim]"
+    )
+
+
 # ── analyze-now ───────────────────────────────────────────────────────────────
 
 @cli.command("analyze-now")
@@ -1021,7 +1241,11 @@ def find_analogues(case_ref: str, top: int, mode: str, min_year: int | None):
 @click.option("--mode", type=click.Choice(["cap", "full", "kinematics"]),
               default="cap", show_default=True,
               help="Analogue scoring: cap = thermodynamic; full = cap+kinematics; kinematics = shear/SRH only")
-def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
+@click.option("--forecast-hour", "forecast_hour", default=0, type=int,
+              help="HRRR forecast valid N hours from now (e.g. 24 = tomorrow). "
+                   "Shows county risk map only; skips sounding, CES, and analogues.")
+def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
+                forecast_hour: int):
     """
     Fetch the latest available sounding and analyze current cap conditions.
 
@@ -1047,6 +1271,13 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str):
         stn = OklahomaSoundingStation[station.upper()]
     except KeyError:
         console.print(f"[red]Unknown station '{station}'. Use OUN, LMN, AMA, or DDC.[/red]")
+        return
+
+    # ── Forecast mode ─────────────────────────────────────────────────────────
+    # When --forecast-hour N is specified, skip sounding/CES/analogues and
+    # show HRRR county risk zones for the future valid time instead.
+    if forecast_hour > 0:
+        _analyze_now_forecast(forecast_hour, now_utc)
         return
 
     # Auto-detect the latest available sounding hour

@@ -71,24 +71,32 @@ _K_TO_C: float = 273.15
 
 
 # ── Search strings (herbie regex against the GRIB2 index) ────────────────────
-# Each group fetches one Dataset; fields at compatible levels can share a fetch.
+# The `:anl:` suffix matches analysis (F00) in GRIB2 inventory; forecast hours
+# use `:{N} hour fcst:`.  To support both, we store base patterns without the
+# time-type suffix and append it dynamically in get_county_snapshot().
 
-_SRCH: dict[str, str] = {
-    "mlcape":   ":CAPE:90-0 mb above ground:anl:",
-    "mlcin":    ":CIN:90-0 mb above ground:anl:",
-    "sbcape":   ":CAPE:surface:anl:",
-    "sbcin":    ":CIN:surface:anl:",
-    "hlcy_3km": ":HLCY:3000-0 m above ground:anl:",
-    "hlcy_1km": ":HLCY:1000-0 m above ground:anl:",
-    "vucsh6":   ":VUCSH:0-6000 m above ground:anl:",
-    "vvcsh6":   ":VVCSH:0-6000 m above ground:anl:",
-    "tmp500":   ":TMP:500 mb:anl:",
-    "tmp700":   ":TMP:700 mb:anl:",
-    "hgt500":   ":HGT:500 mb:anl:",
-    "hgt700":   ":HGT:700 mb:anl:",
-    "dpt2m":    ":DPT:2 m above ground:anl:",
-    "cldbase":  ":HGT:cloud base:anl:",
+_SRCH_BASE: dict[str, str] = {
+    "mlcape":   ":CAPE:90-0 mb above ground:",
+    "mlcin":    ":CIN:90-0 mb above ground:",
+    "sbcape":   ":CAPE:surface:",
+    "sbcin":    ":CIN:surface:",
+    "hlcy_3km": ":HLCY:3000-0 m above ground:",
+    "hlcy_1km": ":HLCY:1000-0 m above ground:",
+    "vucsh6":   ":VUCSH:0-6000 m above ground:",
+    "vvcsh6":   ":VVCSH:0-6000 m above ground:",
+    "tmp500":   ":TMP:500 mb:",
+    "tmp700":   ":TMP:700 mb:",
+    "hgt500":   ":HGT:500 mb:",
+    "hgt700":   ":HGT:700 mb:",
+    "dpt2m":    ":DPT:2 m above ground:",
+    "cldbase":  ":HGT:cloud base:",
 }
+
+
+def _build_srch(fxx: int) -> dict[str, str]:
+    """Return search patterns with the correct time-type suffix for fxx."""
+    suffix = "anl:" if fxx == 0 else f"{fxx} hour fcst:"
+    return {k: v + suffix for k, v in _SRCH_BASE.items()}
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -194,19 +202,23 @@ class HRRRClient:
         fxx: int = 0,
     ) -> Optional[HRRRCountySnapshot]:
         """
-        Fetch HRRR analysis and extract severe weather fields at all 77
-        Oklahoma county centroids.
+        Fetch HRRR fields at all 77 Oklahoma county centroids.
 
         Parameters
         ----------
-        valid_time : UTC datetime of the desired analysis valid time.
+        valid_time : UTC datetime of the desired *valid* time (not run time).
+                     The run time is derived as valid_time − fxx hours.
                      Must be ≥ ARCHIVE_START (2016-07-15).
-        fxx        : Forecast hour.  0 = analysis (recommended).
+        fxx        : Forecast hour offset.  0 = analysis; 1–48 = forecast.
+                     For fxx > 0, the underlying HRRR run must be posted —
+                     typically available ~45 min after run initialization.
 
         Returns
         -------
         HRRRCountySnapshot, or None if the run is not in the AWS archive.
         """
+        from datetime import timedelta
+
         try:
             from herbie import Herbie
         except ImportError:
@@ -220,15 +232,21 @@ class HRRRClient:
             )
             return None
 
-        # herbie wants a naive or tz-aware datetime; it normalizes to UTC
-        vt_str = valid_time.strftime("%Y-%m-%d %H:%M")
-        logger.debug("Fetching HRRR %s F%02d", vt_str, fxx)
+        # Herbie's `date` argument is the model *run* time, not valid time.
+        # For F00 they coincide; for fxx > 0 we must subtract.
+        run_time = valid_time - timedelta(hours=fxx)
+        run_str  = run_time.strftime("%Y-%m-%d %H:%M")
+        logger.debug("Fetching HRRR run=%s F%02d (valid=%s)", run_str, fxx,
+                     valid_time.strftime("%Y-%m-%d %H:%M"))
 
         try:
-            H = Herbie(vt_str, model="hrrr", product="sfc", fxx=fxx, verbose=False)
+            H = Herbie(run_str, model="hrrr", product="sfc", fxx=fxx, verbose=False)
         except Exception as exc:
-            logger.warning("HRRR Herbie init failed for %s: %s", vt_str, exc)
+            logger.warning("HRRR Herbie init failed for run=%s F%02d: %s",
+                           run_str, fxx, exc)
             return None
+
+        srch = _build_srch(fxx)
 
         # ── Fetch each field; build county lookup on first success ────────────
         run_time_dt = H.date  # datetime of model run
@@ -237,12 +255,13 @@ class HRRRClient:
         if run_time_dt.tzinfo is None:
             run_time_dt = run_time_dt.replace(tzinfo=timezone.utc)
 
+        vt_str = valid_time.strftime("%Y-%m-%d %H:%MZ")
         raw: dict[str, dict[OklahomaCounty, float]] = {}
         lookup: Optional[dict] = None
 
-        for key, srch in _SRCH.items():
+        for key, pattern in srch.items():
             try:
-                ds = H.xarray(srch, remove_grib=True)
+                ds = H.xarray(pattern, remove_grib=True)
             except Exception as exc:
                 logger.debug("HRRR field '%s' not available for %s: %s", key, vt_str, exc)
                 continue
@@ -329,6 +348,7 @@ class HRRRClient:
             "HRRR snapshot built: %s F%02d — %d counties",
             vt_str, fxx, len(county_points),
         )
+
         return HRRRCountySnapshot(
             valid_time=valid_time,
             run_time=run_time_dt,
