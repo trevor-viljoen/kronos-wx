@@ -170,6 +170,74 @@ def _parse_mdf(content: str, fallback_date: date) -> list[MesonetObservation]:
     return observations
 
 
+def _parse_mdf_raw(content: str, fallback_date: date) -> list[dict]:
+    """
+    Parse an MDF file and return ALL stations as plain dicts — no OklahomaCounty
+    filtering. Used for the web dashboard map where we want every active station.
+
+    Returned keys: station_id, temp_f, dewpoint_f, wind_dir, wind_speed, wind_gust.
+    Stations missing any of the five core fields are still dropped.
+    """
+    lines = content.strip().splitlines()
+    if len(lines) < 4:
+        return []
+
+    meta = lines[1].split()
+    try:
+        year, month, day = int(meta[1]), int(meta[2]), int(meta[3])
+    except (IndexError, ValueError):
+        year, month, day = fallback_date.year, fallback_date.month, fallback_date.day
+
+    headers = lines[2].split()
+    col = {h: i for i, h in enumerate(headers)}
+
+    def _val(parts: list[str], key: str) -> Optional[float]:
+        idx = col.get(key)
+        if idx is None or idx >= len(parts):
+            return None
+        try:
+            v = float(parts[idx])
+            return None if v < -100 else v
+        except (ValueError, TypeError):
+            return None
+
+    result: list[dict] = []
+    for line in lines[3:]:
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        stid_idx = col.get("STID")
+        if stid_idx is None or stid_idx >= len(parts):
+            continue
+        stid = parts[stid_idx].upper()
+
+        tair = _val(parts, "TAIR")
+        relh = _val(parts, "RELH")
+        wspd = _val(parts, "WSPD")
+        wdir = _val(parts, "WDIR")
+        pres = _val(parts, "PRES")
+        if any(v is None for v in (tair, relh, wspd, wdir, pres)):
+            continue
+
+        wmax = _val(parts, "WMAX")
+        try:
+            td_c = _dewpoint_c(float(tair), float(relh))   # type: ignore[arg-type]
+            result.append({
+                "station_id": stid,
+                "temp_f":     round(_c_to_f(float(tair)), 1),   # type: ignore[arg-type]
+                "dewpoint_f": round(_c_to_f(td_c), 1),
+                "wind_dir":   round(float(wdir), 0),             # type: ignore[arg-type]
+                "wind_speed": round(_ms_to_mph(float(wspd)), 1), # type: ignore[arg-type]
+                "wind_gust":  round(_ms_to_mph(float(wmax)), 1) if wmax is not None else None,
+            })
+        except Exception as exc:
+            logger.debug("Skipping raw MDF row for %s: %s", stid, exc)
+
+    return result
+
+
 class MesonetClient:
     """
     Client for Oklahoma Mesonet observations via the public MDF archive.
@@ -215,6 +283,24 @@ class MesonetClient:
         obs = _parse_mdf(content, dt.date())
         logger.debug("Parsed %d observations from %s", len(obs), url)
         return obs
+
+    def get_snapshot_with_display(
+        self, dt: datetime
+    ) -> tuple[list[MesonetObservation], list[dict]]:
+        """
+        Single MDF fetch returning both:
+          - domain observations (OklahomaCounty-filtered, for dryline/moisture)
+          - raw display dicts for ALL stations (no county filter, for the map)
+        """
+        url = _mdf_url(dt)
+        content = self._fetch_text(url)
+        domain_obs = _parse_mdf(content, dt.date())
+        display_obs = _parse_mdf_raw(content, dt.date())
+        logger.debug(
+            "Parsed %d domain / %d display obs from %s",
+            len(domain_obs), len(display_obs), url,
+        )
+        return domain_obs, display_obs
 
     def get_historical_case_data(self, case_date: date) -> dict[str, MesonetTimeSeries]:
         """

@@ -589,6 +589,7 @@ async def _task_surface() -> None:
             def _do_surface():
                 station_series: dict = {}
                 current_obs = []
+                current_display_obs: list[dict] = []
                 current_snap_time = None
 
                 with MesonetClient() as mc:
@@ -597,7 +598,7 @@ async def _task_surface() -> None:
                         for back_min in range(0, 25, 5):
                             snap_time = target - timedelta(minutes=back_min)
                             try:
-                                obs = mc.get_snapshot_observations(snap_time)
+                                obs, display_obs = mc.get_snapshot_with_display(snap_time)
                             except Exception as exc:
                                 if any(s in str(exc) for s in ("404", "400")):
                                     continue
@@ -618,12 +619,13 @@ async def _task_surface() -> None:
                                 )
                             if h_back == 0 and current_snap_time is None:
                                 current_obs = obs
+                                current_display_obs = display_obs
                                 current_snap_time = snap_time
                             break
 
-                return station_series, current_obs, current_snap_time
+                return station_series, current_obs, current_display_obs, current_snap_time
 
-            station_series, current_obs, snap_time = await asyncio.to_thread(_do_surface)
+            station_series, current_obs, current_display_obs, snap_time = await asyncio.to_thread(_do_surface)
             if not station_series or snap_time is None:
                 await asyncio.sleep(5 * 60)
                 continue
@@ -652,26 +654,26 @@ async def _task_surface() -> None:
 
             _dryline_obj = dl
 
-            # Serialize current Mesonet observations for map station plots
+            # Serialize current Mesonet observations for map station plots.
+            # Use the raw display list (all ~120 stations) rather than the
+            # OklahomaCounty-filtered domain list (~54 stations).
             mesonet_obs_list = []
-            for o in current_obs:
-                try:
-                    coords = _station_coords.get(o.station_id)
-                    lat = coords[0] if coords else o.county.lat
-                    lon = coords[1] if coords else o.county.lon
-                    mesonet_obs_list.append({
-                        "station_id":   o.station_id,
-                        "county":       o.county.name,
-                        "lat":          lat,
-                        "lon":          lon,
-                        "temp_f":       round(o.temperature, 1),
-                        "dewpoint_f":   round(o.dewpoint, 1),
-                        "wind_dir":     round(o.wind_direction, 0),
-                        "wind_speed":   round(o.wind_speed, 1),
-                        "wind_gust":    round(o.wind_gust, 1) if o.wind_gust is not None else None,
-                    })
-                except Exception:
-                    continue
+            for d in current_display_obs:
+                stid = d["station_id"]
+                coords = _station_coords.get(stid)
+                if coords is None:
+                    continue   # no coordinates — can't place on map
+                mesonet_obs_list.append({
+                    "station_id": stid,
+                    "county":     stid,   # use stid as label; county not needed for display
+                    "lat":        coords[0],
+                    "lon":        coords[1],
+                    "temp_f":     d["temp_f"],
+                    "dewpoint_f": d["dewpoint_f"],
+                    "wind_dir":   d["wind_dir"],
+                    "wind_speed": d["wind_speed"],
+                    "wind_gust":  d.get("wind_gust"),
+                })
 
             async with _lock:
                 _state["moisture"]      = _ser_moisture(moisture)
