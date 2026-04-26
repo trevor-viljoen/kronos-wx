@@ -915,13 +915,16 @@ export function RiskMap({ state, onCountyClick }: Props) {
           maxZoom={19}
         />
 
-        {/* GOES-East satellite imagery */}
+        {/* GOES-East satellite imagery.
+            goes_east_vis uses TMS Y-convention; goes_east uses standard XYZ. */}
         {overlays.satellite && (
           <TileLayer
+            key={satProduct}
             url={satProduct === 'vis' ? GOES_VIS_URL : GOES_IR_URL}
             attribution='GOES-East &copy; <a href="https://mesonet.agron.iastate.edu/">IEM</a>'
             opacity={0.75}
-            maxZoom={10}
+            tms={satProduct === 'vis'}
+            maxZoom={8}
           />
         )}
 
