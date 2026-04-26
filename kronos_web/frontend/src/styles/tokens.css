@@ -8,7 +8,7 @@
 
   /* ── Borders: structural only, no hue ──────────────────────────────── */
   --color-border:       #1f1f1f;
-  --color-border-warn:  rgba(255, 102, 0, 0.25);
+  --color-border-warn:  rgba(51, 204, 102, 0.2);
   --color-border-alert: rgba(255, 34, 34, 0.35);
 
   /* ── Text: achromatic — the data is the color ───────────────────────── */
@@ -33,7 +33,7 @@
 
   /* ── Alert types ────────────────────────────────────────────────────── */
   --warning-tornado: #ff2222;
-  --warning-watch:   #ff6600;
+  --warning-watch:   #33cc66;
   --warning-svr:     #ffcc00;
   --warning-md:      #7ec8e3;
 
