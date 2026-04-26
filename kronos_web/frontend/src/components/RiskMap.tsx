@@ -469,38 +469,133 @@ function OverlayControls({ overlays, onToggle }: OverlayControlsProps) {
   )
 }
 
-// ── Radar (RainViewer composite NEXRAD) ───────────────────────────────────────
-function RadarLayer() {
-  const [tilePath, setTilePath] = useState<string | null>(null)
+// ── Radar (RainViewer animated composite NEXRAD) ──────────────────────────────
+const RADAR_FRAMES   = 15    // number of past frames to cycle
+const RADAR_INTERVAL = 600   // ms per frame
+const RADAR_OPACITY  = 0.60
 
+interface RadarFrame { time: number; path: string }
+
+function RadarLayer() {
+  const [frames,  setFrames]  = useState<RadarFrame[]>([])
+  const [current, setCurrent] = useState(0)
+  const [playing, setPlaying] = useState(true)
+
+  // Fetch frame list from RainViewer, refresh every 5 min
   useEffect(() => {
     let cancelled = false
-
-    async function fetchLatest() {
+    async function refresh() {
       try {
         const res  = await fetch('https://api.rainviewer.com/public/weather-maps.json')
         const data = await res.json()
-        const past = data?.radar?.past as { time: number; path: string }[] | undefined
-        if (past && past.length > 0 && !cancelled) {
-          setTilePath(past[past.length - 1].path)
+        const past = (data?.radar?.past ?? []) as RadarFrame[]
+        if (!cancelled && past.length > 0) {
+          const slice = past.slice(-RADAR_FRAMES)
+          setFrames(slice)
+          setCurrent(slice.length - 1)
         }
-      } catch { /* network error — keep last tile */ }
+      } catch {}
     }
-
-    fetchLatest()
-    const id = setInterval(fetchLatest, 5 * 60 * 1000)
+    refresh()
+    const id = setInterval(refresh, 5 * 60 * 1000)
     return () => { cancelled = true; clearInterval(id) }
   }, [])
 
-  if (!tilePath) return null
+  // Animate
+  useEffect(() => {
+    if (!playing || frames.length === 0) return
+    const id = setInterval(() => {
+      setCurrent(prev => (prev + 1) % frames.length)
+    }, RADAR_INTERVAL)
+    return () => clearInterval(id)
+  }, [playing, frames.length])
+
+  if (frames.length === 0) return null
 
   return (
-    <TileLayer
-      url={`https://tilecache.rainviewer.com${tilePath}/256/{z}/{x}/{y}/6/1_1.png`}
-      attribution='Radar &copy; <a href="https://rainviewer.com">RainViewer</a>'
-      opacity={0.55}
-      zIndex={5}
-    />
+    <>
+      {frames.map((f, i) => (
+        <TileLayer
+          key={f.path}
+          url={`https://tilecache.rainviewer.com${f.path}/512/{z}/{x}/{y}/6/1_1.png`}
+          tileSize={512}
+          zoomOffset={-1}
+          opacity={i === current ? RADAR_OPACITY : 0}
+          zIndex={5}
+          attribution={i === 0 ? 'Radar &copy; <a href="https://rainviewer.com">RainViewer</a>' : ''}
+        />
+      ))}
+      {/* Frame timestamp + playback control — rendered outside map via portal trick */}
+      <RadarHUD
+        frames={frames}
+        current={current}
+        playing={playing}
+        onToggle={() => setPlaying(p => !p)}
+        onScrub={setCurrent}
+      />
+    </>
+  )
+}
+
+interface RadarHUDProps {
+  frames: RadarFrame[]
+  current: number
+  playing: boolean
+  onToggle: () => void
+  onScrub: (i: number) => void
+}
+
+function RadarHUD({ frames, current, playing, onToggle, onScrub }: RadarHUDProps) {
+  const map = useMap()
+  // Stop map click propagation on the HUD
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (ref.current) L.DomEvent.disableClickPropagation(ref.current)
+  }, [])
+
+  const ts = frames[current]
+    ? new Date(frames[current].time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : ''
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: 'absolute',
+        bottom: 32,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        zIndex: 1000,
+        background: 'rgba(0,0,0,0.75)',
+        border: '1px solid rgba(255,255,255,0.12)',
+        padding: '4px 10px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        fontFamily: 'var(--font-mono)',
+        fontSize: 11,
+        color: '#ccc',
+        pointerEvents: 'all',
+        userSelect: 'none',
+      }}
+    >
+      <button
+        onClick={onToggle}
+        style={{ background: 'none', border: 'none', color: '#ccc', cursor: 'pointer', fontSize: 13, padding: 0 }}
+      >
+        {playing ? '⏸' : '▶'}
+      </button>
+      <input
+        type="range"
+        min={0}
+        max={frames.length - 1}
+        value={current}
+        onChange={e => { onScrub(Number(e.target.value)); }}
+        style={{ width: 100, accentColor: '#4af' }}
+      />
+      <span style={{ minWidth: 50 }}>{ts}</span>
+      <span style={{ color: '#666' }}>RADAR</span>
+    </div>
   )
 }
 
