@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { MapContainer, TileLayer, GeoJSON, Polyline, Marker, useMap } from 'react-leaflet'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { MapContainer, TileLayer, WMSTileLayer, GeoJSON, Polyline, Marker, useMap } from 'react-leaflet'
 import L from 'leaflet'
 import type { DashboardState, Tier, CountyPoint, StationObs } from '../types/api'
 
@@ -485,86 +485,49 @@ function OverlayControls({ overlays, onToggle, radarStation, onRadarStation }: O
   )
 }
 
-// ── Radar (RainViewer MRMS animated composite) ────────────────────────────────
-// RainViewer provides genuine ~2-min MRMS frames via a public API.
-// Per-station single-site radar would require proxying NOAA RIDGE2 (CORS-blocked).
+// ── Radar ─────────────────────────────────────────────────────────────────────
+// MRMS:    animated RainViewer composite (~2-min frames from public API)
+// Station: NOAA RIDGE2 WMS per-station with TIME stepping
 
-// lat/lon null → fit Oklahoma overview; otherwise flyTo that site
-const RADAR_STATIONS: { id: string; label: string; desc: string; lat: number | null; lon: number | null }[] = [
-  { id: 'mrms', label: 'MRMS', desc: 'Full composite',  lat: null,  lon: null  },
-  { id: 'ktlx', label: 'KTLX', desc: 'OKC/Norman',      lat: 35.33, lon: -97.28 },
-  { id: 'kvnx', label: 'KVNX', desc: 'Vance/Enid',      lat: 36.74, lon: -98.13 },
-  { id: 'kinx', label: 'KINX', desc: 'Tulsa',            lat: 36.18, lon: -95.56 },
-  { id: 'kfdr', label: 'KFDR', desc: 'Altus/SW OK',      lat: 34.36, lon: -98.98 },
+const RADAR_STATIONS = [
+  { id: 'mrms', label: 'MRMS',  desc: 'Composite'  },
+  { id: 'ktlx', label: 'KTLX', desc: 'OKC/Norman'  },
+  { id: 'kvnx', label: 'KVNX', desc: 'Vance/Enid'  },
+  { id: 'kinx', label: 'KINX', desc: 'Tulsa'        },
+  { id: 'kfdr', label: 'KFDR', desc: 'Altus/SW OK'  },
 ]
 
-const RADAR_INTERVAL = 600   // ms per frame
+const RADAR_INTERVAL = 600
 const RADAR_OPACITY  = 0.70
 const RAINVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json'
+const RIDGE2_BASE    = 'https://opengeo.ncep.noaa.gov/geoserver'
+const RIDGE2_FRAMES  = 12
+const RIDGE2_STEP_MS = 5 * 60 * 1000
 
 interface RadarFrame { time: number; path: string }
 
-// Centers map on a radar station — must be inside MapContainer
-function RadarSiteFlyTo({ station }: { station: string }) {
-  const map = useMap()
-  const stn = RADAR_STATIONS.find(s => s.id === station)
-  useEffect(() => {
-    if (!stn) return
-    if (stn.lat !== null && stn.lon !== null) {
-      map.flyTo([stn.lat, stn.lon], 8, { duration: 0.8 })
-    } else {
-      // MRMS composite — return to Oklahoma overview
-      map.flyToBounds(OK_BOUNDS, { padding: [10, 10], duration: 0.8 })
-    }
-  }, [station])  // eslint-disable-line react-hooks/exhaustive-deps
-  return null
+function buildRidge2Times() {
+  const base = Math.floor(Date.now() / RIDGE2_STEP_MS) * RIDGE2_STEP_MS
+  return Array.from({ length: RIDGE2_FRAMES }, (_, i) => {
+    const ts = base - (RIDGE2_FRAMES - 1 - i) * RIDGE2_STEP_MS
+    return { ts, iso: new Date(ts).toISOString() }
+  })
 }
 
-interface RadarLayerProps {
-  station: string
+// Inside MapContainer: tile layer only (no HUD, no flyTo)
+interface RadarTilesProps {
+  station:      string
+  mrmsFrames:   RadarFrame[]
+  ridge2Times:  { ts: number; iso: string }[]
+  current:      number
 }
 
-function RadarLayer({ station }: RadarLayerProps) {
-  const [frames,  setFrames]  = useState<RadarFrame[]>([])
-  const [current, setCurrent] = useState(0)
-  const [playing, setPlaying] = useState(true)
-
-  const loadFrames = () => {
-    fetch(RAINVIEWER_API)
-      .then(r => r.json())
-      .then(data => {
-        const past: RadarFrame[] = data?.radar?.past ?? []
-        if (past.length > 0) {
-          setFrames(past)
-          setCurrent(past.length - 1)
-        }
-      })
-      .catch(() => {})
-  }
-
-  // Initial load + refresh every 5 min
-  useEffect(() => {
-    loadFrames()
-    const id = setInterval(loadFrames, 5 * 60 * 1000)
-    return () => clearInterval(id)
-  }, [])
-
-  // Animate
-  useEffect(() => {
-    if (!playing || frames.length === 0) return
-    const id = setInterval(() => setCurrent(p => (p + 1) % frames.length), RADAR_INTERVAL)
-    return () => clearInterval(id)
-  }, [playing, frames.length])
-
-  if (frames.length === 0) return null
-
-  const frame = frames[current]
-
-  return (
-    <>
-      <RadarSiteFlyTo station={station} />
+function RadarTiles({ station, mrmsFrames, ridge2Times, current }: RadarTilesProps) {
+  if (station === 'mrms') {
+    const frame = mrmsFrames[current]
+    if (!frame) return null
+    return (
       <TileLayer
-        // No key — react-leaflet calls setUrl() when url prop changes (smooth update)
         url={`https://tilecache.rainviewer.com${frame.path}/512/{z}/{x}/{y}/4/1_1.png`}
         tileSize={512}
         zoomOffset={-1}
@@ -572,86 +535,82 @@ function RadarLayer({ station }: RadarLayerProps) {
         zIndex={5}
         attribution=""
       />
-      <RadarHUD
-        frames={frames}
-        current={current}
-        playing={playing}
-        station={station}
-        onToggle={() => setPlaying(p => !p)}
-        onScrub={i => { setCurrent(i); setPlaying(false); }}
-      />
-    </>
+    )
+  }
+  const t = ridge2Times[current]
+  if (!t) return null
+  return (
+    <WMSTileLayer
+      key={station}
+      url={`${RIDGE2_BASE}/${station}/ows`}
+      layers={`${station}_bref_raw`}
+      format="image/png"
+      transparent={true}
+      version="1.3.0"
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      params={{ TIME: t.iso } as any}
+      opacity={RADAR_OPACITY}
+      zIndex={5}
+      attribution="NOAA NEXRAD RIDGE2"
+    />
   )
 }
 
+// Outside MapContainer: HUD rendered in RiskMap's container div
 interface RadarHUDProps {
-  frames: RadarFrame[]
-  current: number
-  playing: boolean
-  station: string
-  onToggle: () => void
-  onScrub: (i: number) => void
+  station:      string
+  mrmsFrames:   RadarFrame[]
+  ridge2Times:  { ts: number; iso: string }[]
+  current:      number
+  playing:      boolean
+  onToggle:     () => void
+  onScrub:      (i: number) => void
 }
 
-function RadarHUD({ frames, current, playing, station, onToggle, onScrub }: RadarHUDProps) {
-  const ref = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (ref.current) L.DomEvent.disableClickPropagation(ref.current)
-  }, [])
-
-  const frame = frames[current]
-  const ts = frame
-    ? new Date(frame.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    : ''
-
+function RadarHUD({ station, mrmsFrames, ridge2Times, current, playing, onToggle, onScrub }: RadarHUDProps) {
+  const isMrms = station === 'mrms'
+  const count  = isMrms ? mrmsFrames.length : ridge2Times.length
+  const tsMs   = isMrms
+    ? (mrmsFrames[current]?.time ?? 0) * 1000
+    : (ridge2Times[current]?.ts  ?? 0)
+  const ts = tsMs ? new Date(tsMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
   const stn = RADAR_STATIONS.find(s => s.id === station)
 
   return (
-    <div
-      ref={ref}
-      style={{
-        position: 'absolute',
-        bottom: 32,
-        left: '50%',
-        transform: 'translateX(-50%)',
-        zIndex: 1000,
-        background: 'rgba(0,0,0,0.80)',
-        border: '1px solid rgba(255,255,255,0.12)',
-        padding: '5px 12px',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 10,
-        fontFamily: 'var(--font-mono)',
-        fontSize: 11,
-        color: '#ccc',
-        pointerEvents: 'all',
-        userSelect: 'none',
-        whiteSpace: 'nowrap',
-      }}
-    >
-      <button
-        onClick={onToggle}
-        style={{ background: 'none', border: 'none', color: '#ccc', cursor: 'pointer', fontSize: 13, padding: 0 }}
-      >
+    <div style={{
+      position: 'absolute',
+      bottom: 32,
+      left: '50%',
+      transform: 'translateX(-50%)',
+      zIndex: 1000,
+      background: 'rgba(0,0,0,0.80)',
+      border: '1px solid rgba(255,255,255,0.12)',
+      padding: '5px 12px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      fontFamily: 'var(--font-mono)',
+      fontSize: 11,
+      color: '#ccc',
+      pointerEvents: 'all',
+      userSelect: 'none',
+      whiteSpace: 'nowrap',
+    }}>
+      <button onClick={onToggle} style={{ background: 'none', border: 'none', color: '#ccc', cursor: 'pointer', fontSize: 13, padding: 0 }}>
         {playing ? '⏸' : '▶'}
       </button>
       <input
-        type="range"
-        min={0}
-        max={frames.length - 1}
-        value={current}
+        type="range" min={0} max={Math.max(0, count - 1)} value={current}
         onChange={e => onScrub(Number(e.target.value))}
         style={{ width: 110, accentColor: '#4af' }}
       />
       <span style={{ minWidth: 48, color: '#eee' }}>{ts}</span>
-      {stn && stn.id === 'mrms' ? (
-        <span style={{ color: '#88aaff' }}>MRMS composite</span>
-      ) : stn ? (
-        <>
-          <span style={{ color: '#777' }}>MRMS</span>
-          <span style={{ color: '#555' }}>· {stn.label} view</span>
-        </>
-      ) : null}
+      {stn && (
+        <span style={{ color: isMrms ? '#88aaff' : '#ffcc66' }}>
+          {stn.label}
+          <span style={{ color: '#555', marginLeft: 4 }}>({stn.desc})</span>
+        </span>
+      )}
     </div>
   )
 }
@@ -677,6 +636,53 @@ export function RiskMap({ state, onCountyClick }: Props) {
     radar:    false,
   })
   const [radarStation, setRadarStation] = useState('mrms')
+
+  // ── Radar state (lifted so HUD can live outside MapContainer) ──────────────
+  const [mrmsFrames,  setMrmsFrames]  = useState<RadarFrame[]>([])
+  const [ridge2Times, setRidge2Times] = useState(() => buildRidge2Times())
+  const [radarCurrent, setRadarCurrent] = useState(0)
+  const [radarPlaying, setRadarPlaying] = useState(true)
+
+  // Load MRMS frames from RainViewer when radar is on
+  useEffect(() => {
+    if (!overlays.radar || radarStation !== 'mrms') return
+    const load = () => {
+      fetch(RAINVIEWER_API)
+        .then(r => r.json())
+        .then(data => {
+          const past: RadarFrame[] = data?.radar?.past ?? []
+          if (past.length > 0) { setMrmsFrames(past); setRadarCurrent(past.length - 1) }
+        })
+        .catch(() => {})
+    }
+    load()
+    const id = setInterval(load, 5 * 60 * 1000)
+    return () => clearInterval(id)
+  }, [overlays.radar, radarStation])
+
+  // Refresh RIDGE2 times every 5 min
+  useEffect(() => {
+    if (!overlays.radar || radarStation === 'mrms') return
+    const refresh = () => { setRidge2Times(buildRidge2Times()); setRadarCurrent(RIDGE2_FRAMES - 1) }
+    refresh()
+    const id = setInterval(refresh, 5 * 60 * 1000)
+    return () => clearInterval(id)
+  }, [overlays.radar, radarStation])
+
+  // Animation ticker
+  useEffect(() => {
+    if (!overlays.radar || !radarPlaying) return
+    const count = radarStation === 'mrms' ? mrmsFrames.length : RIDGE2_FRAMES
+    if (count === 0) return
+    const id = setInterval(() => setRadarCurrent(p => (p + 1) % count), RADAR_INTERVAL)
+    return () => clearInterval(id)
+  }, [overlays.radar, radarPlaying, radarStation, mrmsFrames.length])
+
+  // Reset frame index when switching stations
+  const handleRadarStation = useCallback((id: string) => {
+    setRadarStation(id)
+    setRadarCurrent(id === 'mrms' ? Math.max(0, mrmsFrames.length - 1) : RIDGE2_FRAMES - 1)
+  }, [mrmsFrames.length])
 
   useEffect(() => {
     fetch('/api/counties.geojson')
@@ -740,8 +746,15 @@ export function RiskMap({ state, onCountyClick }: Props) {
         {overlays.wind    && windGJ && <ThreatLayer geojson={windGJ} threatType="wind" />}
         {overlays.hail    && hailGJ && <ThreatLayer geojson={hailGJ} threatType="hail" />}
 
-        {/* Radar (IEM NEXRAD WMS) */}
-        {overlays.radar && <RadarLayer station={radarStation} />}
+        {/* Radar tiles (inside MapContainer only) */}
+        {overlays.radar && (
+          <RadarTiles
+            station={radarStation}
+            mrmsFrames={mrmsFrames}
+            ridge2Times={ridge2Times}
+            current={radarCurrent}
+          />
+        )}
 
         {/* County choropleth */}
         {overlays.counties && countiesGeoJSON && (
@@ -780,8 +793,21 @@ export function RiskMap({ state, onCountyClick }: Props) {
         overlays={overlays}
         onToggle={toggleOverlay}
         radarStation={radarStation}
-        onRadarStation={setRadarStation}
+        onRadarStation={handleRadarStation}
       />
+
+      {/* Radar HUD — outside MapContainer so position:absolute anchors to this div */}
+      {overlays.radar && (mrmsFrames.length > 0 || radarStation !== 'mrms') && (
+        <RadarHUD
+          station={radarStation}
+          mrmsFrames={mrmsFrames}
+          ridge2Times={ridge2Times}
+          current={radarCurrent}
+          playing={radarPlaying}
+          onToggle={() => setRadarPlaying(p => !p)}
+          onScrub={i => { setRadarCurrent(i); setRadarPlaying(false) }}
+        />
+      )}
 
       {/* Legend */}
       {activeTiers.length > 0 && (
