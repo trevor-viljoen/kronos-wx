@@ -177,13 +177,32 @@ function AlertLayer({ geojson }: AlertLayerProps) {
   }
 
   const onEachAlert = (feature: GeoJSON.Feature, layer: L.Layer) => {
-    const props   = feature.properties ?? {}
-    const event   = props.event ?? ''
-    const expires = props.expires ? new Date(props.expires).toISOString().slice(11, 16) + 'Z' : ''
-    const area    = props.areaDesc ?? ''
+    const props      = feature.properties ?? {}
+    const event      = props.event ?? ''
+    const expires    = props.expires
+      ? new Date(props.expires).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+      : ''
+    const area       = props.areaDesc ?? ''
+    const headline   = props.headline ?? ''
+    const desc       = props.description ?? ''
+    const instr      = props.instruction ?? ''
+    const color      = event.includes('Tornado') ? '#ff2222' : '#ffcc00'
+
     ;(layer as L.Path).bindTooltip(
-      `<strong style="color:#ff4444">${event}</strong><br/>${area.slice(0, 60)}<br/>exp ${expires}`,
+      `<strong style="color:${color}">${event}</strong><br/>${area.slice(0, 60)}<br/>exp ${expires}`,
       { sticky: true, opacity: 1 }
+    )
+
+    const body = [desc, instr].filter(Boolean).join('\n\n— PROTECTIVE ACTION —\n\n')
+    ;(layer as L.Path).bindPopup(
+      `<div class="alert-popup-wrap">
+        <div class="alert-popup-event" style="color:${color}">${event}</div>
+        ${headline ? `<div class="alert-popup-headline">${headline}</div>` : ''}
+        <div class="alert-popup-meta">Areas: ${area}</div>
+        ${expires ? `<div class="alert-popup-meta">Expires: ${expires}</div>` : ''}
+        <pre class="alert-popup-body">${body || 'No text available.'}</pre>
+      </div>`,
+      { maxWidth: 420, maxHeight: 500, className: 'alert-popup' }
     )
   }
 
