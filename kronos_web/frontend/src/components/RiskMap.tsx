@@ -49,7 +49,7 @@ const LEGEND_TIERS: Array<{ tier: Tier; label: string }> = [
 const OK_BOUNDS: L.LatLngBoundsExpression = [[33.5, -103.1], [37.1, -94.4]]
 
 // ── Overlay keys ──────────────────────────────────────────────────────────────
-type OverlayKey = 'counties' | 'spc' | 'tornado' | 'wind' | 'hail' | 'warnings' | 'watches' | 'mesonet' | 'dryline' | 'boundaries' | 'radar'
+type OverlayKey = 'counties' | 'spc' | 'tornado' | 'wind' | 'hail' | 'warnings' | 'watches' | 'mesonet' | 'dryline' | 'boundaries' | 'satellite' | 'radar'
 
 const OVERLAY_LABELS: Record<OverlayKey, string> = {
   counties:   'County Tiers',
@@ -62,8 +62,17 @@ const OVERLAY_LABELS: Record<OverlayKey, string> = {
   mesonet:    'Mesonet',
   dryline:    'Dryline',
   boundaries: 'Boundaries',
+  satellite:  'Satellite',
   radar:      'Radar',
 }
+
+// ── GOES-East satellite tile layers ──────────────────────────────────────────
+// IEM tile service: updated every ~5 min, free public access
+const GOES_VIS_URL  = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes_east_vis/{z}/{x}/{y}.png'
+const GOES_IR_URL   = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes_east/{z}/{x}/{y}.png'
+
+type SatProduct = 'vis' | 'ir'
+const SAT_LABELS: Record<SatProduct, string> = { vis: 'VIS', ir: 'IR' }
 
 // ── Fit Oklahoma bounds on first render ───────────────────────────────────────
 function FitBounds() {
@@ -602,9 +611,11 @@ interface OverlayControlsProps {
   onToggle: (key: OverlayKey) => void
   radarStation: string
   onRadarStation: (id: string) => void
+  satProduct: SatProduct
+  onSatProduct: (p: SatProduct) => void
 }
 
-function OverlayControls({ overlays, onToggle, radarStation, onRadarStation }: OverlayControlsProps) {
+function OverlayControls({ overlays, onToggle, radarStation, onRadarStation, satProduct, onSatProduct }: OverlayControlsProps) {
   return (
     <div className="overlay-controls">
       {(Object.keys(OVERLAY_LABELS) as OverlayKey[]).map(key => (
@@ -616,6 +627,20 @@ function OverlayControls({ overlays, onToggle, radarStation, onRadarStation }: O
           {OVERLAY_LABELS[key]}
         </button>
       ))}
+      {overlays.satellite && (
+        <div className="radar-site-selector">
+          {(Object.keys(SAT_LABELS) as SatProduct[]).map(p => (
+            <button
+              key={p}
+              className={`overlay-btn ${satProduct === p ? 'active' : ''}`}
+              onClick={() => onSatProduct(p)}
+              title={p === 'vis' ? 'GOES-East Visible' : 'GOES-East Infrared'}
+            >
+              {SAT_LABELS[p]}
+            </button>
+          ))}
+        </div>
+      )}
       {overlays.radar && (
         <div className="radar-site-selector">
           {RADAR_STATIONS.map(stn => (
@@ -780,8 +805,10 @@ export function RiskMap({ state, onCountyClick }: Props) {
     mesonet:    false,
     dryline:    true,
     boundaries: true,
+    satellite:  false,
     radar:      false,
   })
+  const [satProduct, setSatProduct] = useState<SatProduct>('vis')
   const [radarStation, setRadarStation] = useState('mrms')
 
   // ── Radar state (lifted so HUD can live outside MapContainer) ──────────────
@@ -888,6 +915,16 @@ export function RiskMap({ state, onCountyClick }: Props) {
           maxZoom={19}
         />
 
+        {/* GOES-East satellite imagery */}
+        {overlays.satellite && (
+          <TileLayer
+            url={satProduct === 'vis' ? GOES_VIS_URL : GOES_IR_URL}
+            attribution='GOES-East &copy; <a href="https://mesonet.agron.iastate.edu/">IEM</a>'
+            opacity={0.75}
+            maxZoom={10}
+          />
+        )}
+
         {/* SPC Day1 outlook (bottom-most overlay) */}
         {overlays.spc && outlookGJ && <OutlookLayer geojson={outlookGJ} />}
 
@@ -952,6 +989,8 @@ export function RiskMap({ state, onCountyClick }: Props) {
         onToggle={toggleOverlay}
         radarStation={radarStation}
         onRadarStation={handleRadarStation}
+        satProduct={satProduct}
+        onSatProduct={setSatProduct}
       />
 
       {/* Radar HUD — outside MapContainer so position:absolute anchors to this div */}
