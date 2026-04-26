@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { MapContainer, TileLayer, WMSTileLayer, GeoJSON, Polyline, Marker, useMap } from 'react-leaflet'
+import { MapContainer, TileLayer, GeoJSON, Polyline, Marker, useMap } from 'react-leaflet'
 import L from 'leaflet'
 import type { DashboardState, Tier, CountyPoint, StationObs } from '../types/api'
 
@@ -485,23 +485,39 @@ function OverlayControls({ overlays, onToggle, radarStation, onRadarStation }: O
   )
 }
 
-// ── Radar (IEM NEXRAD WMS — individual stations) ──────────────────────────────
-const RADAR_STATIONS = [
-  { id: 'ktlx', label: 'KTLX', desc: 'OKC/Norman' },
-  { id: 'kvnx', label: 'KVNX', desc: 'Vance/Enid' },
-  { id: 'kinx', label: 'KINX', desc: 'Tulsa'      },
-  { id: 'kfdr', label: 'KFDR', desc: 'Altus/SW OK' },
+// ── Radar (RainViewer MRMS animated composite) ────────────────────────────────
+// RainViewer provides genuine ~2-min MRMS frames via a public API.
+// Per-station single-site radar would require proxying NOAA RIDGE2 (CORS-blocked).
+
+// lat/lon null → fit Oklahoma overview; otherwise flyTo that site
+const RADAR_STATIONS: { id: string; label: string; desc: string; lat: number | null; lon: number | null }[] = [
+  { id: 'mrms', label: 'MRMS', desc: 'Full composite',  lat: null,  lon: null  },
+  { id: 'ktlx', label: 'KTLX', desc: 'OKC/Norman',      lat: 35.33, lon: -97.28 },
+  { id: 'kvnx', label: 'KVNX', desc: 'Vance/Enid',      lat: 36.74, lon: -98.13 },
+  { id: 'kinx', label: 'KINX', desc: 'Tulsa',            lat: 36.18, lon: -95.56 },
+  { id: 'kfdr', label: 'KFDR', desc: 'Altus/SW OK',      lat: 34.36, lon: -98.98 },
 ]
-const RADAR_FRAMES   = 15    // past frames to cycle (× 5 min = 75 min loop)
+
 const RADAR_INTERVAL = 600   // ms per frame
 const RADAR_OPACITY  = 0.70
+const RAINVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json'
 
-function buildRadarTimes(): string[] {
-  const step = 5 * 60 * 1000
-  const base = Math.floor(Date.now() / step) * step
-  return Array.from({ length: RADAR_FRAMES }, (_, i) =>
-    new Date(base - (RADAR_FRAMES - 1 - i) * step).toISOString().slice(0, 19) + 'Z'
-  )
+interface RadarFrame { time: number; path: string }
+
+// Centers map on a radar station — must be inside MapContainer
+function RadarSiteFlyTo({ station }: { station: string }) {
+  const map = useMap()
+  const stn = RADAR_STATIONS.find(s => s.id === station)
+  useEffect(() => {
+    if (!stn) return
+    if (stn.lat !== null && stn.lon !== null) {
+      map.flyTo([stn.lat, stn.lon], 8, { duration: 0.8 })
+    } else {
+      // MRMS composite — return to Oklahoma overview
+      map.flyToBounds(OK_BOUNDS, { padding: [10, 10], duration: 0.8 })
+    }
+  }, [station])  // eslint-disable-line react-hooks/exhaustive-deps
+  return null
 }
 
 interface RadarLayerProps {
@@ -509,45 +525,55 @@ interface RadarLayerProps {
 }
 
 function RadarLayer({ station }: RadarLayerProps) {
-  const [times,   setTimes]   = useState<string[]>(() => buildRadarTimes())
-  const [current, setCurrent] = useState(RADAR_FRAMES - 1)
+  const [frames,  setFrames]  = useState<RadarFrame[]>([])
+  const [current, setCurrent] = useState(0)
   const [playing, setPlaying] = useState(true)
 
-  // Refresh time list every 5 min so newest data rolls in
+  const loadFrames = () => {
+    fetch(RAINVIEWER_API)
+      .then(r => r.json())
+      .then(data => {
+        const past: RadarFrame[] = data?.radar?.past ?? []
+        if (past.length > 0) {
+          setFrames(past)
+          setCurrent(past.length - 1)
+        }
+      })
+      .catch(() => {})
+  }
+
+  // Initial load + refresh every 5 min
   useEffect(() => {
-    const id = setInterval(() => {
-      setTimes(buildRadarTimes())
-      setCurrent(RADAR_FRAMES - 1)
-    }, 5 * 60 * 1000)
+    loadFrames()
+    const id = setInterval(loadFrames, 5 * 60 * 1000)
     return () => clearInterval(id)
   }, [])
 
   // Animate
   useEffect(() => {
-    if (!playing) return
-    const id = setInterval(() => setCurrent(p => (p + 1) % RADAR_FRAMES), RADAR_INTERVAL)
+    if (!playing || frames.length === 0) return
+    const id = setInterval(() => setCurrent(p => (p + 1) % frames.length), RADAR_INTERVAL)
     return () => clearInterval(id)
-  }, [playing])
+  }, [playing, frames.length])
 
-  const currentTime = times[current] ?? ''
+  if (frames.length === 0) return null
+
+  const frame = frames[current]
 
   return (
     <>
-      <WMSTileLayer
-        key={`${station}-${currentTime}`}
-        url={`https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/${station}_n0q.cgi`}
-        layers="nexrad-n0q-900913"
-        format="image/png"
-        transparent={true}
+      <RadarSiteFlyTo station={station} />
+      <TileLayer
+        // No key — react-leaflet calls setUrl() when url prop changes (smooth update)
+        url={`https://tilecache.rainviewer.com${frame.path}/512/{z}/{x}/{y}/4/1_1.png`}
+        tileSize={512}
+        zoomOffset={-1}
         opacity={RADAR_OPACITY}
-        version="1.1.1"
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        params={{ layers: 'nexrad-n0q-900913', TIME: currentTime } as any}
         zIndex={5}
         attribution=""
       />
       <RadarHUD
-        times={times}
+        frames={frames}
         current={current}
         playing={playing}
         station={station}
@@ -559,7 +585,7 @@ function RadarLayer({ station }: RadarLayerProps) {
 }
 
 interface RadarHUDProps {
-  times: string[]
+  frames: RadarFrame[]
   current: number
   playing: boolean
   station: string
@@ -567,14 +593,15 @@ interface RadarHUDProps {
   onScrub: (i: number) => void
 }
 
-function RadarHUD({ times, current, playing, station, onToggle, onScrub }: RadarHUDProps) {
+function RadarHUD({ frames, current, playing, station, onToggle, onScrub }: RadarHUDProps) {
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (ref.current) L.DomEvent.disableClickPropagation(ref.current)
   }, [])
 
-  const ts = times[current]
-    ? new Date(times[current]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const frame = frames[current]
+  const ts = frame
+    ? new Date(frame.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : ''
 
   const stn = RADAR_STATIONS.find(s => s.id === station)
@@ -611,18 +638,20 @@ function RadarHUD({ times, current, playing, station, onToggle, onScrub }: Radar
       <input
         type="range"
         min={0}
-        max={RADAR_FRAMES - 1}
+        max={frames.length - 1}
         value={current}
         onChange={e => onScrub(Number(e.target.value))}
         style={{ width: 110, accentColor: '#4af' }}
       />
       <span style={{ minWidth: 48, color: '#eee' }}>{ts}</span>
-      {stn && (
-        <span style={{ color: '#88aaff' }}>
-          {stn.label}
-          <span style={{ color: '#555', marginLeft: 4 }}>({stn.desc})</span>
-        </span>
-      )}
+      {stn && stn.id === 'mrms' ? (
+        <span style={{ color: '#88aaff' }}>MRMS composite</span>
+      ) : stn ? (
+        <>
+          <span style={{ color: '#777' }}>MRMS</span>
+          <span style={{ color: '#555' }}>· {stn.label} view</span>
+        </>
+      ) : null}
     </div>
   )
 }
@@ -647,7 +676,7 @@ export function RiskMap({ state, onCountyClick }: Props) {
     dryline:  true,
     radar:    false,
   })
-  const [radarStation, setRadarStation] = useState(RADAR_STATIONS[0].id)
+  const [radarStation, setRadarStation] = useState('mrms')
 
   useEffect(() => {
     fetch('/api/counties.geojson')
