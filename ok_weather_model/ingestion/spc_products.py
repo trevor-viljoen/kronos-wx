@@ -68,10 +68,11 @@ class NWSAlert:
 
     @property
     def priority(self) -> int:
-        if "Tornado Warning" in self.event:    return 4
-        if "Tornado Watch"   in self.event:    return 3
-        if "Severe Thunderstorm Warning" in self.event: return 2
-        return 1
+        if "Tornado Warning"              in self.event: return 4
+        if "Tornado Watch"                in self.event: return 3
+        if "Severe Thunderstorm Warning"  in self.event: return 2
+        if "Severe Thunderstorm Watch"    in self.event: return 1
+        return 0
 
     @property
     def expires_label(self) -> str:
@@ -131,14 +132,16 @@ def fetch_active_watches_warnings(timeout: float = 12.0) -> list[NWSAlert]:
     """
     Fetch active NWS watch and warning products for Oklahoma via the NWS API.
 
-    Returns Tornado Warnings, Tornado Watches, and Severe Thunderstorm
-    Warnings sorted by priority (highest first), then by expiry.
+    Returns Tornado Warnings, Tornado Watches, Severe Thunderstorm
+    Warnings, and Severe Thunderstorm Watches sorted by priority
+    (highest first), then by expiry.
     Returns [] on network error.
     """
     _WANTED = frozenset({
         "Tornado Warning",
         "Tornado Watch",
         "Severe Thunderstorm Warning",
+        "Severe Thunderstorm Watch",
     })
 
     try:
