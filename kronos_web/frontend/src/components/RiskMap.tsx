@@ -49,7 +49,7 @@ const LEGEND_TIERS: Array<{ tier: Tier; label: string }> = [
 const OK_BOUNDS: L.LatLngBoundsExpression = [[33.5, -103.1], [37.1, -94.4]]
 
 // ── Overlay keys ──────────────────────────────────────────────────────────────
-type OverlayKey = 'counties' | 'spc' | 'tornado' | 'wind' | 'hail' | 'warnings' | 'watches' | 'mesonet' | 'dryline'
+type OverlayKey = 'counties' | 'spc' | 'tornado' | 'wind' | 'hail' | 'warnings' | 'watches' | 'mesonet' | 'dryline' | 'radar'
 
 const OVERLAY_LABELS: Record<OverlayKey, string> = {
   counties: 'County Tiers',
@@ -61,6 +61,7 @@ const OVERLAY_LABELS: Record<OverlayKey, string> = {
   watches:  'Watches',
   mesonet:  'Mesonet',
   dryline:  'Dryline',
+  radar:    'Radar',
 }
 
 // ── Fit Oklahoma bounds on first render ───────────────────────────────────────
@@ -468,6 +469,41 @@ function OverlayControls({ overlays, onToggle }: OverlayControlsProps) {
   )
 }
 
+// ── Radar (RainViewer composite NEXRAD) ───────────────────────────────────────
+function RadarLayer() {
+  const [tilePath, setTilePath] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function fetchLatest() {
+      try {
+        const res  = await fetch('https://api.rainviewer.com/public/weather-maps.json')
+        const data = await res.json()
+        const past = data?.radar?.past as { time: number; path: string }[] | undefined
+        if (past && past.length > 0 && !cancelled) {
+          setTilePath(past[past.length - 1].path)
+        }
+      } catch { /* network error — keep last tile */ }
+    }
+
+    fetchLatest()
+    const id = setInterval(fetchLatest, 5 * 60 * 1000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [])
+
+  if (!tilePath) return null
+
+  return (
+    <TileLayer
+      url={`https://tilecache.rainviewer.com${tilePath}/256/{z}/{x}/{y}/6/1_1.png`}
+      attribution='Radar &copy; <a href="https://rainviewer.com">RainViewer</a>'
+      opacity={0.55}
+      zIndex={5}
+    />
+  )
+}
+
 // ── Main component ─────────────────────────────────────────────────────────────
 interface Props {
   state: DashboardState | null
@@ -486,6 +522,7 @@ export function RiskMap({ state, onCountyClick }: Props) {
     watches:  true,
     mesonet:  false,
     dryline:  true,
+    radar:    false,
   })
 
   useEffect(() => {
@@ -549,6 +586,9 @@ export function RiskMap({ state, onCountyClick }: Props) {
         {overlays.tornado && tornGJ && <ThreatLayer geojson={tornGJ} threatType="tornado" />}
         {overlays.wind    && windGJ && <ThreatLayer geojson={windGJ} threatType="wind" />}
         {overlays.hail    && hailGJ && <ThreatLayer geojson={hailGJ} threatType="hail" />}
+
+        {/* Radar composite (RainViewer) */}
+        {overlays.radar && <RadarLayer />}
 
         {/* County choropleth */}
         {overlays.counties && countiesGeoJSON && (
