@@ -1,13 +1,59 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import type { DashboardState } from '../types/api'
 
 interface Props {
   state: DashboardState | null
 }
 
-const CAT_COLOR: Record<string, string> = {
-  HIGH: '#ff2222', MDT: '#ff5533', ENH: '#ff8800',
-  SLGT: '#ffcc00', MRGL: '#44aa44', TSTM: '#5a7090', NONE: '#2a4060',
+const TICKER_COLOR: Record<string, string> = {
+  'Tornado Warning':             '#ff2222',
+  'Tornado Watch':               '#33cc66',
+  'Severe Thunderstorm Warning': '#ffcc00',
+  'Severe Thunderstorm Watch':   '#ffcc00',
+}
+
+function abbrev(areaDesc: string, max = 4): string {
+  const parts = areaDesc.replace(/;/g, ',').split(',')
+    .map(p => p.trim().replace(/,?\s*[A-Z]{2}$/, '').replace(/\s+County\s*$/i, '').trim())
+    .filter(Boolean)
+  if (parts.length <= max) return parts.join(', ')
+  return parts.slice(0, max).join(', ') + ` +${parts.length - max}`
+}
+
+function HeaderTicker({ state }: { state: DashboardState | null }) {
+  const items = useMemo(() => {
+    const alerts = state?.spc?.alerts ?? []
+    const mds    = state?.spc?.mds    ?? []
+    const out: { text: string; color: string }[] = []
+    for (const a of alerts) {
+      const color = TICKER_COLOR[a.event] ?? 'var(--color-text-dim)'
+      const num   = a.watch_number ? ` #${a.watch_number}` : ''
+      out.push({ text: `${a.event.toUpperCase()}${num}  ${abbrev(a.area_desc)}`, color })
+    }
+    for (const md of mds) {
+      const prob = md.prob_watch != null ? `  ${md.prob_watch}% WATCH` : ''
+      out.push({ text: `MD #${md.number}  ${md.concerning.slice(0, 55)}${prob}`, color: '#cc88ff' })
+    }
+    return out
+  }, [state?.spc])
+
+  if (items.length === 0) return <span className="header-spacer" />
+
+  const doubled     = [...items, ...items]
+  const durationS   = Math.max(10, items.length * 7)
+
+  return (
+    <div className="header-ticker">
+      <div className="header-ticker-track" style={{ animationDuration: `${durationS}s` }}>
+        {doubled.map((item, i) => (
+          <span key={i} className="header-ticker-item">
+            <span style={{ color: item.color }}>◆</span>
+            <span style={{ color: item.color }}>{item.text}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 export function Header({ state }: Props) {
@@ -25,11 +71,11 @@ export function Header({ state }: Props) {
     return () => clearInterval(id)
   }, [])
 
-  const outlook    = state?.spc?.outlook
-  const cat        = outlook?.category ?? 'NONE'
-  const prob       = outlook?.max_tornado_prob
-  const sig        = outlook?.sig_tornado_hatched
-  const torActive  = (state?.spc?.alerts ?? []).some(a => a.event === 'Tornado Warning')
+  const outlook   = state?.spc?.outlook
+  const cat       = outlook?.category ?? 'NONE'
+  const prob      = outlook?.max_tornado_prob
+  const sig       = outlook?.sig_tornado_hatched
+  const torActive = (state?.spc?.alerts ?? []).some(a => a.event === 'Tornado Warning')
 
   return (
     <header className={`app-header${torActive ? ' tor-active' : ''}`}>
@@ -61,12 +107,13 @@ export function Header({ state }: Props) {
           border: '1px solid rgba(255,34,34,0.5)',
           color: '#ff2222',
           animation: 'pulse 1.2s ease-in-out infinite',
+          flexShrink: 0,
         }}>
           TOR WARNING ACTIVE
         </span>
       )}
 
-      <span className="header-spacer" />
+      <HeaderTicker state={state} />
 
       <span className="header-meta">
         {state?.hrrr_valid ? `HRRR ${state.hrrr_valid}` : 'HRRR loading…'}

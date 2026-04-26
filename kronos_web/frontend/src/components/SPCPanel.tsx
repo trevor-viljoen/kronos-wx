@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState } from 'react'
 import type { SPCData, AlertData, MDData } from '../types/api'
 import { useCollapse } from '../hooks/useCollapse'
 
@@ -143,55 +143,6 @@ function MDCard({ md }: { md: MDData }) {
   )
 }
 
-// ── Ticker ────────────────────────────────────────────────────────────────────
-
-const TICKER_COLOR: Record<string, string> = {
-  'Tornado Warning':             'var(--warning-tornado)',
-  'Tornado Watch':               'var(--warning-watch)',
-  'Severe Thunderstorm Warning': 'var(--warning-svr)',
-  'Severe Thunderstorm Watch':   'var(--warning-svr)',
-}
-
-function AlertTicker({ alerts, mds }: { alerts: AlertData[]; mds: MDData[] }) {
-  const items = useMemo(() => {
-    const out: { text: string; color: string }[] = []
-    for (const a of alerts) {
-      const color = TICKER_COLOR[a.event] ?? 'var(--color-text-dim)'
-      const num   = a.watch_number ? ` #${a.watch_number}` : ''
-      const area  = abbrevCounties(a.area_desc, 4)
-      out.push({ text: `${a.event.toUpperCase()}${num} · ${area}`, color })
-    }
-    for (const md of mds) {
-      const prob = md.prob_watch != null ? ` · ${md.prob_watch}% watch` : ''
-      out.push({ text: `MD #${md.number} · ${md.concerning.slice(0, 60)}${prob}`, color: 'var(--warning-md)' })
-    }
-    return out
-  }, [alerts, mds])
-
-  if (items.length === 0) return null
-
-  // Duplicate items so the scroll loop is seamless
-  const doubled = [...items, ...items]
-  // Speed: ~60px/s base, capped — wider content scrolls at same apparent speed
-  const durationS = Math.max(8, items.length * 6)
-
-  return (
-    <div className="alert-ticker">
-      <div
-        className="alert-ticker-track"
-        style={{ animationDuration: `${durationS}s` }}
-      >
-        {doubled.map((item, i) => (
-          <span key={i} className="alert-ticker-item">
-            <span style={{ color: item.color, fontWeight: 700 }}>◆</span>
-            <span style={{ color: item.color }}>{item.text}</span>
-          </span>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 // ── Panel ─────────────────────────────────────────────────────────────────────
 
 export function SPCPanel({ spc }: Props) {
@@ -216,7 +167,6 @@ export function SPCPanel({ spc }: Props) {
         <span className="panel-subtitle">{new Date().toISOString().slice(11, 16)}Z</span>
         <button className="panel-collapse-btn" onClick={toggle}>{collapsed ? '▸' : '▾'}</button>
       </div>
-      {!collapsed && <AlertTicker alerts={alerts} mds={mds} />}
       <div className="panel-body" style={{ padding: '8px 12px', overflowY: 'auto' }}>
 
         {/* D1 outlook */}
