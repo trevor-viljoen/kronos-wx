@@ -486,9 +486,11 @@ async def _task_environment() -> None:
             today = datetime.now(tz=timezone.utc).date()
 
             def _do_sounding():
+                from datetime import timedelta
                 profile = None
                 fetched_hour = None
                 with SoundingClient() as sc:
+                    # Try today's soundings first (12Z preferred, then 00Z)
                     for h in (12, 0, 18, 21):
                         try:
                             p = sc.get_sounding(stn, today, h)
@@ -498,12 +500,29 @@ async def _task_environment() -> None:
                                 break
                         except Exception:
                             continue
+                    # Fall back to yesterday's 12Z if today has nothing yet
+                    # (common before ~15Z UTC when Wyoming posts today's 12Z)
+                    if profile is None:
+                        yesterday = today - timedelta(days=1)
+                        for h in (12, 0):
+                            try:
+                                p = sc.get_sounding(stn, yesterday, h)
+                                if p:
+                                    profile = p
+                                    fetched_hour = h
+                                    logger.info(
+                                        "Using yesterday's %02dZ sounding (today not posted yet)",
+                                        h,
+                                    )
+                                    break
+                            except Exception:
+                                continue
                 return profile, fetched_hour
 
             profile, fetched_hour = await asyncio.to_thread(_do_sounding)
 
             if profile is None:
-                logger.warning("Sounding: no data for today yet")
+                logger.warning("Sounding: no data available (today or yesterday)")
                 await asyncio.sleep(30 * 60)
                 continue
 
