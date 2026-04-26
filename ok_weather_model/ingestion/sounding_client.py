@@ -42,6 +42,7 @@ MPS_TO_KNOTS = 1.94384  # m/s → knots (new API returns m/s)
 STATION_WMO = {
     OklahomaSoundingStation.OUN: 72357,
     OklahomaSoundingStation.LMN: 74646,
+    OklahomaSoundingStation.FWD: 72249,
     OklahomaSoundingStation.AMA: 72363,
     OklahomaSoundingStation.DDC: 72451,
 }

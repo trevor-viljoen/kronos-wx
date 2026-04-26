@@ -510,8 +510,9 @@ async def _task_environment() -> None:
             idx = await asyncio.to_thread(compute_thermodynamic_indices, profile)
             kin = await asyncio.to_thread(compute_kinematic_profile, profile, idx)
 
-            # LMN sounding
+            # LMN + FWD soundings (fetched in parallel threads)
             lmn_idx = lmn_kin = None
+            fwd_idx = fwd_kin = None
             if fetched_hour is not None:
                 def _do_lmn():
                     with SoundingClient() as sc2:
@@ -521,7 +522,20 @@ async def _task_environment() -> None:
                         lk = compute_kinematic_profile(lp, li)
                         return li, lk
                     return None, None
-                lmn_idx, lmn_kin = await asyncio.to_thread(_do_lmn)
+
+                def _do_fwd():
+                    with SoundingClient() as sc3:
+                        fp = sc3.get_sounding(OklahomaSoundingStation.FWD, today, fetched_hour)
+                    if fp:
+                        fi = compute_thermodynamic_indices(fp)
+                        fk = compute_kinematic_profile(fp, fi)
+                        return fi, fk
+                    return None, None
+
+                (lmn_idx, lmn_kin), (fwd_idx, fwd_kin) = await asyncio.gather(
+                    asyncio.to_thread(_do_lmn),
+                    asyncio.to_thread(_do_fwd),
+                )
 
             # CES projection (12Z only)
             ces_data = None
@@ -572,6 +586,7 @@ async def _task_environment() -> None:
             env_data = {
                 "oun": _ser_indices(idx, kin),
                 "lmn": _ser_indices(lmn_idx, lmn_kin) if lmn_idx and lmn_kin else None,
+                "fwd": _ser_indices(fwd_idx, fwd_kin) if fwd_idx and fwd_kin else None,
                 "fetched_hour": fetched_hour,
             }
 

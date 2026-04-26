@@ -46,6 +46,7 @@ export default function App() {
               <EnvironmentPanel
                 oun={env?.oun ?? null}
                 lmn={env?.lmn ?? null}
+                fwd={env?.fwd ?? null}
                 ces={state.ces}
                 model={state.model_forecast}
                 hour={env?.fetched_hour ?? null}

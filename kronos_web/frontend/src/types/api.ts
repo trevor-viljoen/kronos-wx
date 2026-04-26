@@ -70,6 +70,7 @@ export interface SoundingData {
 export interface EnvironmentData {
   oun: SoundingData
   lmn: SoundingData | null
+  fwd: SoundingData | null
   fetched_hour: number
 }
 

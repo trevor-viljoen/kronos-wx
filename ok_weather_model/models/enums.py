@@ -81,6 +81,7 @@ class BoundaryType(str, Enum):
 class OklahomaSoundingStation(str, Enum):
     OUN = "OUN"  # Norman, OK — WMO 72357
     LMN = "LMN"  # Lamont, OK — WMO 74646
+    FWD = "FWD"  # Fort Worth, TX — WMO 72249 (southern proximity sounding)
     AMA = "AMA"  # Amarillo, TX — WMO 72363  (western proximity sounding)
     DDC = "DDC"  # Dodge City, KS — WMO 72451 (northern proximity sounding)
 

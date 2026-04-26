@@ -3,6 +3,7 @@ import type { SoundingData, CESData, ModelForecast } from '../types/api'
 interface Props {
   oun: SoundingData | null
   lmn: SoundingData | null
+  fwd: SoundingData | null
   ces: CESData | null
   model: ModelForecast | null
   hour: number | null
@@ -49,17 +50,19 @@ interface RowProps {
   label: string
   oun: number | null | undefined
   lmn: number | null | undefined
+  fwd: number | null | undefined
   decimals?: number
   colorFn?: (v: number | null) => string
 }
 
-function Row({ label, oun, lmn, decimals = 0, colorFn }: RowProps) {
+function Row({ label, oun, lmn, fwd, decimals = 0, colorFn }: RowProps) {
   const ounCls = colorFn ? colorFn(oun ?? null) : ''
   return (
     <tr>
       <td>{label}</td>
       <td className={`mono ${ounCls}`}>{fmt(oun, decimals)}</td>
       <td className="mono val-dim">{fmt(lmn, decimals)}</td>
+      <td className="mono val-dim">{fmt(fwd, decimals)}</td>
     </tr>
   )
 }
@@ -80,7 +83,7 @@ function sigBarColor(pct: number): string {
   return '#44aa44'
 }
 
-export function EnvironmentPanel({ oun, lmn, ces, model, hour }: Props) {
+export function EnvironmentPanel({ oun, lmn, fwd, ces, model, hour }: Props) {
   if (!oun) {
     return (
       <div className="panel env-panel">
@@ -99,7 +102,7 @@ export function EnvironmentPanel({ oun, lmn, ces, model, hour }: Props) {
       <div className="panel-header">
         <span className="panel-title">Environment</span>
         <span className="panel-subtitle">
-          OUN{lmn ? ' / LMN' : ''}{hour != null ? ` · ${hour.toString().padStart(2, '0')}Z` : ''}
+          FWD · OUN{lmn ? ' · LMN' : ''}{hour != null ? ` · ${hour.toString().padStart(2, '0')}Z` : ''}
         </span>
       </div>
 
@@ -108,22 +111,23 @@ export function EnvironmentPanel({ oun, lmn, ces, model, hour }: Props) {
           <thead>
             <tr>
               <th></th>
+              <th>FWD</th>
               <th>OUN</th>
               <th>{lmn ? 'LMN' : '—'}</th>
             </tr>
           </thead>
           <tbody>
-            <Row label="MLCAPE (J/kg)"   oun={oun.MLCAPE}          lmn={lmn?.MLCAPE}          colorFn={capeCls} />
-            <Row label="MLCIN  (J/kg)"   oun={oun.MLCIN}           lmn={lmn?.MLCIN}           colorFn={cinCls} />
-            <Row label="Cap    (°C)"     oun={oun.cap_strength}     lmn={lmn?.cap_strength}    decimals={1} />
-            <Row label="LCL    (m)"      oun={oun.LCL_height}       lmn={lmn?.LCL_height} />
-            <Row label="LFC    (m)"      oun={oun.LFC_height}       lmn={lmn?.LFC_height} />
-            <tr><td colSpan={3} style={{ padding: '2px 0' }} /></tr>
-            <Row label="SRH 0-1 (m²/s²)" oun={oun.SRH_0_1km}      lmn={lmn?.SRH_0_1km}      colorFn={srhCls} />
-            <Row label="SRH 0-3 (m²/s²)" oun={oun.SRH_0_3km}      lmn={lmn?.SRH_0_3km}      colorFn={srhCls} />
-            <Row label="Shear 0-6 (kt)"  oun={oun.BWD_0_6km}       lmn={lmn?.BWD_0_6km} />
-            <Row label="EHI"             oun={oun.EHI}              lmn={lmn?.EHI}             decimals={2} colorFn={ehiCls} />
-            <Row label="STP"             oun={oun.STP}              lmn={lmn?.STP}             decimals={2} />
+            <Row label="MLCAPE (J/kg)"    fwd={fwd?.MLCAPE}         oun={oun.MLCAPE}          lmn={lmn?.MLCAPE}          colorFn={capeCls} />
+            <Row label="MLCIN  (J/kg)"    fwd={fwd?.MLCIN}          oun={oun.MLCIN}           lmn={lmn?.MLCIN}           colorFn={cinCls} />
+            <Row label="Cap    (°C)"      fwd={fwd?.cap_strength}    oun={oun.cap_strength}    lmn={lmn?.cap_strength}    decimals={1} />
+            <Row label="LCL    (m)"       fwd={fwd?.LCL_height}      oun={oun.LCL_height}      lmn={lmn?.LCL_height} />
+            <Row label="LFC    (m)"       fwd={fwd?.LFC_height}      oun={oun.LFC_height}      lmn={lmn?.LFC_height} />
+            <tr><td colSpan={4} style={{ padding: '2px 0' }} /></tr>
+            <Row label="SRH 0-1 (m²/s²)" fwd={fwd?.SRH_0_1km}      oun={oun.SRH_0_1km}      lmn={lmn?.SRH_0_1km}      colorFn={srhCls} />
+            <Row label="SRH 0-3 (m²/s²)" fwd={fwd?.SRH_0_3km}      oun={oun.SRH_0_3km}      lmn={lmn?.SRH_0_3km}      colorFn={srhCls} />
+            <Row label="Shear 0-6 (kt)"   fwd={fwd?.BWD_0_6km}      oun={oun.BWD_0_6km}      lmn={lmn?.BWD_0_6km} />
+            <Row label="EHI"              fwd={fwd?.EHI}             oun={oun.EHI}             lmn={lmn?.EHI}             decimals={2} colorFn={ehiCls} />
+            <Row label="STP"              fwd={fwd?.STP}             oun={oun.STP}             lmn={lmn?.STP}             decimals={2} />
           </tbody>
         </table>
 
