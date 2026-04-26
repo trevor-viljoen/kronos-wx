@@ -65,7 +65,8 @@ export function Header({ state }: Props) {
       const now = new Date()
       const h = now.getUTCHours().toString().padStart(2, '0')
       const m = now.getUTCMinutes().toString().padStart(2, '0')
-      setClock(`${h}:${m}Z`)
+      const local = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+      setClock(`${h}:${m}Z / ${local}`)
     }
     tick()
     const id = setInterval(tick, 1000)
