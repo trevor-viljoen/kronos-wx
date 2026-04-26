@@ -1580,16 +1580,23 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
 
     # ── Fetch secondary station (LMN — northern OK, 36.7°N) ──────────────────
     # LMN covers the Grant/Kay/Garfield county corridor — the most common
-    # northern-OK initiation zone. Fetching it alongside OUN reveals N-S
-    # thermodynamic variation that a single-station view misses entirely.
-    lmn_indices   = None
+    # northern-OK initiation zone. FWD (Fort Worth) anchors the southern end
+    # of the interpolation corridor (~32.83°N). Together FWD→OUN→LMN give a
+    # three-station meridional gradient without requiring model data.
+    lmn_indices    = None
     lmn_kinematics = None
-    lmn_fetched   = False
+    lmn_fetched    = False
+    fwd_indices    = None
+    fwd_kinematics = None
     if stn == OklahomaSoundingStation.OUN:
-        with console.status("Fetching LMN (Lamont, northern OK) sounding..."):
+        with console.status("Fetching LMN (Lamont) + FWD (Fort Worth) soundings..."):
             with SoundingClient() as sc2:
                 lmn_profile = sc2.get_sounding(
                     OklahomaSoundingStation.LMN, today, fetched_hour
+                )
+            with SoundingClient() as sc3:
+                fwd_profile = sc3.get_sounding(
+                    OklahomaSoundingStation.FWD, today, fetched_hour
                 )
         if lmn_profile is not None:
             try:
@@ -1597,7 +1604,13 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
                 lmn_kinematics = compute_kinematic_profile(lmn_profile, lmn_indices)
                 lmn_fetched    = True
             except Exception:
-                pass  # LMN failure is non-fatal; proceed with OUN only
+                pass  # LMN failure is non-fatal
+        if fwd_profile is not None:
+            try:
+                fwd_indices    = compute_thermodynamic_indices(fwd_profile)
+                fwd_kinematics = compute_kinematic_profile(fwd_profile, fwd_indices)
+            except Exception:
+                pass  # FWD failure is non-fatal
 
     # ── Multi-station comparison table ────────────────────────────────────────
     def _fmt_val(val, fmt, color_fn=None):
@@ -1985,6 +1998,8 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
             lmn_kinematics=lmn_kinematics,
             dryline=_dryline_for_risk,
             min_tier="MARGINAL",
+            fwd_indices=fwd_indices,
+            fwd_kinematics=fwd_kinematics,
         )
 
     if not risk_zones:

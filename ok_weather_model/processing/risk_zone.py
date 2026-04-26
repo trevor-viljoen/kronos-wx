@@ -3,14 +3,20 @@ County-level severe weather risk zone computation.
 
 Approach
 --------
-We hold rawinsonde soundings at two Oklahoma stations:
-  OUN — Norman, OK     (35.22°N) — central Oklahoma reference
-  LMN — Lamont, OK     (36.69°N) — northern Oklahoma reference
+We hold rawinsonde soundings at three stations spanning the region:
+  FWD — Fort Worth, TX  (32.83°N) — southern anchor (TX panhandle border)
+  OUN — Norman, OK      (35.22°N) — central Oklahoma reference
+  LMN — Lamont, OK      (36.69°N) — northern Oklahoma reference
 
-For every Oklahoma county we linearly interpolate thermodynamic and
-kinematic parameters between the two soundings based on latitude.  South
-of OUN we use OUN values; north of LMN we use LMN values.  This gives a
-coarse but physically grounded N-S gradient without requiring model data.
+For every Oklahoma county we piecewise-linearly interpolate thermodynamic
+and kinematic parameters across the three stations based on latitude:
+  lat < FWD_LAT            → FWD values (southern extrapolation anchor)
+  FWD_LAT ≤ lat < OUN_LAT → FWD↔OUN segment
+  OUN_LAT ≤ lat < LMN_LAT → OUN↔LMN segment
+  lat ≥ LMN_LAT            → LMN values (northern extrapolation anchor)
+
+This gives a coarse but physically grounded meridional gradient across the
+FWD→OUN→LMN corridor without requiring model data.
 
 A dryline position (BoundaryObservation) optionally shifts county risk
 upward for counties within the initiation corridor: the 50-mile band
@@ -48,8 +54,9 @@ from ..models.enums import OklahomaCounty
 from ..models.boundary import BoundaryObservation
 
 # ── Station anchor latitudes ──────────────────────────────────────────────────
-_OUN_LAT: float = 35.22   # Norman, OK
-_LMN_LAT: float = 36.69   # Lamont, OK
+_FWD_LAT: float = 32.83   # Fort Worth, TX  (WMO 72249)
+_OUN_LAT: float = 35.22   # Norman, OK      (WMO 72357)
+_LMN_LAT: float = 36.69   # Lamont, OK      (WMO 74646)
 
 # ── Miles per degree (approximate, Oklahoma) ─────────────────────────────────
 _MILES_PER_DEG_LAT: float = 69.0
@@ -133,27 +140,60 @@ def _lerp(a: float, b: float, t: float) -> float:
 
 def _interpolate_at_lat(
     lat: float,
+    fwd_val: Optional[float],
     oun_val: Optional[float],
     lmn_val: Optional[float],
 ) -> Optional[float]:
     """
-    Return the latitude-interpolated value between OUN and LMN.
-    Returns None if both anchor values are missing or NaN.
-    Falls back to the available value if only one anchor is present.
+    Piecewise-linear interpolation across the FWD → OUN → LMN corridor.
+
+    Segment selection by latitude:
+      lat < FWD_LAT            → FWD anchor (clamped south)
+      FWD_LAT ≤ lat < OUN_LAT → FWD↔OUN segment
+      OUN_LAT ≤ lat < LMN_LAT → OUN↔LMN segment
+      lat ≥ LMN_LAT            → LMN anchor (clamped north)
+
+    Falls back gracefully: if a segment endpoint is missing the next
+    available anchor is used, degrading to the two-station case.
+    Returns None only if all three values are absent/NaN.
     """
     import math as _math
     def _bad(v):
         return v is None or (isinstance(v, float) and _math.isnan(v))
 
-    if _bad(oun_val) and _bad(lmn_val):
-        return None
-    if _bad(oun_val):
-        return lmn_val
-    if _bad(lmn_val):
-        return oun_val
+    # Collect available stations as (lat, value) pairs
+    anchors: list[tuple[float, float]] = []
+    if not _bad(fwd_val):
+        anchors.append((_FWD_LAT, fwd_val))   # type: ignore[arg-type]
+    if not _bad(oun_val):
+        anchors.append((_OUN_LAT, oun_val))   # type: ignore[arg-type]
+    if not _bad(lmn_val):
+        anchors.append((_LMN_LAT, lmn_val))   # type: ignore[arg-type]
 
-    t = (lat - _OUN_LAT) / (_LMN_LAT - _OUN_LAT)
-    return _lerp(oun_val, lmn_val, t)
+    if not anchors:
+        return None
+    if len(anchors) == 1:
+        return anchors[0][1]
+
+    # Sort by latitude (should already be sorted, but be safe)
+    anchors.sort(key=lambda x: x[0])
+
+    # Clamp outside the covered range
+    if lat <= anchors[0][0]:
+        return anchors[0][1]
+    if lat >= anchors[-1][0]:
+        return anchors[-1][1]
+
+    # Find the enclosing segment
+    for i in range(len(anchors) - 1):
+        lat_lo, val_lo = anchors[i]
+        lat_hi, val_hi = anchors[i + 1]
+        if lat_lo <= lat <= lat_hi:
+            t = (lat - lat_lo) / (lat_hi - lat_lo)
+            return _lerp(val_lo, val_hi, t)
+
+    # Fallback (should not reach)
+    return anchors[-1][1]
 
 
 def _dryline_distance_miles(county: OklahomaCounty, dryline: BoundaryObservation) -> Optional[float]:
@@ -235,25 +275,37 @@ def _score_environment(env: CountyEnvironment) -> str:
 def build_county_environments(
     oun_indices,
     oun_kinematics,
-    lmn_indices,
-    lmn_kinematics,
+    lmn_indices=None,
+    lmn_kinematics=None,
     dryline: Optional[BoundaryObservation] = None,
+    fwd_indices=None,
+    fwd_kinematics=None,
 ) -> list[CountyEnvironment]:
     """
-    Build a CountyEnvironment for every Oklahoma county by interpolating
-    between OUN and LMN sounding parameters.
+    Build a CountyEnvironment for every Oklahoma county by piecewise-
+    interpolating across the FWD → OUN → LMN sounding corridor.
 
     Parameters
     ----------
-    oun_indices    : ThermodynamicIndices from OUN 12Z sounding
-    oun_kinematics : KinematicProfile from OUN 12Z sounding (may be None)
-    lmn_indices    : ThermodynamicIndices from LMN 12Z sounding (may be None)
-    lmn_kinematics : KinematicProfile from LMN 12Z sounding (may be None)
+    oun_indices    : ThermodynamicIndices from OUN sounding (required)
+    oun_kinematics : KinematicProfile from OUN sounding (may be None)
+    lmn_indices    : ThermodynamicIndices from LMN sounding (may be None)
+    lmn_kinematics : KinematicProfile from LMN sounding (may be None)
     dryline        : detected BoundaryObservation (may be None)
+    fwd_indices    : ThermodynamicIndices from FWD sounding (may be None)
+    fwd_kinematics : KinematicProfile from FWD sounding (may be None)
     """
     # Extract scalar values; None when a station is unavailable
     def _ti(obj, attr):
         return getattr(obj, attr, None) if obj is not None else None
+
+    fwd_cape  = _ti(fwd_indices, "MLCAPE")
+    fwd_cin   = _ti(fwd_indices, "MLCIN")
+    fwd_cap   = _ti(fwd_indices, "cap_strength")
+    fwd_srh1  = _ti(fwd_kinematics, "SRH_0_1km")
+    fwd_srh3  = _ti(fwd_kinematics, "SRH_0_3km")
+    fwd_bwd6  = _ti(fwd_kinematics, "BWD_0_6km")
+    fwd_ehi   = _ti(fwd_kinematics, "EHI") or 0.0
 
     oun_cape  = _ti(oun_indices, "MLCAPE")
     oun_cin   = _ti(oun_indices, "MLCIN")
@@ -276,13 +328,13 @@ def build_county_environments(
     for county in OklahomaCounty:
         lat = county.lat
 
-        cape  = _interpolate_at_lat(lat, oun_cape,  lmn_cape)  or 0.0
-        cin   = _interpolate_at_lat(lat, oun_cin,   lmn_cin)   or 0.0
-        cap   = _interpolate_at_lat(lat, oun_cap,   lmn_cap)   or 0.0
-        srh1  = _interpolate_at_lat(lat, oun_srh1,  lmn_srh1)  or 0.0
-        srh3  = _interpolate_at_lat(lat, oun_srh3,  lmn_srh3)  or 0.0
-        bwd6  = _interpolate_at_lat(lat, oun_bwd6,  lmn_bwd6)  or 0.0
-        ehi   = _interpolate_at_lat(lat, oun_ehi,   lmn_ehi)   or 0.0
+        cape  = _interpolate_at_lat(lat, fwd_cape,  oun_cape,  lmn_cape)  or 0.0
+        cin   = _interpolate_at_lat(lat, fwd_cin,   oun_cin,   lmn_cin)   or 0.0
+        cap   = _interpolate_at_lat(lat, fwd_cap,   oun_cap,   lmn_cap)   or 0.0
+        srh1  = _interpolate_at_lat(lat, fwd_srh1,  oun_srh1,  lmn_srh1)  or 0.0
+        srh3  = _interpolate_at_lat(lat, fwd_srh3,  oun_srh3,  lmn_srh3)  or 0.0
+        bwd6  = _interpolate_at_lat(lat, fwd_bwd6,  oun_bwd6,  lmn_bwd6)  or 0.0
+        ehi   = _interpolate_at_lat(lat, fwd_ehi,   oun_ehi,   lmn_ehi)   or 0.0
 
         # Dryline proximity: county is "near dryline" if within ±50 miles E-W
         near_dl = False
@@ -313,6 +365,8 @@ def compute_risk_zones(
     lmn_kinematics=None,
     dryline: Optional[BoundaryObservation] = None,
     min_tier: str = "MARGINAL",
+    fwd_indices=None,
+    fwd_kinematics=None,
 ) -> list[RiskZone]:
     """
     Compute county-level risk zones for Oklahoma.
@@ -322,14 +376,19 @@ def compute_risk_zones(
 
     Parameters
     ----------
-    min_tier : Minimum tier to include ("LOW", "MARGINAL", "MODERATE",
-               "DANGEROUS_CAPPED", "HIGH", "EXTREME"). Default "MARGINAL"
-               suppresses low-noise counties.
+    min_tier       : Minimum tier to include ("LOW", "MARGINAL", "MODERATE",
+                     "DANGEROUS_CAPPED", "HIGH", "EXTREME"). Default "MARGINAL"
+                     suppresses low-noise counties.
+    fwd_indices    : ThermodynamicIndices from FWD sounding — extends the
+                     interpolation corridor southward to 32.83°N (may be None)
+    fwd_kinematics : KinematicProfile from FWD sounding (may be None)
     """
     environments = build_county_environments(
         oun_indices, oun_kinematics,
         lmn_indices, lmn_kinematics,
         dryline,
+        fwd_indices=fwd_indices,
+        fwd_kinematics=fwd_kinematics,
     )
 
     min_rank = _TIER_RANK.get(min_tier, 1)
