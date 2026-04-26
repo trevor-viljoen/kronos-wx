@@ -26,9 +26,10 @@ function HeaderTicker({ state }: { state: DashboardState | null }) {
     const mds    = state?.spc?.mds    ?? []
     const out: { text: string; color: string }[] = []
     for (const a of alerts) {
-      const color = TICKER_COLOR[a.event] ?? 'var(--color-text-dim)'
-      const num   = a.watch_number ? ` #${a.watch_number}` : ''
-      out.push({ text: `${a.event.toUpperCase()}${num}  ${abbrev(a.area_desc)}`, color })
+      const color   = TICKER_COLOR[a.event] ?? 'var(--color-text-dim)'
+      const num     = a.watch_number ? ` #${a.watch_number}` : ''
+      const expires = a.expires_label ? `  exp ${a.expires_label}` : ''
+      out.push({ text: `${a.event.toUpperCase()}${num}  ${abbrev(a.area_desc)}${expires}`, color })
     }
     for (const md of mds) {
       const prob = md.prob_watch != null ? `  ${md.prob_watch}% WATCH` : ''
