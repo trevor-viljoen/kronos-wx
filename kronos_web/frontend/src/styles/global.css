@@ -555,8 +555,43 @@ html, body, #root {
   flex-shrink: 0;
 }
 
-.tend-panel { max-height: 260px; }
-.feed-panel { max-height: 100px; }
+.tend-panel  { max-height: 260px; }
+.feed-panel  { max-height: 100px; }
+.anal-panel  { max-height: 220px; }
+
+.anal-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.anal-table th {
+  padding: 4px 8px;
+  text-align: left;
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--color-text-dim);
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+.anal-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  white-space: nowrap;
+}
+.anal-table tbody tr:hover { background: rgba(255,255,255,0.03); }
+
+.anal-link {
+  color: var(--color-text);
+  text-decoration: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border-bottom: 1px solid rgba(255,255,255,0.2);
+}
+.anal-link:hover {
+  color: var(--color-accent);
+  border-bottom-color: var(--color-accent);
+}
 
 /* ── Map legend ──────────────────────────────────────────────────────────── */
 .map-legend {

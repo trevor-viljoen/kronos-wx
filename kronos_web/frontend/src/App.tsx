@@ -8,6 +8,7 @@ import { SPCPanel }          from './components/SPCPanel'
 import { TendencyTable }     from './components/TendencyTable'
 import { AlertFeed }         from './components/AlertFeed'
 import { CountyDrawer }      from './components/CountyDrawer'
+import { AnaloguePanel }     from './components/AnaloguePanel'
 
 export default function App() {
   const state = useSSE<DashboardState>('/api/stream')
@@ -58,6 +59,7 @@ export default function App() {
           {/* Bottom rows */}
           <div className="bottom-row">
             <TendencyTable rows={state.tendency} hrrrValid={state.hrrr_valid} />
+            <AnaloguePanel analogues={state.analogues ?? []} />
             <AlertFeed entries={state.alert_log} />
           </div>
         </div>

@@ -154,6 +154,22 @@ export interface AlertLogEntry {
   msg: string
 }
 
+export interface AnalogueEntry {
+  case_id: string
+  date: string
+  event_class: string | null
+  tornado_count: number
+  cap_behavior: string | null
+  distance: number
+  MLCAPE: number | null
+  MLCIN: number | null
+  cap_strength: number | null
+  SRH_0_1km: number | null
+  EHI: number | null
+  tc_gap_12Z: number | null
+  spc_url: string
+}
+
 export interface StationObs {
   station_id: string
   county: string
@@ -186,4 +202,5 @@ export interface DashboardState {
   mesonet_obs: StationObs[]
   model_forecast: ModelForecast | null
   alert_log: AlertLogEntry[]
+  analogues: AnalogueEntry[]
 }

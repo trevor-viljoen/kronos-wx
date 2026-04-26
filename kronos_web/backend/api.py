@@ -58,6 +58,7 @@ from ok_weather_model.processing import (
 from ok_weather_model.processing.cap_calculator import compute_ces_from_sounding
 from ok_weather_model.processing.dryline_detector import detect_dryline
 from ok_weather_model.processing.risk_zone import compute_risk_zones_from_hrrr, _TIER_RANK
+from ok_weather_model.storage.database import Database
 
 logger = logging.getLogger("kronos_web.api")
 logging.basicConfig(level=logging.INFO)
@@ -85,6 +86,7 @@ _state: dict[str, Any] = {
     "mesonet_obs":     [],      # list[dict] — current Mesonet station observations
     "model_forecast":  None,
     "alert_log":       [],
+    "analogues":       [],      # list[dict] — top N historical analogues
 }
 
 _hrrr_base: Any = None          # first HRRR snapshot (baseline for tendency)
@@ -479,6 +481,83 @@ def _compute_tendency(snap, tier_map: dict) -> list[dict]:
     return rows
 
 
+# ── Analogue helpers ──────────────────────────────────────────────────────────
+
+def _analogue_feature_vector(indices, kinematics, tc_gap_12z) -> list[float] | None:
+    """Weighted cap-mode feature vector for analogue distance scoring."""
+    if indices is None:
+        return None
+
+    def _norm(v, lo, hi):
+        return max(0.0, min(1.0, (v - lo) / (hi - lo)))
+
+    mlcin  = _norm(indices.MLCIN,              0,   350)
+    cap    = _norm(indices.cap_strength,       0,   7.0)
+    cape   = _norm(indices.MLCAPE,             0,  5000)
+    lapse  = _norm(indices.lapse_rate_700_500, 5.0, 10.0)
+    tc_gap = _norm(tc_gap_12z if tc_gap_12z is not None else 20, -15, 70)
+
+    weights = [0.30, 0.28, 0.20, 0.12, 0.10]
+    raw     = [mlcin, cap, tc_gap, cape, lapse]
+    return [w * v for w, v in zip(weights, raw)]
+
+
+def _analogue_distance(a: list[float], b: list[float]) -> float:
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def _compute_analogues(indices, kinematics, tc_gap_12z, n: int = 5) -> list[dict]:
+    """Return top-N serialized historical analogues for the given sounding."""
+    target = _analogue_feature_vector(indices, kinematics, tc_gap_12z)
+    if target is None:
+        return []
+
+    try:
+        from datetime import date as _date
+        db = Database()
+        all_cases = db.query_parameter_space({
+            "start_date": "1994-01-01",
+            "end_date":   "2024-12-31",
+        })
+    except Exception as exc:
+        logger.debug("Analogue DB query failed: %s", exc)
+        return []
+
+    scored: list[tuple[float, Any]] = []
+    for c in all_cases:
+        if c.sounding_12Z is None:
+            continue
+        vec = _analogue_feature_vector(c.sounding_12Z, c.kinematics_12Z, c.convective_temp_gap_12Z)
+        if vec is None:
+            continue
+        scored.append((_analogue_distance(target, vec), c))
+
+    scored.sort(key=lambda x: x[0])
+
+    results = []
+    for dist, c in scored[:n]:
+        date_str = c.case_id[:8]  # "YYYYMMDD"
+        idx = c.sounding_12Z
+        kin = c.kinematics_12Z
+        results.append({
+            "case_id":       c.case_id,
+            "date":          str(c.date),
+            "event_class":   c.event_class.value if c.event_class else None,
+            "tornado_count": c.tornado_count,
+            "cap_behavior":  c.cap_behavior.value if c.cap_behavior else None,
+            "distance":      round(dist, 4),
+            "MLCAPE":        round(idx.MLCAPE, 0) if idx else None,
+            "MLCIN":         round(idx.MLCIN, 0) if idx else None,
+            "cap_strength":  round(idx.cap_strength, 1) if idx else None,
+            "SRH_0_1km":     round(kin.SRH_0_1km, 0) if kin else None,
+            "EHI":           round(kin.EHI, 2) if kin and kin.EHI is not None else None,
+            "tc_gap_12Z":    round(c.convective_temp_gap_12Z, 1) if c.convective_temp_gap_12Z is not None else None,
+            "spc_url":       f"https://www.spc.noaa.gov/exper/archive/event.php?date={date_str}",
+        })
+
+    return results
+
+
 async def _task_environment() -> None:
     while True:
         try:
@@ -609,13 +688,18 @@ async def _task_environment() -> None:
                 "fetched_hour": fetched_hour,
             }
 
+            # Historical analogues (uses 12Z Tc gap from CES if available)
+            tc_gap = ces_data.get("tc_gap_12Z") if ces_data else None
+            analogues = await asyncio.to_thread(_compute_analogues, idx, kin, tc_gap)
+
             async with _lock:
                 _state["environment"]   = env_data
                 _state["ces"]           = ces_data
                 _state["model_forecast"]= model_pred
+                _state["analogues"]     = analogues
 
             await _broadcast()
-            logger.info("Environment updated: %s %02dZ", today, fetched_hour)
+            logger.info("Environment updated: %s %02dZ — %d analogues", today, fetched_hour, len(analogues))
 
         except Exception as exc:
             logger.error("Environment task error: %s", exc, exc_info=True)
