@@ -120,6 +120,44 @@ export function CountyDrawer({ countyName, countyData: pt, tier, onClose }: Prop
                   <DataCell label="LCL" value={pt.LCL_height_m} unit="m" />
                   <DataCell label="Lapse" value={pt.lapse_rate} unit="°C/km" />
                 </div>
+
+                <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em',
+                  textTransform: 'uppercase', color: 'var(--color-text-dim)', margin: '12px 0 4px' }}>
+                  Initiation
+                </div>
+                {/* cap_break_prob banner */}
+                {pt.cap_break_prob != null && (
+                  <div style={{
+                    background: pt.cap_break_prob >= 0.65 ? 'rgba(255,34,34,0.15)'
+                              : pt.cap_break_prob >= 0.45 ? 'rgba(255,165,0,0.15)'
+                              : 'rgba(255,255,255,0.05)',
+                    border: `1px solid ${pt.cap_break_prob >= 0.65 ? '#ff2222' : pt.cap_break_prob >= 0.45 ? '#ffa500' : '#444'}`,
+                    borderRadius: 4, padding: '6px 8px', marginBottom: 8,
+                    display: 'flex', alignItems: 'center', gap: 8,
+                  }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 10, color: 'var(--color-text-dim)' }}>Cap-Break Probability</div>
+                      <div style={{ fontSize: 20, fontWeight: 700, fontFamily: 'monospace',
+                        color: pt.cap_break_prob >= 0.65 ? '#ff4444'
+                             : pt.cap_break_prob >= 0.45 ? '#ffa500' : 'var(--color-text)' }}>
+                        {(pt.cap_break_prob * 100).toFixed(0)}%
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'flex-end' }}>
+                      {pt.in_watch && (
+                        <span style={{ fontSize: 9, background: '#33cc66', color: '#000',
+                          borderRadius: 2, padding: '1px 4px', fontWeight: 700 }}>WATCH</span>
+                      )}
+                      {pt.alarm_bell && (
+                        <span style={{ fontSize: 9, background: '#ff4444', color: '#fff',
+                          borderRadius: 2, padding: '1px 4px', fontWeight: 700 }}>⚡ ALARM</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+                <div className="data-grid">
+                  <DataCell label="Convergence" value={pt.convergence_score != null ? +(pt.convergence_score * 100).toFixed(0) : null} unit="%" />
+                </div>
               </>
             ) : (
               <div className="connecting">

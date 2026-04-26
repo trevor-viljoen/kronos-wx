@@ -83,6 +83,7 @@ _state: dict[str, Any] = {
     "dryline_surge":   None,
     "boundaries":      [],      # list[dict] — all active boundaries (WPC + outflow + dryline)
     "boundary_interactions": [], # list[dict] — alarm-bell intersections
+    "initiation_candidates": [], # list[str] — county names with high cap_break_prob in watch+boundary
     "tendency":        [],
     "spc":             {"outlook": None, "alerts": [], "mds": []},
     "alert_geojson":   None,    # raw NWS FeatureCollection (polygon geometry)
@@ -101,6 +102,7 @@ _hrrr_now:  Any = None          # most recent HRRR snapshot
 _dryline_obj: Any = None        # BoundaryObservation for risk zone boost (legacy)
 _boundaries_list: list = []     # all active BoundaryObservation objects
 _alarm_counties: set  = set()   # OklahomaCounty members with alarm_bell flag
+_watch_counties: set  = set()   # OklahomaCounty members inside an active watch
 
 _prev_tier_map: dict = {}       # for tier change diffing
 _prev_md_set:   set  = set()
@@ -262,23 +264,29 @@ def _ser_zone(zone) -> dict:
     }
 
 
-def _ser_county_pt(pt) -> dict:
+def _ser_county_pt(pt, env_map: dict | None = None) -> dict:
+    env = env_map.get(pt.county.name) if env_map else None
     return {
-        "county":         pt.county.name,
-        "lat":            pt.county.lat,
-        "lon":            pt.county.lon,
-        "MLCAPE":         pt.MLCAPE,
-        "MLCIN":          pt.MLCIN,
-        "SBCAPE":         pt.SBCAPE,
-        "SBCIN":          pt.SBCIN,
-        "SRH_0_1km":      pt.SRH_0_1km,
-        "SRH_0_3km":      pt.SRH_0_3km,
-        "BWD_0_6km":      pt.BWD_0_6km,
-        "lapse_rate":     pt.lapse_rate_700_500,
-        "dewpoint_2m_F":  pt.dewpoint_2m_F,
-        "LCL_height_m":   pt.LCL_height_m,
-        "EHI":            pt.EHI,
-        "STP":            pt.STP,
+        "county":             pt.county.name,
+        "lat":                pt.county.lat,
+        "lon":                pt.county.lon,
+        "MLCAPE":             pt.MLCAPE,
+        "MLCIN":              pt.MLCIN,
+        "SBCAPE":             pt.SBCAPE,
+        "SBCIN":              pt.SBCIN,
+        "SRH_0_1km":          pt.SRH_0_1km,
+        "SRH_0_3km":          pt.SRH_0_3km,
+        "BWD_0_6km":          pt.BWD_0_6km,
+        "lapse_rate":         pt.lapse_rate_700_500,
+        "dewpoint_2m_F":      pt.dewpoint_2m_F,
+        "LCL_height_m":       pt.LCL_height_m,
+        "EHI":                pt.EHI,
+        "STP":                pt.STP,
+        # Derived initiation fields
+        "cap_break_prob":     round(env.cap_break_prob, 3) if env else None,
+        "convergence_score":  round(env.convergence_score, 3) if env else None,
+        "in_watch":           env.in_watch if env else False,
+        "alarm_bell":         env.alarm_bell if env else False,
     }
 
 
@@ -318,6 +326,26 @@ def _ser_dryline(dl, surge) -> Optional[dict]:
         "counties":           [c.name for c in (dl.counties_intersected or [])],
         "motion_speed":       dl.motion_speed,
     }
+
+
+def _parse_watch_counties_ok(area_desc: str) -> set:
+    """
+    Extract OklahomaCounty members from an NWS watch area_desc string.
+    Mirrors the parseWatchCounties() logic in the frontend.
+    """
+    import re as _re
+    result: set = set()
+    for part in area_desc.replace(";", ",").split(","):
+        name = part.strip()
+        name = _re.sub(r'\bCounty\b', '', name, flags=_re.IGNORECASE).strip()
+        name = _re.sub(r'\b[A-Z]{2}\s*$', '', name).strip().upper()
+        if not name:
+            continue
+        try:
+            result.add(OklahomaCounty[name])
+        except KeyError:
+            pass
+    return result
 
 
 def _ser_boundary(b) -> dict:
@@ -428,18 +456,19 @@ async def _task_hrrr() -> None:
                     _hrrr_base = snap
                 _hrrr_now = snap
 
-            # Compute risk zones with all active boundaries + alarm counties
-            zones = await asyncio.to_thread(
+            # Compute risk zones with all active boundaries + alarm + watch counties
+            zones, env_map = await asyncio.to_thread(
                 compute_risk_zones_from_hrrr,
                 snap,
                 _dryline_obj,
                 "MARGINAL",
                 _boundaries_list,
                 _alarm_counties,
+                _watch_counties,
             )
 
-            # Build county list
-            county_pts = [_ser_county_pt(pt) for pt in snap.counties]
+            # Build county list; merge in derived env fields (cap_break_prob etc.)
+            county_pts = [_ser_county_pt(pt, env_map) for pt in snap.counties]
 
             # Build tier map and detect changes
             new_tier_map: dict = {}
@@ -466,12 +495,27 @@ async def _task_hrrr() -> None:
             vt = getattr(snap, "valid_time", None)
             ts = vt.strftime("%H:%MZ") if vt else None
 
+            # Initiation candidates: in_watch + convergence_score > 0 + cap_break_prob >= 0.45
+            initiation_candidates = sorted(
+                [
+                    cname for cname, env in env_map.items()
+                    if env.in_watch and env.convergence_score > 0 and env.cap_break_prob >= 0.45
+                ],
+                key=lambda c: -env_map[c].cap_break_prob,
+            )
+            if initiation_candidates:
+                prob_str = ", ".join(
+                    f"{c} ({env_map[c].cap_break_prob:.0%})" for c in initiation_candidates[:5]
+                )
+                logger.info("Initiation candidates: %s", prob_str)
+
             async with _lock:
-                _state["hrrr_valid"]    = ts
-                _state["risk_zones"]    = [_ser_zone(z) for z in zones]
-                _state["hrrr_counties"] = county_pts
-                _state["tier_map"]      = new_tier_map
-                _state["tendency"]      = tend
+                _state["hrrr_valid"]             = ts
+                _state["risk_zones"]             = [_ser_zone(z) for z in zones]
+                _state["hrrr_counties"]          = county_pts
+                _state["tier_map"]               = new_tier_map
+                _state["tendency"]               = tend
+                _state["initiation_candidates"]  = initiation_candidates
 
             await _broadcast()
             logger.info("HRRR updated: %s, %d zones", ts, len(zones))
@@ -994,6 +1038,15 @@ async def _task_spc() -> None:
 
             _prev_alert_set = new_alert_set
             _prev_md_set    = new_md_set
+
+            # Build watch-county set from active tornado / SVR watches
+            new_watch_counties: set = set()
+            for a in alerts:
+                if a.event in ("Tornado Watch", "Severe Thunderstorm Watch"):
+                    new_watch_counties |= _parse_watch_counties_ok(a.area_desc)
+            async with _lock:
+                _watch_counties.clear()
+                _watch_counties.update(new_watch_counties)
 
             async with _lock:
                 _state["spc"] = {

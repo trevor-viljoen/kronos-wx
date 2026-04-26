@@ -98,6 +98,7 @@ class CountyEnvironment:
     near_dryline:      bool  = False  # within 50 mi of dryline (legacy compat)
     convergence_score: float = 0.0   # [0, 1] boundary-forcing strength
     alarm_bell:        bool  = False  # two boundaries intersect in favorable thermo
+    in_watch:          bool  = False  # county inside active Tornado or SVR watch
     cap_break_prob:    float = 0.0   # [0, 1] physics-derived initiation probability
 
 
@@ -293,6 +294,12 @@ def _cap_break_prob(env: CountyEnvironment) -> float:
         + 0.20 * srh_score
         + 0.15 * conv_score
     )
+
+    # Watch + boundary: SPC has already judged the environment favorable AND
+    # there is mechanical lift present — highest-confidence initiation signal.
+    if env.in_watch and env.convergence_score > 0:
+        raw += 0.15
+
     return round(min(1.0, raw), 3)
 
 
@@ -351,6 +358,10 @@ def _score_environment(env: CountyEnvironment) -> str:
     effective_cin = env.MLCIN * max(0.3, 1.0 - 0.5 * env.convergence_score)
     if env.alarm_bell:
         effective_cin = min(effective_cin, 50.0)
+    # Watch + boundary: SPC has judged the environment favorable AND mechanical
+    # lift is present — treat CIN as 15% more eroded.
+    if env.in_watch and env.convergence_score > 0:
+        effective_cin *= 0.85
 
     cin = effective_cin  # use effective CIN throughout scoring below
 
@@ -397,6 +408,7 @@ def build_county_environments(
     fwd_kinematics=None,
     boundaries: Optional[list[BoundaryObservation]] = None,
     alarm_counties: Optional[set] = None,
+    watch_counties: Optional[set] = None,
 ) -> list[CountyEnvironment]:
     """
     Build a CountyEnvironment for every Oklahoma county by piecewise-
@@ -413,6 +425,7 @@ def build_county_environments(
     fwd_kinematics : KinematicProfile from FWD sounding (may be None)
     boundaries     : all active BoundaryObservation objects (new multi-boundary path)
     alarm_counties : set of OklahomaCounty members with alarm_bell from interactions
+    watch_counties : set of OklahomaCounty members inside an active watch box
     """
     # Extract scalar values; None when a station is unavailable
     def _ti(obj, attr):
@@ -468,7 +481,8 @@ def build_county_environments(
             all_boundaries.append(dryline)
 
         conv_score = _compute_convergence_score(county, all_boundaries)
-        alarm = alarm_counties is not None and county in alarm_counties
+        alarm    = alarm_counties  is not None and county in alarm_counties
+        in_watch = watch_counties  is not None and county in watch_counties
 
         env = CountyEnvironment(
             county=county,
@@ -482,6 +496,7 @@ def build_county_environments(
             near_dryline=near_dl,
             convergence_score=conv_score,
             alarm_bell=alarm,
+            in_watch=in_watch,
         )
         env.cap_break_prob = _cap_break_prob(env)
         environments.append(env)
@@ -500,6 +515,7 @@ def compute_risk_zones(
     fwd_kinematics=None,
     boundaries: Optional[list[BoundaryObservation]] = None,
     alarm_counties: Optional[set] = None,
+    watch_counties: Optional[set] = None,
 ) -> list[RiskZone]:
     """
     Compute county-level risk zones for Oklahoma.
@@ -517,6 +533,7 @@ def compute_risk_zones(
     fwd_kinematics : KinematicProfile from FWD sounding (may be None)
     boundaries     : all active BoundaryObservation objects for convergence scoring
     alarm_counties : set of OklahomaCounty members with alarm_bell from interactions
+    watch_counties : set of OklahomaCounty members inside an active watch box
     """
     environments = build_county_environments(
         oun_indices, oun_kinematics,
@@ -526,6 +543,7 @@ def compute_risk_zones(
         fwd_kinematics=fwd_kinematics,
         boundaries=boundaries,
         alarm_counties=alarm_counties,
+        watch_counties=watch_counties,
     )
 
     min_rank = _TIER_RANK.get(min_tier, 1)
@@ -579,7 +597,8 @@ def compute_risk_zones_from_hrrr(
     min_tier: str = "MARGINAL",
     boundaries: Optional[list[BoundaryObservation]] = None,
     alarm_counties: Optional[set] = None,
-) -> list[RiskZone]:
+    watch_counties: Optional[set] = None,
+) -> tuple[list[RiskZone], dict[str, "CountyEnvironment"]]:
     """
     Compute county risk zones using HRRR per-county data directly.
 
@@ -594,9 +613,10 @@ def compute_risk_zones_from_hrrr(
     min_tier       : Minimum tier to include (default "MARGINAL")
     boundaries     : all active BoundaryObservation objects for convergence scoring
     alarm_counties : set of OklahomaCounty members with alarm_bell flag
+    watch_counties : set of OklahomaCounty members inside an active watch box
     """
     if hrrr_snapshot is None:
-        return []
+        return [], {}
 
     min_rank = _TIER_RANK.get(min_tier, 1)
 
@@ -605,6 +625,7 @@ def compute_risk_zones_from_hrrr(
     if dryline is not None and dryline not in all_boundaries:
         all_boundaries.append(dryline)
 
+    all_envs: dict[str, CountyEnvironment] = {}  # county name → env (all 77)
     scored: dict[str, list[CountyEnvironment]] = {}
 
     for pt in hrrr_snapshot.counties:
@@ -618,7 +639,8 @@ def compute_risk_zones_from_hrrr(
                 near_dl = True
 
         conv_score = _compute_convergence_score(county, all_boundaries)
-        alarm = alarm_counties is not None and county in alarm_counties
+        alarm    = alarm_counties  is not None and county in alarm_counties
+        in_watch = watch_counties  is not None and county in watch_counties
 
         env = CountyEnvironment(
             county=county,
@@ -632,8 +654,10 @@ def compute_risk_zones_from_hrrr(
             near_dryline=near_dl,
             convergence_score=conv_score,
             alarm_bell=alarm,
+            in_watch=in_watch,
         )
         env.cap_break_prob = _cap_break_prob(env)
+        all_envs[county.name] = env
 
         tier = _score_environment(env)
         if _TIER_RANK.get(tier, 0) >= min_rank:
@@ -671,4 +695,4 @@ def compute_risk_zones_from_hrrr(
         ))
 
     zones.sort(key=lambda z: z.tier_rank, reverse=True)
-    return zones
+    return zones, all_envs

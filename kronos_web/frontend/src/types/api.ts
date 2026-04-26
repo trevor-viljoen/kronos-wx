@@ -42,6 +42,10 @@ export interface CountyPoint {
   LCL_height_m: number | null
   EHI: number | null
   STP: number | null
+  cap_break_prob: number | null
+  convergence_score: number | null
+  in_watch: boolean
+  alarm_bell: boolean
 }
 
 export interface SoundingData {
@@ -230,4 +234,5 @@ export interface DashboardState {
   model_forecast: ModelForecast | null
   alert_log: AlertLogEntry[]
   analogues: AnalogueEntry[]
+  initiation_candidates: string[]
 }
