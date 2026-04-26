@@ -937,9 +937,12 @@ export function RiskMap({ state, onCountyClick }: Props) {
           />
         )}
 
-        {/* Multi-boundary layer: WPC fronts, outflow, dryline + alarm bell markers */}
+        {/* Multi-boundary layer: WPC fronts + outflow (dryline excluded — owned by Dryline toggle) */}
         {overlays.boundaries && (
-          <BoundaryLayer boundaries={boundaries} interactions={interactions} />
+          <BoundaryLayer
+            boundaries={boundaries.filter(b => b.boundary_type !== 'DRYLINE')}
+            interactions={interactions}
+          />
         )}
       </MapContainer>
 
