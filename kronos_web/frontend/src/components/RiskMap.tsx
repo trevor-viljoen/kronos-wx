@@ -77,6 +77,42 @@ function FitBounds() {
   return null
 }
 
+// ── Inject SVG defs (CIG hatch patterns) into Leaflet's overlay SVG ──────────
+// CIG1 = sparse (12px), CIG2 = medium (8px), CIG3 = dense (5px)
+// SIGN is the legacy label — same density as CIG1
+function SvgDefs() {
+  const map = useMap()
+  useEffect(() => {
+    const inject = () => {
+      const svg = map.getPanes().overlayPane?.querySelector<SVGElement>('svg')
+      if (!svg || svg.querySelector('#cig-hatch-1')) return
+      const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs')
+      defs.innerHTML = `
+        <pattern id="cig-hatch-1" x="0" y="0" width="12" height="12" patternUnits="userSpaceOnUse">
+          <line x1="0" y1="12" x2="12" y2="0" stroke="#000" stroke-width="2" stroke-opacity="0.50"/>
+        </pattern>
+        <pattern id="cig-hatch-2" x="0" y="0" width="8" height="8" patternUnits="userSpaceOnUse">
+          <line x1="0" y1="8" x2="8" y2="0" stroke="#000" stroke-width="2" stroke-opacity="0.55"/>
+        </pattern>
+        <pattern id="cig-hatch-3" x="0" y="0" width="5" height="5" patternUnits="userSpaceOnUse">
+          <line x1="0" y1="5" x2="5" y2="0" stroke="#000" stroke-width="2" stroke-opacity="0.60"/>
+        </pattern>`
+      svg.insertBefore(defs, svg.firstChild)
+    }
+    inject()
+    map.on('zoomend', inject)
+    return () => { map.off('zoomend', inject) }
+  }, [map])
+  return null
+}
+
+const CIG_PATTERN: Record<string, string> = {
+  CIG1: 'url(#cig-hatch-1)',
+  CIG2: 'url(#cig-hatch-2)',
+  CIG3: 'url(#cig-hatch-3)',
+  SIGN: 'url(#cig-hatch-1)',  // legacy label
+}
+
 // ── County GeoJSON layer ──────────────────────────────────────────────────────
 interface CountyLayerProps {
   geojson: GeoJSON.FeatureCollection
@@ -278,28 +314,42 @@ interface ThreatLayerProps {
 function ThreatLayer({ geojson, threatType }: ThreatLayerProps) {
   const style = (feature?: GeoJSON.Feature): L.PathOptions => {
     // Use official SPC fill/stroke colors embedded in the GeoJSON
-    const fill   = feature?.properties?.fill   ?? '#888888'
-    const stroke = feature?.properties?.stroke ?? fill
-    const label  = (feature?.properties?.LABEL ?? '').toString().toUpperCase()
-    const isMeta = label === 'SIGN' || label.startsWith('CIG')
+    const fill    = feature?.properties?.fill   ?? '#888888'
+    const stroke  = feature?.properties?.stroke ?? fill
+    const label   = (feature?.properties?.LABEL ?? '').toString().toUpperCase()
+    const pattern = CIG_PATTERN[label]  // CIG1/CIG2/CIG3/SIGN → url(#cig-hatch-N)
+    if (pattern) {
+      return {
+        fillColor:   pattern,
+        fillOpacity: 1,
+        color:       '#000',
+        weight:      2,
+        opacity:     0.75,
+        dashArray:   '5 4',
+      }
+    }
     return {
       fillColor:   fill,
-      fillOpacity: isMeta ? 0.15 : 0.38,
+      fillOpacity: 0.38,
       color:       stroke,
       weight:      1.5,
-      opacity:     isMeta ? 0.60 : 0.85,
-      dashArray:   isMeta ? '4 4' : undefined,
+      opacity:     0.85,
     }
   }
 
   const onEach = (feature: GeoJSON.Feature, layer: L.Layer) => {
     const label2 = (feature?.properties?.LABEL2 ?? '').toString()
-    const raw    = (feature?.properties?.LABEL  ?? '').toString()
+    const raw    = (feature?.properties?.LABEL  ?? '').toString().toUpperCase()
     if (!raw) return
-    const stroke = feature?.properties?.stroke ?? '#888'
-    const threat = THREAT_LABEL[threatType]
+    const stroke  = feature?.properties?.stroke ?? '#888'
+    const threat  = THREAT_LABEL[threatType]
+    const isCig   = CIG_PATTERN[raw] != null
+    const cigDesc = raw === 'CIG3' ? 'Sig. — Highest Conditional Intensity'
+                  : raw === 'CIG2' ? 'Sig. — Elevated Conditional Intensity'
+                  : isCig          ? 'Sig. — Conditional Intensity (10%+)'
+                  : (label2 || raw)
     ;(layer as L.Path).bindTooltip(
-      `<strong style="color:${stroke}">D1 ${threat}</strong><br/><span style="font-size:11px">${label2 || raw}</span>`,
+      `<strong style="color:${isCig ? '#fff' : stroke}">D1 ${threat}</strong><br/><span style="font-size:11px">${cigDesc}</span>`,
       { sticky: true, opacity: 1 },
     )
   }
@@ -745,6 +795,7 @@ export function RiskMap({ state, onCountyClick }: Props) {
         zoomControl={true}
       >
         <FitBounds />
+        <SvgDefs />
 
         {/* CartoDB Dark Matter base tiles */}
         <TileLayer

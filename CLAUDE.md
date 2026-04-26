@@ -37,8 +37,13 @@ python main.py predict-day 19990503_OK               # apply models to a histori
 python main.py analyze-now                        # one-shot: current cap + HRRR county risk
 python main.py analyze-now --mode kinematics      # weight shear/SRH in analogue scoring
 python main.py analyze-now --forecast-hour 24     # HRRR county risk map for valid time = now+24h
+python main.py analyze-now --no-cache             # force fresh fetches; bypass API cache
 python main.py watch-now                          # continuous: alerts on tier changes / trend flips
 python main.py watch-now --interval 10 --min-tier HIGH   # tighter alert threshold
+
+# Claude skill
+/wx-briefing                                      # run analyze-now and deliver structured briefing
+# skill file: .claude/commands/wx-briefing.md
 
 # Web dashboard
 cd kronos_web/frontend && npm install && npm run dev      # Vite dev server → http://localhost:5173
@@ -78,10 +83,24 @@ KRONOS-WX is an Oklahoma severe weather case library and analysis system. The pi
   - `HRRRCountyPoint` / `HRRRCountySnapshot` — HRRR analysis at a single county centroid / all 77 counties at one valid time
 
 **Real-time analysis** (`main.py`)
-- `analyze-now`: fetches latest OUN+LMN soundings, Mesonet snapshot, dryline, two HRRR snapshots (sounding-hour baseline + most-recent current). Outputs: multi-station comparison, DANGEROUS_CAPPED warning, dryline table, CES projection, county risk zones, per-county drill-down, environment tendency table (ΔMLCIN/ΔCAPE/ΔSRH per threat county), historical analogues. With `--forecast-hour N`: skips sounding/CES/analogues, fetches the most recently posted HRRR run with fxx such that valid time = now+N hours, and shows county risk zones + drill-down for the future valid time.
+- `analyze-now`: fetches latest OUN+LMN soundings, Mesonet snapshot, dryline, two HRRR snapshots (sounding-hour baseline + most-recent current). Outputs: multi-station comparison, DANGEROUS_CAPPED warning, dryline table, CES projection, county risk zones, per-county drill-down, environment tendency table (ΔMLCIN/ΔCAPE/ΔSRH per threat county), historical analogues. With `--forecast-hour N`: skips sounding/CES/analogues, fetches the most recently posted HRRR run with fxx such that valid time = now+N hours, and shows county risk zones + drill-down for the future valid time. **API cache**: when the web backend is running, `analyze-now` calls `_try_api_state()` first (15-min TTL) and uses cached HRRR + Mesonet data, skipping all upstream fetches. Soundings are always fetched fresh. Use `--no-cache` to force all-fresh.
 - `watch-now`: polls on a timer, diffs risk tiers and tendency direction each cycle, prints alerts only on tier changes or trend flips. Quiet cycles print a one-line status. First cycle always prints full risk snapshot.
 - `DANGEROUS_CAPPED` flag (`_dangerous_capped_flag`): fires when MLCIN ≥ 80 J/kg AND (SRH 0-1km > 150 OR EHI > 2.5 OR SRH 0-3km > 300 OR shear > 50kt) — the April 23, 2026 boundary-forced miss pattern.
 - Analogue `mode` options: `cap` (default, weights MLCIN/cap/Tc-gap), `kinematics` (weights SRH/shear/EHI), `full` (blended).
+
+**Web dashboard** (`kronos_web/`)
+- Backend: `kronos_web/backend/api.py` — FastAPI app with four SSE-driven background loops (HRRR, environment/sounding, surface/Mesonet, SPC). Pushes a single `DashboardState` to all SSE subscribers on any data change. Key API endpoints:
+  - `GET /api/state` — full current state as JSON (cached in `_state_json`, `Cache-Control: no-store`)
+  - `GET /api/events` — SSE stream
+  - `GET /api/counties.geojson` — Oklahoma county boundaries (24h browser cache)
+  - `GET /api/radar/frames` — RainViewer MRMS frame list proxy (120s TTL)
+  - `GET /api/radar/tile/{station}/{time_iso}/{z}/{x}/{y}` — NOAA RIDGE2 tile proxy with 2000-entry LRU cache and disconnect cancellation
+- `state_hash`: 12-char SHA-256 fingerprint in every state broadcast. Hashes `(hrrr_valid, tier_map, alert_count, outlook_cat)`. Allows CLI clients to detect silent updates between runs.
+- Frontend: `kronos_web/frontend/` — React + Vite + TypeScript + react-leaflet + Tailwind. Single-page desktop layout.
+  - `RiskMap.tsx`: choropleth county tiers, SPC categorical (`OutlookLayer`), SPC probability (`ThreatLayer`), NWS alert polygons (`AlertLayer`) with full-text popup on click, watch county overlay (`WatchLayer`), Mesonet station plots, dryline polyline, animated radar (MRMS via RainViewer or per-station NOAA RIDGE2 via backend proxy).
+  - SPC hatching: `SvgDefs` injects `<pattern>` elements into Leaflet's SVG layer. `CIG1` (sparse, 12px), `CIG2` (medium, 8px), `CIG3` (dense, 5px) diagonal hatch — all three rendered correctly if present. `SIGN` (legacy label) maps to `CIG1` density.
+  - Alert popup: click any NWS alert polygon to see full warning text + protective action in a dark-themed Leaflet popup.
+- Claude skill: `.claude/commands/wx-briefing.md` — invoke as `/wx-briefing` to run `analyze-now` and receive a structured forecast briefing.
 
 ## Key Domain Concepts
 

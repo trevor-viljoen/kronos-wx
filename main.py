@@ -1009,12 +1009,54 @@ def find_analogues(case_ref: str, top: int, mode: str, min_year: int | None):
     _print_analogues(console, case_id, top_analogues)
 
 
+# ── analyze-now: API cache helper ────────────────────────────────────────────
+
+def _try_api_state(max_age_s: int = 900) -> "dict | None":
+    """
+    Try to load the pre-computed dashboard state from the running backend.
+
+    Returns the state dict if the backend is reachable and the data is fresh
+    (updated within *max_age_s* seconds).  Returns None otherwise — callers
+    should fall back to direct network fetches.
+
+    The state includes a ``state_hash`` field (12-char SHA-256 fingerprint) that
+    changes whenever HRRR data, tier map, alert count, or outlook category
+    changes.  Callers can compare hashes across runs to detect silent updates.
+    """
+    import urllib.request as _ur
+    import json as _json
+    try:
+        with _ur.urlopen("http://localhost:8000/api/state", timeout=2) as r:
+            state = _json.loads(r.read())
+        updated_at = state.get("updated_at")
+        if not updated_at:
+            return None
+        age_s = (
+            datetime.now(tz=timezone.utc)
+            - datetime.fromisoformat(updated_at)
+        ).total_seconds()
+        if age_s > max_age_s:
+            return None          # stale
+        state["_cache_age_s"] = int(age_s)
+        return state
+    except Exception:
+        return None              # backend not running, or network error
+
+
 # ── analyze-now forecast helper ──────────────────────────────────────────────
 
-def _analyze_now_forecast(forecast_hour: int, now_utc: datetime) -> None:
+def _analyze_now_forecast(
+    forecast_hour: int,
+    now_utc: datetime,
+    api_state: "dict | None" = None,
+) -> None:
     """
     Fetch an HRRR forecast snapshot for a future valid time and display county
     risk zones.  Called by analyze-now when --forecast-hour N is given.
+
+    When *api_state* is provided (backend cache is available) and forecast_hour
+    is 0, the cached hrrr_counties + tier_map are used directly, skipping the
+    S3/Herbie fetch entirely.
 
     Finds the most recently initialized HRRR run whose fxx reaches the desired
     valid time within the 1–48 h forecast window, then calls
@@ -1038,6 +1080,52 @@ def _analyze_now_forecast(forecast_hour: int, now_utc: datetime) -> None:
         f"[bold]HRRR County Forecast — F+{forecast_hour}  "
         f"valid {valid_time.strftime('%Y-%m-%d %H:%MZ')}[/bold]"
     )
+
+    # ── Cache path for F+0 (current conditions) ───────────────────────────────
+    # When the backend is running and forecast_hour == 0, its hrrr_counties is
+    # the same data we'd fetch — skip the S3/Herbie round-trip entirely.
+    if forecast_hour == 0 and api_state and api_state.get("hrrr_counties") and api_state.get("hrrr_valid"):
+        from ok_weather_model.models.hrrr import HRRRCountyPoint as _HCP, HRRRCountySnapshot as _HCS
+        try:
+            _pts  = [_HCP(**_p) for _p in api_state["hrrr_counties"]]
+            _hvt  = datetime.fromisoformat(api_state["hrrr_valid"].replace("Z", "+00:00"))
+            _snap = _HCS(run_time=_hvt, valid_time=_hvt, counties=_pts)
+            _age  = api_state.get("_cache_age_s", 0)
+            _hash = api_state.get("state_hash", "?")
+            console.print(
+                f"[dim]HRRR from API cache — {_age}s old  {_hvt.strftime('%H:%MZ')}  "
+                f"hash:[bold]{_hash}[/bold][/dim]"
+            )
+            _rzones = compute_risk_zones_from_hrrr(_snap, min_tier="MARGINAL")
+            if not _rzones:
+                console.print("[dim]No elevated risk areas identified.[/dim]")
+                return
+            _rz_tbl = Table(
+                title=f"HRRR F+0  {_hvt.strftime('%Y-%m-%d %H:%MZ')}  (cached)",
+                show_lines=True,
+            )
+            for _col, _kw in [("Tier", {"style":"bold","min_width":18}),
+                               ("Counties", {"min_width":8}),
+                               ("Center", {"justify":"right"}), ("Span", {"justify":"right"}),
+                               ("Peak CAPE", {"justify":"right"}), ("Peak CIN", {"justify":"right"}),
+                               ("Peak SRH1", {"justify":"right"}), ("Peak EHI", {"justify":"right"})]:
+                _rz_tbl.add_column(_col, **_kw)
+            for _z in _rzones:
+                _cn = ", ".join(c.name for c in _z.counties[:6])
+                if len(_z.counties) > 6:
+                    _cn += f" +{len(_z.counties)-6} more"
+                _rz_tbl.add_row(
+                    f"[{_z.color}]{_z.tier}[/{_z.color}]", _cn,
+                    f"{_z.center_lat:.1f}°N, {abs(_z.center_lon):.1f}°W",
+                    f"{_z.span_ew_mi:.0f}×{_z.span_ns_mi:.0f} mi",
+                    f"{_z.peak_MLCAPE:.0f} J/kg", f"{_z.peak_MLCIN:.0f} J/kg",
+                    f"{_z.peak_SRH_0_1km:.0f} m²/s²", f"{_z.peak_EHI:.2f}",
+                )
+            console.print(_rz_tbl)
+            return
+        except Exception as _ce:
+            logger.debug("Cache F+0 reconstruction failed: %s", _ce)
+            # Fall through to live fetch
 
     # Find the best posted HRRR run for this valid time.
     # HRRR posts runs incrementally — not all fxx hours are available immediately.
@@ -1469,8 +1557,10 @@ def _analyze_now_forecast(forecast_hour: int, now_utc: datetime) -> None:
 @click.option("--forecast-hour", "forecast_hour", default=0, type=int,
               help="HRRR forecast valid N hours from now (e.g. 24 = tomorrow). "
                    "Shows county risk map only; skips sounding, CES, and analogues.")
+@click.option("--no-cache", "no_cache", is_flag=True, default=False,
+              help="Skip API cache; force fresh fetches from all upstream sources.")
 def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
-                forecast_hour: int):
+                forecast_hour: int, no_cache: bool):
     """
     Fetch the latest available sounding and analyze current cap conditions.
 
@@ -1498,11 +1588,28 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
         console.print(f"[red]Unknown station '{station}'. Use OUN, LMN, AMA, or DDC.[/red]")
         return
 
+    # ── API cache probe ────────────────────────────────────────────────────────
+    # If the web backend is running, its state is more current than anything
+    # we'd fetch fresh: it runs a continuous polling loop and already has HRRR,
+    # Mesonet, SPC, and tier data.  We use it for everything except soundings
+    # (not cached by the backend) and analogues (computed from local DB).
+    #
+    # The state_hash field is a 12-char SHA-256 fingerprint that changes when
+    # HRRR valid time, tier map, alert count, or outlook category changes — use
+    # it to detect silent updates between successive analyze-now runs.
+    _api_state: "dict | None" = None if no_cache else _try_api_state(max_age_s=900)
+    if _api_state:
+        _age  = _api_state.get("_cache_age_s", 0)
+        _hash = _api_state.get("state_hash", "?")
+        console.print(
+            f"[dim]Using API cache — {_age}s old  hash:[bold]{_hash}[/bold][/dim]"
+        )
+
     # ── Forecast mode ─────────────────────────────────────────────────────────
     # When --forecast-hour N is specified, skip sounding/CES/analogues and
     # show HRRR county risk zones for the future valid time instead.
     if forecast_hour > 0:
-        _analyze_now_forecast(forecast_hour, now_utc)
+        _analyze_now_forecast(forecast_hour, now_utc, api_state=_api_state)
         return
 
     # Auto-detect the latest available sounding hour
@@ -1694,9 +1801,8 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
         ))
 
     # ── Mesonet: surface temp + dryline detection ────────────────────────────────
-    # Fetch the current snapshot plus snapshots 1 hr and 2 hrs ago so that the
-    # dryline detector has enough temporal spread to compute a surge rate.
-    # Each fetch retries up to 3 earlier 5-min boundaries to handle archive lag.
+    # Prefer API cache (backend already has current Mesonet + pre-detected dryline).
+    # Fall back to direct Mesonet fetch when the backend is not running.
     from ok_weather_model.models import OklahomaCounty
     from ok_weather_model.models.mesonet import MesonetTimeSeries as _MTS
     from ok_weather_model.processing import detect_dryline, compute_dryline_surge_rate
@@ -1708,31 +1814,61 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
     station_series: dict[str, _MTS] = {}
     snap_times_fetched: list[datetime] = []
 
-    with console.status("Fetching Mesonet observations..."), MesonetClient() as mc:
-        for hrs_back in (0, 1, 2):
-            target = now_utc - _td(hours=hrs_back)
-            for lb in range(4):
-                snap_time = target - _td(minutes=5 * lb)
-                try:
-                    snap_obs = mc.get_snapshot_observations(snap_time)
-                except Exception:
-                    continue
-                for o in snap_obs:
-                    stid = o.station_id
-                    if stid not in station_series:
-                        station_series[stid] = _MTS(
-                            station_id=stid,
-                            county=o.county,
-                            start_time=snap_time,
-                            end_time=snap_time,
-                            observations=[],
-                        )
-                    station_series[stid].observations.append(o)
-                    station_series[stid].end_time = max(
-                        station_series[stid].end_time, snap_time
+    if _api_state and _api_state.get("mesonet_obs"):
+        # Reconstruct a minimal station_series from cached obs so dryline + surface
+        # temp code below can run unchanged.
+        from ok_weather_model.models.mesonet import StationObservation as _SO
+        _obs_list = _api_state["mesonet_obs"]
+        _snap_time = datetime.fromisoformat(_api_state["updated_at"])
+        snap_times_fetched = [_snap_time]
+        for _o in _obs_list:
+            try:
+                _obs = _SO(
+                    station_id   = _o["station_id"],
+                    county       = OklahomaCounty[_o["county"]] if isinstance(_o.get("county"), str) else _o.get("county"),
+                    valid_time   = _snap_time,
+                    temperature  = _o["temp_f"],
+                    dewpoint     = _o["dewpoint_f"],
+                    wind_speed   = _o.get("wind_speed", 0),
+                    wind_dir     = _o.get("wind_dir", 0),
+                    lat          = _o.get("lat", 0),
+                    lon          = _o.get("lon", 0),
+                )
+                stid = _obs.station_id
+                if stid not in station_series:
+                    station_series[stid] = _MTS(
+                        station_id=stid, county=_obs.county,
+                        start_time=_snap_time, end_time=_snap_time, observations=[],
                     )
-                snap_times_fetched.append(snap_time)
-                break  # got this hour's snapshot; move to the next hrs_back
+                station_series[stid].observations.append(_obs)
+            except Exception:
+                pass
+    else:
+        with console.status("Fetching Mesonet observations..."), MesonetClient() as mc:
+            for hrs_back in (0, 1, 2):
+                target = now_utc - _td(hours=hrs_back)
+                for lb in range(4):
+                    snap_time = target - _td(minutes=5 * lb)
+                    try:
+                        snap_obs = mc.get_snapshot_observations(snap_time)
+                    except Exception:
+                        continue
+                    for o in snap_obs:
+                        stid = o.station_id
+                        if stid not in station_series:
+                            station_series[stid] = _MTS(
+                                station_id=stid,
+                                county=o.county,
+                                start_time=snap_time,
+                                end_time=snap_time,
+                                observations=[],
+                            )
+                        station_series[stid].observations.append(o)
+                        station_series[stid].end_time = max(
+                            station_series[stid].end_time, snap_time
+                        )
+                    snap_times_fetched.append(snap_time)
+                    break  # got this hour's snapshot; move to the next hrs_back
 
     # Surface temp for CES: nearest Cleveland county observation to now
     if snap_times_fetched:
@@ -1953,36 +2089,44 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
     _hrrr_valid: datetime | None = None
     _hrrr_hour = now_utc.hour
 
-    with console.status("Fetching HRRR snapshots (baseline + current)..."):
+    if _api_state and _api_state.get("hrrr_counties") and _api_state.get("hrrr_valid"):
+        # Reconstruct HRRRCountySnapshot from cached API data — skips S3/Herbie fetch.
+        from ok_weather_model.models.hrrr import HRRRCountyPoint as _HCP, HRRRCountySnapshot as _HCS
         try:
-            with HRRRClient() as hc:
-                # Baseline: sounding hour (may be several hours ago)
-                _base_vt = datetime(today.year, today.month, today.day,
-                                    fetched_hour, 0, tzinfo=timezone.utc)
-                _hrrr_baseline = hc.get_county_snapshot(_base_vt)
-                if _hrrr_baseline is not None:
-                    _hrrr_baseline_valid = _base_vt
+            _pts = [_HCP(**_p) for _p in _api_state["hrrr_counties"]]
+            _hrrr_valid = datetime.fromisoformat(_api_state["hrrr_valid"].replace("Z", "+00:00"))
+            hrrr_snap = _HCS(run_time=_hrrr_valid, valid_time=_hrrr_valid, counties=_pts)
+            risk_source = f"HRRR 3km  {_hrrr_valid.strftime('%H:%MZ')}  [dim](cached)[/dim]"
+        except Exception as _ce:
+            logger.debug("Cache HRRR reconstruction failed: %s", _ce)
 
-                # Current: walk back from now until we find a posted run
-                # (HRRR analysis files appear ~45-60 min after valid time)
-                for _h_back in range(4):
-                    _try_hour = (_hrrr_hour - _h_back) % 24
-                    _try_date = today if _hrrr_hour >= _h_back else (
-                        today - timedelta(days=1)
-                    )
-                    _vt = datetime(_try_date.year, _try_date.month, _try_date.day,
-                                   _try_hour, 0, tzinfo=timezone.utc)
-                    # Skip if same as baseline — no tendency to compute
-                    if _vt == _base_vt:
-                        hrrr_snap = _hrrr_baseline
-                        _hrrr_valid = _vt
-                        break
-                    hrrr_snap = hc.get_county_snapshot(_vt)
-                    if hrrr_snap is not None:
-                        _hrrr_valid = _vt
-                        break
-        except Exception as _hrrr_err:
-            logger.debug("HRRR fetch failed: %s", _hrrr_err)
+    if hrrr_snap is None:
+        with console.status("Fetching HRRR snapshots (baseline + current)..."):
+            try:
+                with HRRRClient() as hc:
+                    _base_vt = datetime(today.year, today.month, today.day,
+                                        fetched_hour, 0, tzinfo=timezone.utc)
+                    _hrrr_baseline = hc.get_county_snapshot(_base_vt)
+                    if _hrrr_baseline is not None:
+                        _hrrr_baseline_valid = _base_vt
+
+                    for _h_back in range(4):
+                        _try_hour = (_hrrr_hour - _h_back) % 24
+                        _try_date = today if _hrrr_hour >= _h_back else (
+                            today - timedelta(days=1)
+                        )
+                        _vt = datetime(_try_date.year, _try_date.month, _try_date.day,
+                                       _try_hour, 0, tzinfo=timezone.utc)
+                        if _vt == _base_vt:
+                            hrrr_snap = _hrrr_baseline
+                            _hrrr_valid = _vt
+                            break
+                        hrrr_snap = hc.get_county_snapshot(_vt)
+                        if hrrr_snap is not None:
+                            _hrrr_valid = _vt
+                            break
+            except Exception as _hrrr_err:
+                logger.debug("HRRR fetch failed: %s", _hrrr_err)
 
     if hrrr_snap is not None:
         risk_zones = compute_risk_zones_from_hrrr(

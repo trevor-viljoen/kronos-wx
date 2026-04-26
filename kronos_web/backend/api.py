@@ -11,6 +11,7 @@ Run from the project root:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import sys
@@ -67,6 +68,7 @@ logging.basicConfig(level=logging.INFO)
 
 _state: dict[str, Any] = {
     "updated_at":      None,
+    "state_hash":      None,   # 12-char SHA256 fingerprint; changes when data changes
     "hrrr_valid":      None,
     "risk_zones":      [],      # list[dict] — serialized RiskZone
     "hrrr_counties":   [],      # list[dict] — HRRRCountyPoint per county
@@ -188,9 +190,21 @@ _RV_TTL_S   = 120   # refresh at most once every 2 minutes
 
 # ── Helper: broadcast to all SSE subscribers ─────────────────────────────────
 
+def _compute_state_hash(state: dict) -> str:
+    """12-char content fingerprint for change detection by CLI clients."""
+    sig = json.dumps({
+        "hrrr_valid":   state.get("hrrr_valid"),
+        "tier_map":     state.get("tier_map"),
+        "alert_count":  len((state.get("spc") or {}).get("alerts") or []),
+        "outlook_cat":  ((state.get("spc") or {}).get("outlook") or {}).get("category"),
+    }, sort_keys=True)
+    return hashlib.sha256(sig.encode()).hexdigest()[:12]
+
+
 async def _broadcast() -> None:
     global _state_json
-    _state["updated_at"] = datetime.now(tz=timezone.utc).isoformat()
+    _state["updated_at"]  = datetime.now(tz=timezone.utc).isoformat()
+    _state["state_hash"]  = _compute_state_hash(_state)
     payload = json.dumps(_state, default=_json_default)
     _state_json = payload   # cache for /api/state
     dead = []

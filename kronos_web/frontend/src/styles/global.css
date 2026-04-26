@@ -238,6 +238,7 @@ html, body, #root {
 /* ── Leaflet overrides ───────────────────────────────────────────────────── */
 .leaflet-container { background: #000 !important; }
 .leaflet-tile { filter: brightness(0.85) saturate(0.7) contrast(1.05); }
+.leaflet-interactive:focus { outline: none; }
 
 .leaflet-popup-content-wrapper,
 .leaflet-popup-tip {
