@@ -54,9 +54,10 @@ function AlertPopup({ title, titleColor, meta, body, onClose }: PopupProps) {
 function AlertCard({ a, color, label }: { a: AlertData; color: string; label: string }) {
   const [open, setOpen] = useState(false)
   const cardClass =
-    a.event === 'Tornado Warning'           ? 'tornado-warning' :
-    a.event === 'Tornado Watch'             ? 'tornado-watch'   :
-    a.event === 'Severe Thunderstorm Warning' ? 'svr-warning'   : 'md-card'
+    a.event === 'Tornado Warning'              ? 'tornado-warning' :
+    a.event === 'Tornado Watch'                ? 'tornado-watch'   :
+    a.event === 'Severe Thunderstorm Warning'  ? 'svr-warning'     :
+    a.event === 'Severe Thunderstorm Watch'    ? 'svr-watch'       : 'md-card'
 
   const num = a.watch_number ? ` #${a.watch_number}` : ''
 
@@ -150,11 +151,12 @@ export function SPCPanel({ spc }: Props) {
   const torWarnings = alerts.filter(a => a.event === 'Tornado Warning')
   const torWatches  = alerts.filter(a => a.event === 'Tornado Watch')
   const svrWarnings = alerts.filter(a => a.event === 'Severe Thunderstorm Warning')
+  const svrWatches  = alerts.filter(a => a.event === 'Severe Thunderstorm Watch')
 
   const cat      = outlook?.category ?? 'NONE'
   const prob     = outlook?.max_tornado_prob
   const sig      = outlook?.sig_tornado_hatched
-  const hasAlerts = torWarnings.length + torWatches.length + svrWarnings.length + mds.length > 0
+  const hasAlerts = torWarnings.length + torWatches.length + svrWarnings.length + svrWatches.length + mds.length > 0
 
   return (
     <div className={`panel spc-panel ${torWarnings.length > 0 ? 'alert' : 'warn'}`}>
@@ -183,6 +185,9 @@ export function SPCPanel({ spc }: Props) {
         ))}
         {torWatches.map((a, i) => (
           <AlertCard key={i} a={a} color="var(--warning-watch)" label="TORNADO WATCH" />
+        ))}
+        {svrWatches.map((a, i) => (
+          <AlertCard key={i} a={a} color="var(--warning-svr)" label="SVR THUNDERSTORM WATCH" />
         ))}
         {svrWarnings.map((a, i) => (
           <AlertCard key={i} a={a} color="var(--warning-svr)" label="SVR THUNDERSTORM WARNING" />

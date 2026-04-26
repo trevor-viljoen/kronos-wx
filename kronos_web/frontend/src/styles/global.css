@@ -126,6 +126,7 @@ html, body, #root {
 .alert-card.tornado-warning { border-color: var(--warning-tornado); background: #140000; }
 .alert-card.tornado-watch   { border-color: var(--warning-watch);   background: #001a0a; }
 .alert-card.svr-warning     { border-color: var(--warning-svr);     background: #121000; }
+.alert-card.svr-watch       { border-color: var(--warning-svr);     background: #0d0c00; }
 .alert-card.md-card         { border-color: var(--warning-md); }
 
 .alert-card .event-label {
