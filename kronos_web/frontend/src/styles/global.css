@@ -529,6 +529,10 @@ html, body, #root {
   animation: ticker-scroll linear infinite;
   will-change: transform;
 }
+@keyframes ticker-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
 .header-ticker-item {
   display: inline-flex;
   align-items: center;
