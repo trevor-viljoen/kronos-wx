@@ -78,7 +78,8 @@ class NWSAlert:
     def expires_label(self) -> str:
         if self.expires_utc is None:
             return ""
-        return self.expires_utc.strftime("%H:%MZ")
+        local = self.expires_utc.astimezone()
+        return local.strftime("%-I:%M %p")
 
 
 @dataclass
