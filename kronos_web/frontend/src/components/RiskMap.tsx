@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { MapContainer, TileLayer, GeoJSON, Polyline, Marker, useMap } from 'react-leaflet'
+import { MapContainer, TileLayer, WMSTileLayer, GeoJSON, Polyline, Marker, useMap } from 'react-leaflet'
 import L from 'leaflet'
 import type { DashboardState, Tier, CountyPoint, StationObs } from '../types/api'
 
@@ -451,9 +451,11 @@ function FlashBanner({ alerts }: FlashBannerProps) {
 interface OverlayControlsProps {
   overlays: Record<OverlayKey, boolean>
   onToggle: (key: OverlayKey) => void
+  radarStation: string
+  onRadarStation: (id: string) => void
 }
 
-function OverlayControls({ overlays, onToggle }: OverlayControlsProps) {
+function OverlayControls({ overlays, onToggle, radarStation, onRadarStation }: OverlayControlsProps) {
   return (
     <div className="overlay-controls">
       {(Object.keys(OVERLAY_LABELS) as OverlayKey[]).map(key => (
@@ -465,97 +467,117 @@ function OverlayControls({ overlays, onToggle }: OverlayControlsProps) {
           {OVERLAY_LABELS[key]}
         </button>
       ))}
+      {overlays.radar && (
+        <div className="radar-site-selector">
+          {RADAR_STATIONS.map(stn => (
+            <button
+              key={stn.id}
+              className={`overlay-btn ${radarStation === stn.id ? 'active' : ''}`}
+              onClick={() => onRadarStation(stn.id)}
+              title={stn.desc}
+            >
+              {stn.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
 
-// ── Radar (RainViewer animated composite NEXRAD) ──────────────────────────────
-const RADAR_FRAMES   = 15    // number of past frames to cycle
+// ── Radar (IEM NEXRAD WMS — individual stations) ──────────────────────────────
+const RADAR_STATIONS = [
+  { id: 'ktlx', label: 'KTLX', desc: 'OKC/Norman' },
+  { id: 'kvnx', label: 'KVNX', desc: 'Vance/Enid' },
+  { id: 'kinx', label: 'KINX', desc: 'Tulsa'      },
+  { id: 'kfdr', label: 'KFDR', desc: 'Altus/SW OK' },
+]
+const RADAR_FRAMES   = 15    // past frames to cycle (× 5 min = 75 min loop)
 const RADAR_INTERVAL = 600   // ms per frame
-const RADAR_OPACITY  = 0.60
+const RADAR_OPACITY  = 0.70
 
-interface RadarFrame { time: number; path: string }
+function buildRadarTimes(): string[] {
+  const step = 5 * 60 * 1000
+  const base = Math.floor(Date.now() / step) * step
+  return Array.from({ length: RADAR_FRAMES }, (_, i) =>
+    new Date(base - (RADAR_FRAMES - 1 - i) * step).toISOString().slice(0, 19) + 'Z'
+  )
+}
 
-function RadarLayer() {
-  const [frames,  setFrames]  = useState<RadarFrame[]>([])
-  const [current, setCurrent] = useState(0)
+interface RadarLayerProps {
+  station: string
+}
+
+function RadarLayer({ station }: RadarLayerProps) {
+  const [times,   setTimes]   = useState<string[]>(() => buildRadarTimes())
+  const [current, setCurrent] = useState(RADAR_FRAMES - 1)
   const [playing, setPlaying] = useState(true)
 
-  // Fetch frame list from RainViewer, refresh every 5 min
+  // Refresh time list every 5 min so newest data rolls in
   useEffect(() => {
-    let cancelled = false
-    async function refresh() {
-      try {
-        const res  = await fetch('https://api.rainviewer.com/public/weather-maps.json')
-        const data = await res.json()
-        const past = (data?.radar?.past ?? []) as RadarFrame[]
-        if (!cancelled && past.length > 0) {
-          const slice = past.slice(-RADAR_FRAMES)
-          setFrames(slice)
-          setCurrent(slice.length - 1)
-        }
-      } catch {}
-    }
-    refresh()
-    const id = setInterval(refresh, 5 * 60 * 1000)
-    return () => { cancelled = true; clearInterval(id) }
+    const id = setInterval(() => {
+      setTimes(buildRadarTimes())
+      setCurrent(RADAR_FRAMES - 1)
+    }, 5 * 60 * 1000)
+    return () => clearInterval(id)
   }, [])
 
   // Animate
   useEffect(() => {
-    if (!playing || frames.length === 0) return
-    const id = setInterval(() => {
-      setCurrent(prev => (prev + 1) % frames.length)
-    }, RADAR_INTERVAL)
+    if (!playing) return
+    const id = setInterval(() => setCurrent(p => (p + 1) % RADAR_FRAMES), RADAR_INTERVAL)
     return () => clearInterval(id)
-  }, [playing, frames.length])
+  }, [playing])
 
-  if (frames.length === 0) return null
+  const currentTime = times[current] ?? ''
 
   return (
     <>
-      {frames.map((f, i) => (
-        <TileLayer
-          key={f.path}
-          url={`https://tilecache.rainviewer.com${f.path}/512/{z}/{x}/{y}/6/1_1.png`}
-          tileSize={512}
-          zoomOffset={-1}
-          opacity={i === current ? RADAR_OPACITY : 0}
-          zIndex={5}
-          attribution={i === 0 ? 'Radar &copy; <a href="https://rainviewer.com">RainViewer</a>' : ''}
-        />
-      ))}
-      {/* Frame timestamp + playback control — rendered outside map via portal trick */}
+      <WMSTileLayer
+        key={`${station}-${currentTime}`}
+        url={`https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/${station}_n0q.cgi`}
+        layers="nexrad-n0q-900913"
+        format="image/png"
+        transparent={true}
+        opacity={RADAR_OPACITY}
+        version="1.1.1"
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        params={{ layers: 'nexrad-n0q-900913', TIME: currentTime } as any}
+        zIndex={5}
+        attribution=""
+      />
       <RadarHUD
-        frames={frames}
+        times={times}
         current={current}
         playing={playing}
+        station={station}
         onToggle={() => setPlaying(p => !p)}
-        onScrub={setCurrent}
+        onScrub={i => { setCurrent(i); setPlaying(false); }}
       />
     </>
   )
 }
 
 interface RadarHUDProps {
-  frames: RadarFrame[]
+  times: string[]
   current: number
   playing: boolean
+  station: string
   onToggle: () => void
   onScrub: (i: number) => void
 }
 
-function RadarHUD({ frames, current, playing, onToggle, onScrub }: RadarHUDProps) {
-  const map = useMap()
-  // Stop map click propagation on the HUD
+function RadarHUD({ times, current, playing, station, onToggle, onScrub }: RadarHUDProps) {
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (ref.current) L.DomEvent.disableClickPropagation(ref.current)
   }, [])
 
-  const ts = frames[current]
-    ? new Date(frames[current].time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const ts = times[current]
+    ? new Date(times[current]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : ''
+
+  const stn = RADAR_STATIONS.find(s => s.id === station)
 
   return (
     <div
@@ -566,9 +588,9 @@ function RadarHUD({ frames, current, playing, onToggle, onScrub }: RadarHUDProps
         left: '50%',
         transform: 'translateX(-50%)',
         zIndex: 1000,
-        background: 'rgba(0,0,0,0.75)',
+        background: 'rgba(0,0,0,0.80)',
         border: '1px solid rgba(255,255,255,0.12)',
-        padding: '4px 10px',
+        padding: '5px 12px',
         display: 'flex',
         alignItems: 'center',
         gap: 10,
@@ -577,6 +599,7 @@ function RadarHUD({ frames, current, playing, onToggle, onScrub }: RadarHUDProps
         color: '#ccc',
         pointerEvents: 'all',
         userSelect: 'none',
+        whiteSpace: 'nowrap',
       }}
     >
       <button
@@ -588,13 +611,18 @@ function RadarHUD({ frames, current, playing, onToggle, onScrub }: RadarHUDProps
       <input
         type="range"
         min={0}
-        max={frames.length - 1}
+        max={RADAR_FRAMES - 1}
         value={current}
-        onChange={e => { onScrub(Number(e.target.value)); }}
-        style={{ width: 100, accentColor: '#4af' }}
+        onChange={e => onScrub(Number(e.target.value))}
+        style={{ width: 110, accentColor: '#4af' }}
       />
-      <span style={{ minWidth: 50 }}>{ts}</span>
-      <span style={{ color: '#666' }}>RADAR</span>
+      <span style={{ minWidth: 48, color: '#eee' }}>{ts}</span>
+      {stn && (
+        <span style={{ color: '#88aaff' }}>
+          {stn.label}
+          <span style={{ color: '#555', marginLeft: 4 }}>({stn.desc})</span>
+        </span>
+      )}
     </div>
   )
 }
@@ -619,6 +647,7 @@ export function RiskMap({ state, onCountyClick }: Props) {
     dryline:  true,
     radar:    false,
   })
+  const [radarStation, setRadarStation] = useState(RADAR_STATIONS[0].id)
 
   useEffect(() => {
     fetch('/api/counties.geojson')
@@ -682,8 +711,8 @@ export function RiskMap({ state, onCountyClick }: Props) {
         {overlays.wind    && windGJ && <ThreatLayer geojson={windGJ} threatType="wind" />}
         {overlays.hail    && hailGJ && <ThreatLayer geojson={hailGJ} threatType="hail" />}
 
-        {/* Radar composite (RainViewer) */}
-        {overlays.radar && <RadarLayer />}
+        {/* Radar (IEM NEXRAD WMS) */}
+        {overlays.radar && <RadarLayer station={radarStation} />}
 
         {/* County choropleth */}
         {overlays.counties && countiesGeoJSON && (
@@ -718,7 +747,12 @@ export function RiskMap({ state, onCountyClick }: Props) {
       </MapContainer>
 
       {/* Overlay toggle controls */}
-      <OverlayControls overlays={overlays} onToggle={toggleOverlay} />
+      <OverlayControls
+        overlays={overlays}
+        onToggle={toggleOverlay}
+        radarStation={radarStation}
+        onRadarStation={setRadarStation}
+      />
 
       {/* Legend */}
       {activeTiers.length > 0 && (
