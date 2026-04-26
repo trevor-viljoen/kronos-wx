@@ -994,6 +994,52 @@ export function RiskMap({ state, onCountyClick }: Props) {
               <span>Dryline</span>
             </div>
           )}
+          {overlays.boundaries && boundaries.some(b => b.boundary_type !== 'DRYLINE') && (
+            <>
+              {boundaries.some(b => b.detected_by === 'wpc_cold_front') && (
+                <div className="legend-row">
+                  <div className="legend-swatch" style={{ background: 'transparent', border: '2px solid #4488ff' }} />
+                  <span>Cold Front</span>
+                </div>
+              )}
+              {boundaries.some(b => b.detected_by === 'wpc_warm_front') && (
+                <div className="legend-row">
+                  <div className="legend-swatch" style={{ background: 'transparent', border: '2px solid #ff4444' }} />
+                  <span>Warm Front</span>
+                </div>
+              )}
+              {boundaries.some(b => b.detected_by === 'wpc_stationary_front') && (
+                <div className="legend-row">
+                  <div className="legend-swatch" style={{ background: 'transparent', border: '2px dashed #9944ff' }} />
+                  <span>Stationary Front</span>
+                </div>
+              )}
+              {boundaries.some(b => b.detected_by === 'wpc_occluded_front') && (
+                <div className="legend-row">
+                  <div className="legend-swatch" style={{ background: 'transparent', border: '2px solid #cc44ff' }} />
+                  <span>Occluded Front</span>
+                </div>
+              )}
+              {boundaries.some(b => b.detected_by === 'wpc_trough') && (
+                <div className="legend-row">
+                  <div className="legend-swatch" style={{ background: 'transparent', border: '2px dashed #cc8822' }} />
+                  <span>Trough</span>
+                </div>
+              )}
+              {boundaries.some(b => b.detected_by === 'mesonet_wind_pressure' || b.detected_by === 'mesonet_windshift') && (
+                <div className="legend-row">
+                  <div className="legend-swatch" style={{ background: 'transparent', border: '2px dashed #aaaaaa' }} />
+                  <span>Outflow</span>
+                </div>
+              )}
+              {interactions.some(ix => ix.alarm_bell_flag) && (
+                <div className="legend-row">
+                  <span style={{ fontSize: '14px', lineHeight: 1 }}>⚡</span>
+                  <span>Boundary Alarm</span>
+                </div>
+              )}
+            </>
+          )}
           {overlays.spc && outlookGJ && (
             <>
               {(['HIGH','MDT','ENH','SLGT','MRGL'] as const).map(cat => {
