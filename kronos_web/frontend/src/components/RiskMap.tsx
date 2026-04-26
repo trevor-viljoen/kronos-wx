@@ -538,11 +538,13 @@ function RadarTiles({ station, mrmsFrames, ridge2Times, current }: RadarTilesPro
   }
   const t = ridge2Times[current]
   if (!t) return null
-  // Proxy through our backend — NOAA opengeo.ncep.noaa.gov is CORS/ORB blocked
+  // Proxy through our backend — NOAA opengeo.ncep.noaa.gov is CORS/ORB blocked.
+  // key={station} only: frame changes let react-leaflet call setUrl() which
+  // triggers Leaflet's _abortLoading() on in-flight tile requests.
   const timeEnc = encodeURIComponent(t.iso)
   return (
     <TileLayer
-      key={`${station}-${t.iso}`}
+      key={station}
       url={`/api/radar/tile/${station}/${timeEnc}/{z}/{x}/{y}`}
       opacity={RADAR_OPACITY}
       zIndex={5}

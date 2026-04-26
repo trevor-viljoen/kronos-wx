@@ -1034,8 +1034,17 @@ async def get_counties_geojson():
     return JSONResponse(_ok_counties_geojson)
 
 
-_RIDGE2_BASE = "https://opengeo.ncep.noaa.gov/geoserver"
-_RIDGE2_WORLD = 20037508.3427892  # half-extent of EPSG:3857
+_RIDGE2_BASE    = "https://opengeo.ncep.noaa.gov/geoserver"
+_RIDGE2_WORLD   = 20037508.3427892  # half-extent of EPSG:3857
+_RIDGE2_ALLOWED = frozenset({"ktlx", "kvnx", "kinx", "kfdr", "koun", "kvwx"})
+
+# LRU tile cache: (station, time_iso, z, x, y) → PNG bytes
+# Capped at 2 000 tiles (~16 MB at ~8 KB avg). Radar tiles for a past
+# timestamp are immutable so we cache indefinitely within the cap.
+from collections import OrderedDict as _OD
+_TILE_CACHE: "_OD[tuple, bytes]" = _OD()
+_TILE_CACHE_MAX = 2_000
+
 
 def _tile_bbox_3857(x: int, y: int, z: int) -> str:
     """Convert XYZ tile indices to EPSG:3857 BBOX string (minx,miny,maxx,maxy)."""
@@ -1048,35 +1057,62 @@ def _tile_bbox_3857(x: int, y: int, z: int) -> str:
 
 
 @app.get("/api/radar/tile/{station}/{time_iso}/{z}/{x}/{y}")
-async def radar_tile_proxy(station: str, time_iso: str, z: int, x: int, y: int):
+async def radar_tile_proxy(request: Request, station: str, time_iso: str, z: int, x: int, y: int):
     """Proxy NOAA RIDGE2 WMS tiles for per-station NEXRAD reflectivity."""
-    # Validate station to prevent open-proxy abuse
-    _ALLOWED = {"ktlx", "kvnx", "kinx", "kfdr", "koun", "kvwx"}
-    if station not in _ALLOWED:
+    if station not in _RIDGE2_ALLOWED:
         return Response(status_code=400)
 
-    bbox = _tile_bbox_3857(x, y, z)
-    params = {
-        "SERVICE":     "WMS",
-        "VERSION":     "1.3.0",
-        "REQUEST":     "GetMap",
-        "LAYERS":      f"{station}_bref_raw",
-        "FORMAT":      "image/png",
-        "TRANSPARENT": "TRUE",
-        "TIME":        time_iso,
-        "CRS":         "EPSG:3857",
-        "BBOX":        bbox,
-        "WIDTH":       "256",
-        "HEIGHT":      "256",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(f"{_RIDGE2_BASE}/{station}/ows", params=params)
+    cache_key = (station, time_iso, z, x, y)
+
+    # Cache hit — serve immediately without touching NOAA
+    if cache_key in _TILE_CACHE:
+        _TILE_CACHE.move_to_end(cache_key)
         return Response(
-            content=resp.content,
+            content=_TILE_CACHE[cache_key],
             media_type="image/png",
             headers={"Cache-Control": "public, max-age=300"},
         )
+
+    # Abort early if the browser already moved on
+    if await request.is_disconnected():
+        return Response(status_code=204)
+
+    bbox = _tile_bbox_3857(x, y, z)
+    params = {
+        "SERVICE": "WMS", "VERSION": "1.3.0", "REQUEST": "GetMap",
+        "LAYERS": f"{station}_bref_raw", "FORMAT": "image/png",
+        "TRANSPARENT": "TRUE", "TIME": time_iso,
+        "CRS": "EPSG:3857", "BBOX": bbox, "WIDTH": "256", "HEIGHT": "256",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            fetch = asyncio.create_task(
+                client.get(f"{_RIDGE2_BASE}/{station}/ows", params=params)
+            )
+            # Poll for client disconnect while the upstream fetch is in flight
+            while not fetch.done():
+                if await request.is_disconnected():
+                    fetch.cancel()
+                    return Response(status_code=204)
+                await asyncio.sleep(0.05)
+            resp = fetch.result()
+
+        if resp.status_code == 200:
+            content = resp.content
+            _TILE_CACHE[cache_key] = content
+            if len(_TILE_CACHE) > _TILE_CACHE_MAX:
+                _TILE_CACHE.popitem(last=False)   # evict oldest
+            return Response(
+                content=content,
+                media_type="image/png",
+                headers={"Cache-Control": "public, max-age=300"},
+            )
+        logger.debug("RIDGE2 upstream %s for %s %s/%s/%s", resp.status_code, station, z, x, y)
+        return Response(status_code=resp.status_code)
+
+    except asyncio.CancelledError:
+        return Response(status_code=204)
     except Exception as exc:
         logger.warning("RIDGE2 tile proxy error: %s", exc)
         return Response(status_code=502)
