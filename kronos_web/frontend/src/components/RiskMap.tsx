@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { MapContainer, TileLayer, WMSTileLayer, GeoJSON, Polyline, Marker, useMap } from 'react-leaflet'
+import { MapContainer, TileLayer, GeoJSON, Polyline, Marker, useMap } from 'react-leaflet'
 import L from 'leaflet'
 import type { DashboardState, Tier, CountyPoint, StationObs } from '../types/api'
 
@@ -500,7 +500,6 @@ const RADAR_STATIONS = [
 const RADAR_INTERVAL = 600
 const RADAR_OPACITY  = 0.70
 const RAINVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json'
-const RIDGE2_BASE    = 'https://opengeo.ncep.noaa.gov/geoserver'
 const RIDGE2_FRAMES  = 12
 const RIDGE2_STEP_MS = 5 * 60 * 1000
 
@@ -539,16 +538,12 @@ function RadarTiles({ station, mrmsFrames, ridge2Times, current }: RadarTilesPro
   }
   const t = ridge2Times[current]
   if (!t) return null
+  // Proxy through our backend — NOAA opengeo.ncep.noaa.gov is CORS/ORB blocked
+  const timeEnc = encodeURIComponent(t.iso)
   return (
-    <WMSTileLayer
-      key={station}
-      url={`${RIDGE2_BASE}/${station}/ows`}
-      layers={`${station}_bref_raw`}
-      format="image/png"
-      transparent={true}
-      version="1.3.0"
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      params={{ TIME: t.iso } as any}
+    <TileLayer
+      key={`${station}-${t.iso}`}
+      url={`/api/radar/tile/${station}/${timeEnc}/{z}/{x}/{y}`}
       opacity={RADAR_OPACITY}
       zIndex={5}
       attribution="NOAA NEXRAD RIDGE2"

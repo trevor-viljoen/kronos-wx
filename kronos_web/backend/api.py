@@ -22,7 +22,7 @@ from typing import Any, Optional
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sse_starlette.sse import EventSourceResponse
 
 # Ensure project root is on sys.path when run directly
@@ -1032,6 +1032,54 @@ async def get_counties_geojson():
     if _ok_counties_geojson is None:
         return JSONResponse({"error": "County GeoJSON not loaded yet"}, status_code=503)
     return JSONResponse(_ok_counties_geojson)
+
+
+_RIDGE2_BASE = "https://opengeo.ncep.noaa.gov/geoserver"
+_RIDGE2_WORLD = 20037508.3427892  # half-extent of EPSG:3857
+
+def _tile_bbox_3857(x: int, y: int, z: int) -> str:
+    """Convert XYZ tile indices to EPSG:3857 BBOX string (minx,miny,maxx,maxy)."""
+    tile_size = _RIDGE2_WORLD * 2 / (2 ** z)
+    xmin = x * tile_size - _RIDGE2_WORLD
+    xmax = xmin + tile_size
+    ymax = _RIDGE2_WORLD - y * tile_size
+    ymin = ymax - tile_size
+    return f"{xmin},{ymin},{xmax},{ymax}"
+
+
+@app.get("/api/radar/tile/{station}/{time_iso}/{z}/{x}/{y}")
+async def radar_tile_proxy(station: str, time_iso: str, z: int, x: int, y: int):
+    """Proxy NOAA RIDGE2 WMS tiles for per-station NEXRAD reflectivity."""
+    # Validate station to prevent open-proxy abuse
+    _ALLOWED = {"ktlx", "kvnx", "kinx", "kfdr", "koun", "kvwx"}
+    if station not in _ALLOWED:
+        return Response(status_code=400)
+
+    bbox = _tile_bbox_3857(x, y, z)
+    params = {
+        "SERVICE":     "WMS",
+        "VERSION":     "1.3.0",
+        "REQUEST":     "GetMap",
+        "LAYERS":      f"{station}_bref_raw",
+        "FORMAT":      "image/png",
+        "TRANSPARENT": "TRUE",
+        "TIME":        time_iso,
+        "CRS":         "EPSG:3857",
+        "BBOX":        bbox,
+        "WIDTH":       "256",
+        "HEIGHT":      "256",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(f"{_RIDGE2_BASE}/{station}/ows", params=params)
+        return Response(
+            content=resp.content,
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=300"},
+        )
+    except Exception as exc:
+        logger.warning("RIDGE2 tile proxy error: %s", exc)
+        return Response(status_code=502)
 
 
 @app.get("/health")
