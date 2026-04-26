@@ -58,7 +58,10 @@ from ok_weather_model.processing import (
 )
 from ok_weather_model.processing.cap_calculator import compute_ces_from_sounding
 from ok_weather_model.processing.dryline_detector import detect_dryline
+from ok_weather_model.processing.outflow_detector import detect_outflow_boundaries
+from ok_weather_model.processing.boundary_interactions import find_boundary_interactions
 from ok_weather_model.processing.risk_zone import compute_risk_zones_from_hrrr, _TIER_RANK
+from ok_weather_model.ingestion.wpc_boundary_client import fetch_wpc_boundaries
 from ok_weather_model.storage.database import Database
 
 logger = logging.getLogger("kronos_web.api")
@@ -78,6 +81,8 @@ _state: dict[str, Any] = {
     "moisture":        None,
     "dryline":         None,
     "dryline_surge":   None,
+    "boundaries":      [],      # list[dict] — all active boundaries (WPC + outflow + dryline)
+    "boundary_interactions": [], # list[dict] — alarm-bell intersections
     "tendency":        [],
     "spc":             {"outlook": None, "alerts": [], "mds": []},
     "alert_geojson":   None,    # raw NWS FeatureCollection (polygon geometry)
@@ -93,7 +98,9 @@ _state: dict[str, Any] = {
 
 _hrrr_base: Any = None          # first HRRR snapshot (baseline for tendency)
 _hrrr_now:  Any = None          # most recent HRRR snapshot
-_dryline_obj: Any = None        # BoundaryObservation for risk zone boost
+_dryline_obj: Any = None        # BoundaryObservation for risk zone boost (legacy)
+_boundaries_list: list = []     # all active BoundaryObservation objects
+_alarm_counties: set  = set()   # OklahomaCounty members with alarm_bell flag
 
 _prev_tier_map: dict = {}       # for tier change diffing
 _prev_md_set:   set  = set()
@@ -313,6 +320,35 @@ def _ser_dryline(dl, surge) -> Optional[dict]:
     }
 
 
+def _ser_boundary(b) -> dict:
+    """Serialize a BoundaryObservation for the API state."""
+    return {
+        "boundary_type":        b.boundary_type.value if hasattr(b.boundary_type, "value") else str(b.boundary_type),
+        "detected_by":          b.detected_by,
+        "position_lat":         b.position_lat,
+        "position_lon":         b.position_lon,
+        "confidence":           b.confidence,
+        "motion_speed":         b.motion_speed,
+        "motion_direction":     b.motion_direction,
+        "counties":             [c.name for c in (b.counties_intersected or [])],
+        "valid_time":           b.valid_time.isoformat() if b.valid_time else None,
+    }
+
+
+def _ser_interaction(ix) -> dict:
+    """Serialize a BoundaryInteraction for the API state."""
+    return {
+        "interaction_point_lat": ix.interaction_point_lat,
+        "interaction_point_lon": ix.interaction_point_lon,
+        "interaction_county":    ix.interaction_county.name,
+        "alarm_bell_flag":       ix.alarm_bell_flag,
+        "convergence_magnitude": ix.convergence_magnitude,
+        "boundary_1_type":       ix.boundary_1.detected_by,
+        "boundary_2_type":       ix.boundary_2.detected_by,
+        "notes":                 ix.notes,
+    }
+
+
 def _ser_moisture(m) -> Optional[dict]:
     if m is None:
         return None
@@ -392,9 +428,14 @@ async def _task_hrrr() -> None:
                     _hrrr_base = snap
                 _hrrr_now = snap
 
-            # Compute risk zones (pass current dryline object if available)
+            # Compute risk zones with all active boundaries + alarm counties
             zones = await asyncio.to_thread(
-                compute_risk_zones_from_hrrr, snap, _dryline_obj, "MARGINAL"
+                compute_risk_zones_from_hrrr,
+                snap,
+                _dryline_obj,
+                "MARGINAL",
+                _boundaries_list,
+                _alarm_counties,
             )
 
             # Build county list
@@ -808,6 +849,42 @@ async def _task_surface() -> None:
 
             _dryline_obj = dl
 
+            # ── Multi-boundary tracking ────────────────────────────────────────
+            # 1. WPC synoptic fronts (fetched in background thread, cached 1hr)
+            wpc_bounds = await asyncio.to_thread(fetch_wpc_boundaries, snap_time)
+
+            # 2. Mesonet outflow boundary detection
+            outflow_bounds = await asyncio.to_thread(
+                detect_outflow_boundaries, station_series, snap_time, _station_coords
+            )
+
+            # 3. Assemble full boundary list (dryline + WPC + outflow)
+            all_bounds = []
+            if dl is not None:
+                all_bounds.append(dl)
+            all_bounds.extend(wpc_bounds)
+            all_bounds.extend(outflow_bounds)
+
+            # 4. Find boundary interactions (use latest HRRR for thermo check)
+            hrrr_for_ix = _hrrr_now
+            interactions = await asyncio.to_thread(
+                find_boundary_interactions, all_bounds, snap_time, hrrr_for_ix
+            )
+            alarm_c = {ix.interaction_county for ix in interactions if ix.alarm_bell_flag}
+
+            async with _lock:
+                _boundaries_list[:] = all_bounds
+                _alarm_counties.clear()
+                _alarm_counties.update(alarm_c)
+
+            if interactions:
+                alarm_cnt = sum(1 for ix in interactions if ix.alarm_bell_flag)
+                if alarm_cnt:
+                    _log_alert(
+                        f"⚡ {alarm_cnt} boundary alarm bell(s) — "
+                        f"{', '.join(ix.interaction_county.name for ix in interactions if ix.alarm_bell_flag)}"
+                    )
+
             # Serialize current Mesonet observations for map station plots.
             # Use the raw display list (all ~120 stations) rather than the
             # OklahomaCounty-filtered domain list (~54 stations).
@@ -830,9 +907,11 @@ async def _task_surface() -> None:
                 })
 
             async with _lock:
-                _state["moisture"]      = _ser_moisture(moisture)
-                _state["dryline"]       = _ser_dryline(dl, surge)
-                _state["mesonet_obs"]   = mesonet_obs_list
+                _state["moisture"]               = _ser_moisture(moisture)
+                _state["dryline"]                = _ser_dryline(dl, surge)
+                _state["boundaries"]             = [_ser_boundary(b) for b in all_bounds]
+                _state["boundary_interactions"]  = [_ser_interaction(ix) for ix in interactions]
+                _state["mesonet_obs"]            = mesonet_obs_list
 
             await _broadcast()
 

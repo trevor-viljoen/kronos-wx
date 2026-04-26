@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { MapContainer, TileLayer, GeoJSON, Polyline, Marker, useMap } from 'react-leaflet'
+import { MapContainer, TileLayer, GeoJSON, Polyline, Marker, Tooltip, useMap } from 'react-leaflet'
 import L from 'leaflet'
-import type { DashboardState, Tier, CountyPoint, StationObs } from '../types/api'
+import type { DashboardState, Tier, CountyPoint, StationObs, BoundaryData, BoundaryInteractionData } from '../types/api'
 
 // ── Tier → map fill color + opacity ──────────────────────────────────────────
 const TIER_STYLE: Record<Tier, { color: string; fillOpacity: number }> = {
@@ -49,19 +49,20 @@ const LEGEND_TIERS: Array<{ tier: Tier; label: string }> = [
 const OK_BOUNDS: L.LatLngBoundsExpression = [[33.5, -103.1], [37.1, -94.4]]
 
 // ── Overlay keys ──────────────────────────────────────────────────────────────
-type OverlayKey = 'counties' | 'spc' | 'tornado' | 'wind' | 'hail' | 'warnings' | 'watches' | 'mesonet' | 'dryline' | 'radar'
+type OverlayKey = 'counties' | 'spc' | 'tornado' | 'wind' | 'hail' | 'warnings' | 'watches' | 'mesonet' | 'dryline' | 'boundaries' | 'radar'
 
 const OVERLAY_LABELS: Record<OverlayKey, string> = {
-  counties: 'County Tiers',
-  spc:      'SPC Cat.',
-  tornado:  'Torn. Prob.',
-  wind:     'Wind Prob.',
-  hail:     'Hail Prob.',
-  warnings: 'Warnings',
-  watches:  'Watches',
-  mesonet:  'Mesonet',
-  dryline:  'Dryline',
-  radar:    'Radar',
+  counties:   'County Tiers',
+  spc:        'SPC Cat.',
+  tornado:    'Torn. Prob.',
+  wind:       'Wind Prob.',
+  hail:       'Hail Prob.',
+  warnings:   'Warnings',
+  watches:    'Watches',
+  mesonet:    'Mesonet',
+  dryline:    'Dryline',
+  boundaries: 'Boundaries',
+  radar:      'Radar',
 }
 
 // ── Fit Oklahoma bounds on first render ───────────────────────────────────────
@@ -484,6 +485,85 @@ function MesonetLayer({ observations }: MesonetLayerProps) {
   )
 }
 
+// ── Boundary polylines (WPC fronts + outflow + dryline) ──────────────────────
+
+// Visual styling per detected_by type
+const BOUNDARY_STYLE: Record<string, { color: string; weight: number; dashArray?: string; opacity: number }> = {
+  wpc_cold_front:       { color: '#4488ff', weight: 3, opacity: 0.9 },
+  wpc_warm_front:       { color: '#ff4444', weight: 3, opacity: 0.9 },
+  wpc_stationary_front: { color: '#9944ff', weight: 3, dashArray: '8 4', opacity: 0.85 },
+  wpc_occluded_front:   { color: '#cc44ff', weight: 3, opacity: 0.85 },
+  wpc_trough:           { color: '#cc8822', weight: 2, dashArray: '6 4', opacity: 0.80 },
+  wpc_dryline:          { color: '#ff8800', weight: 3, dashArray: '10 5', opacity: 0.90 },
+  mesonet_windshift:    { color: '#aaaaaa', weight: 2, dashArray: '4 4', opacity: 0.80 },
+  mesonet_td_gradient:  { color: '#ff8800', weight: 4, dashArray: '12 6', opacity: 0.90 },
+  mesonet_wind_pressure: { color: '#aaaaaa', weight: 2, dashArray: '4 4', opacity: 0.80 },
+}
+
+const BOUNDARY_LABEL: Record<string, string> = {
+  wpc_cold_front:       'Cold Front',
+  wpc_warm_front:       'Warm Front',
+  wpc_stationary_front: 'Stationary Front',
+  wpc_occluded_front:   'Occluded Front',
+  wpc_trough:           'Trough',
+  wpc_dryline:          'Dryline (WPC)',
+  mesonet_td_gradient:  'Dryline (Mesonet)',
+  mesonet_windshift:    'Outflow Boundary',
+  mesonet_wind_pressure: 'Outflow Boundary',
+}
+
+interface BoundaryLayerProps {
+  boundaries: BoundaryData[]
+  interactions: BoundaryInteractionData[]
+}
+
+function BoundaryLayer({ boundaries, interactions }: BoundaryLayerProps) {
+  const alarmCounties = useMemo(
+    () => new Set(interactions.filter(ix => ix.alarm_bell_flag).map(ix => ix.interaction_county)),
+    [interactions]
+  )
+
+  return (
+    <>
+      {boundaries.map((b, idx) => {
+        if (!b.position_lat?.length) return null
+        const style = BOUNDARY_STYLE[b.detected_by] ?? { color: '#ffffff', weight: 2, opacity: 0.7 }
+        const label = BOUNDARY_LABEL[b.detected_by] ?? b.detected_by
+        const positions: L.LatLngExpression[] = b.position_lat.map((lat, i) => [lat, b.position_lon[i]])
+        return (
+          <Polyline
+            key={`boundary-${idx}`}
+            positions={positions}
+            pathOptions={style}
+          >
+            <Tooltip sticky>
+              {label} — conf: {(b.confidence * 100).toFixed(0)}%
+              {b.motion_direction != null ? ` | moving ${b.motion_direction.toFixed(0)}°` : ''}
+            </Tooltip>
+          </Polyline>
+        )
+      })}
+
+      {/* Alarm bell markers at boundary interaction points */}
+      {interactions.filter(ix => ix.alarm_bell_flag).map((ix, idx) => {
+        const icon = L.divIcon({
+          className: '',
+          html: '<div style="font-size:18px;line-height:1;text-shadow:0 0 4px #000">⚡</div>',
+          iconSize: [20, 20],
+          iconAnchor: [10, 10],
+        })
+        return (
+          <Marker
+            key={`alarm-${idx}`}
+            position={[ix.interaction_point_lat, ix.interaction_point_lon]}
+            icon={icon}
+          />
+        )
+      })}
+    </>
+  )
+}
+
 // ── Tornado warning flash banner ──────────────────────────────────────────────
 interface FlashBannerProps {
   alerts: DashboardState['spc']['alerts']
@@ -690,16 +770,17 @@ interface Props {
 export function RiskMap({ state, onCountyClick }: Props) {
   const [countiesGeoJSON, setCountiesGeoJSON] = useState<GeoJSON.FeatureCollection | null>(null)
   const [overlays, setOverlays] = useState<Record<OverlayKey, boolean>>({
-    counties: true,
-    spc:      true,
-    tornado:  true,
-    wind:     false,
-    hail:     false,
-    warnings: true,
-    watches:  true,
-    mesonet:  false,
-    dryline:  true,
-    radar:    false,
+    counties:   true,
+    spc:        true,
+    tornado:    true,
+    wind:       false,
+    hail:       false,
+    warnings:   true,
+    watches:    true,
+    mesonet:    false,
+    dryline:    true,
+    boundaries: true,
+    radar:      false,
   })
   const [radarStation, setRadarStation] = useState('mrms')
 
@@ -768,8 +849,10 @@ export function RiskMap({ state, onCountyClick }: Props) {
     return m
   }, [state?.hrrr_counties])
 
-  const tierMap   = state?.tier_map    ?? {}
-  const dryline   = state?.dryline
+  const tierMap     = state?.tier_map    ?? {}
+  const dryline     = state?.dryline
+  const boundaries  = state?.boundaries ?? []
+  const interactions = state?.boundary_interactions ?? []
   const alertGJ   = state?.alert_geojson
   const outlookGJ = state?.outlook_geojson
   const tornGJ    = state?.torn_geojson
@@ -846,12 +929,17 @@ export function RiskMap({ state, onCountyClick }: Props) {
           <MesonetLayer observations={mesoObs} />
         )}
 
-        {/* Dryline polyline */}
+        {/* Dryline polyline (legacy — rendered separately for backwards compat) */}
         {overlays.dryline && drylinePositions.length > 0 && (
           <Polyline
             positions={drylinePositions}
             pathOptions={{ color: '#ff8800', weight: 4, opacity: 0.9, dashArray: '12 6' }}
           />
+        )}
+
+        {/* Multi-boundary layer: WPC fronts, outflow, dryline + alarm bell markers */}
+        {overlays.boundaries && (
+          <BoundaryLayer boundaries={boundaries} interactions={interactions} />
         )}
       </MapContainer>
 

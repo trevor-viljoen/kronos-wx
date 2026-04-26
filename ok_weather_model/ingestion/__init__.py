@@ -11,6 +11,7 @@ from .spc_products import (
 )
 from .era5_client import ERA5Client, SOUNDING_PRESSURE_LEVELS
 from .hrrr_client import HRRRClient
+from .wpc_boundary_client import fetch_wpc_boundaries
 
 __all__ = [
     "MesonetClient",
@@ -26,4 +27,5 @@ __all__ = [
     "ERA5Client",
     "SOUNDING_PRESSURE_LEVELS",
     "HRRRClient",
+    "fetch_wpc_boundaries",
 ]

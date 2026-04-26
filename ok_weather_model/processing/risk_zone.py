@@ -87,15 +87,18 @@ _TIER_COLOR = {
 @dataclass
 class CountyEnvironment:
     """Interpolated severe-weather environment for one county."""
-    county:       OklahomaCounty
-    MLCAPE:       float         # J/kg
-    MLCIN:        float         # J/kg (positive magnitude)
-    cap_strength: float         # °C
-    SRH_0_1km:    float         # m²/s²
-    SRH_0_3km:    float         # m²/s²
-    BWD_0_6km:    float         # kt
-    EHI:          float         # dimensionless
-    near_dryline: bool = False  # within 50 mi of dryline
+    county:            OklahomaCounty
+    MLCAPE:            float         # J/kg
+    MLCIN:             float         # J/kg (positive magnitude)
+    cap_strength:      float         # °C
+    SRH_0_1km:         float         # m²/s²
+    SRH_0_3km:         float         # m²/s²
+    BWD_0_6km:         float         # kt
+    EHI:               float         # dimensionless
+    near_dryline:      bool  = False  # within 50 mi of dryline (legacy compat)
+    convergence_score: float = 0.0   # [0, 1] boundary-forcing strength
+    alarm_bell:        bool  = False  # two boundaries intersect in favorable thermo
+    cap_break_prob:    float = 0.0   # [0, 1] physics-derived initiation probability
 
 
 @dataclass
@@ -196,6 +199,103 @@ def _interpolate_at_lat(
     return anchors[-1][1]
 
 
+def _boundary_distance_miles(
+    county: OklahomaCounty,
+    boundary: BoundaryObservation,
+) -> Optional[float]:
+    """
+    Minimum great-circle distance (miles, approx) from the county centroid
+    to the nearest vertex on the boundary polyline.
+    """
+    lats = boundary.position_lat
+    lons = boundary.position_lon
+    if not lats:
+        return None
+    min_dist = float("inf")
+    for blat, blon in zip(lats, lons):
+        dlat = (county.lat - blat) * _MILES_PER_DEG_LAT
+        dlon = (county.lon - blon) * _MILES_PER_DEG_LON
+        d = math.hypot(dlat, dlon)
+        if d < min_dist:
+            min_dist = d
+    return min_dist if min_dist < float("inf") else None
+
+
+# Boundary type → convergence weight
+_BOUNDARY_WEIGHTS: dict[str, float] = {
+    "wpc_cold_front":       1.2,
+    "wpc_stationary_front": 0.9,
+    "wpc_occluded_front":   0.8,
+    "wpc_trough":           0.8,
+    "wpc_dryline":          1.0,
+    "wpc_warm_front":       0.6,
+    "mesonet_windshift":    1.0,
+    "mesonet_td_gradient":  1.0,
+    "mesonet_wind_pressure": 1.0,
+    "radar":                0.9,
+    "satellite":            0.7,
+    "manual":               0.8,
+}
+
+
+def _compute_convergence_score(
+    county: OklahomaCounty,
+    boundaries: list[BoundaryObservation],
+) -> float:
+    """
+    County-level boundary-forcing score in [0, 1].
+
+    For each active boundary:
+      - Linear distance decay from 1.0 at 0 mi to 0.0 at 100 mi
+      - Multiplied by the boundary-type weight and boundary confidence
+    Contributions are summed and clamped to [0, 1].
+    """
+    score = 0.0
+    for b in boundaries:
+        dist = _boundary_distance_miles(county, b)
+        if dist is None or dist >= 100.0:
+            continue
+        decay = 1.0 - dist / 100.0
+        weight = _BOUNDARY_WEIGHTS.get(b.detected_by, 0.8)
+        score += decay * weight * b.confidence
+    return min(1.0, score)
+
+
+def _cap_break_prob(env: CountyEnvironment) -> float:
+    """
+    Physics-informed initiation probability [0, 1].
+
+    Placeholder for a future ML model (cap_break_prob); uses a weighted
+    linear blend of four sub-scores, each normalised to [0, 1]:
+      - CIN score  : lower effective CIN → higher probability (weight 0.35)
+      - CAPE score : higher instability → higher probability (weight 0.30)
+      - SRH score  : low-level shear lifts boundary-layer parcels (weight 0.20)
+      - Convergence: direct mechanical forcing uplift (weight 0.15)
+
+    Effective CIN is reduced by boundary proximity (convergence_score)
+    and hard-capped at 50 J/kg when an alarm_bell is active.
+    """
+    if env.MLCAPE < 200:
+        return 0.0
+
+    effective_cin = env.MLCIN * max(0.3, 1.0 - 0.5 * env.convergence_score)
+    if env.alarm_bell:
+        effective_cin = min(effective_cin, 50.0)
+
+    cape_score = min(1.0, (env.MLCAPE - 200) / 2800.0)
+    cin_score  = max(0.0, 1.0 - effective_cin / 300.0)
+    srh_score  = min(1.0, env.SRH_0_1km / 300.0)
+    conv_score = env.convergence_score
+
+    raw = (
+        0.35 * cin_score
+        + 0.30 * cape_score
+        + 0.20 * srh_score
+        + 0.15 * conv_score
+    )
+    return round(min(1.0, raw), 3)
+
+
 def _dryline_distance_miles(county: OklahomaCounty, dryline: BoundaryObservation) -> Optional[float]:
     """
     Approximate east-west distance (miles) from the county centroid to the
@@ -228,10 +328,14 @@ def _dryline_distance_miles(county: OklahomaCounty, dryline: BoundaryObservation
 
 
 def _score_environment(env: CountyEnvironment) -> str:
-    """Map a county environment to a risk tier string."""
+    """
+    Map a county environment to a risk tier string.
+
+    Boundary forcing (convergence_score, alarm_bell) reduces the effective CIN
+    seen by the scoring rules, allowing capped environments near active
+    boundaries to score into higher tiers.
+    """
     cape = env.MLCAPE
-    cin  = env.MLCIN
-    cap  = env.cap_strength
     srh1 = env.SRH_0_1km
     srh3 = env.SRH_0_3km
     ehi  = env.EHI
@@ -240,21 +344,32 @@ def _score_environment(env: CountyEnvironment) -> str:
     if cape < 200:
         return "LOW"
 
-    # EXTREME: uncapped, high instability, extreme kinematics
+    # Effective CIN: boundary convergence partially offsets the cap.
+    # At convergence_score = 1.0 (directly on a strong boundary), CIN is
+    # reduced by 50%.  An alarm_bell (two boundaries intersecting in a
+    # favorable environment) hard-caps effective CIN at 50 J/kg.
+    effective_cin = env.MLCIN * max(0.3, 1.0 - 0.5 * env.convergence_score)
+    if env.alarm_bell:
+        effective_cin = min(effective_cin, 50.0)
+
+    cin = effective_cin  # use effective CIN throughout scoring below
+
+    # EXTREME: uncapped (or boundary-forced past the cap), extreme kinematics
     if cin < 50 and cape >= 1500 and srh1 >= 250 and ehi >= 3.5:
         return "EXTREME"
 
-    # HIGH: cap is manageable, strong kinematics
+    # HIGH: cap is manageable (or boundary-forced), strong kinematics
     if cin < 100 and cape >= 1000 and srh1 >= 150 and ehi >= 2.0:
         return "HIGH"
     if cin < 80 and cape >= 800 and srh3 >= 300:
         return "HIGH"
 
-    # DANGEROUS_CAPPED: strong cap but violent kinematics + boundary nearby
-    # (or just extreme kinematics regardless of boundary)
-    if cin >= 80 and cape >= 800 and srh1 >= 150 and ehi >= 2.0:
+    # DANGEROUS_CAPPED: strong raw cap, violent kinematics, boundary nearby
+    if env.MLCIN >= 80 and cape >= 800 and srh1 >= 150 and ehi >= 2.0:
         return "DANGEROUS_CAPPED"
-    if cin >= 80 and cape >= 1000 and srh1 >= 200 and env.near_dryline:
+    if env.MLCIN >= 80 and cape >= 1000 and srh1 >= 200 and (
+        env.near_dryline or env.convergence_score >= 0.3
+    ):
         return "DANGEROUS_CAPPED"
 
     # MODERATE: some potential, moderate kinematics
@@ -280,6 +395,8 @@ def build_county_environments(
     dryline: Optional[BoundaryObservation] = None,
     fwd_indices=None,
     fwd_kinematics=None,
+    boundaries: Optional[list[BoundaryObservation]] = None,
+    alarm_counties: Optional[set] = None,
 ) -> list[CountyEnvironment]:
     """
     Build a CountyEnvironment for every Oklahoma county by piecewise-
@@ -291,9 +408,11 @@ def build_county_environments(
     oun_kinematics : KinematicProfile from OUN sounding (may be None)
     lmn_indices    : ThermodynamicIndices from LMN sounding (may be None)
     lmn_kinematics : KinematicProfile from LMN sounding (may be None)
-    dryline        : detected BoundaryObservation (may be None)
+    dryline        : detected BoundaryObservation (may be None, legacy compat)
     fwd_indices    : ThermodynamicIndices from FWD sounding (may be None)
     fwd_kinematics : KinematicProfile from FWD sounding (may be None)
+    boundaries     : all active BoundaryObservation objects (new multi-boundary path)
+    alarm_counties : set of OklahomaCounty members with alarm_bell from interactions
     """
     # Extract scalar values; None when a station is unavailable
     def _ti(obj, attr):
@@ -336,14 +455,22 @@ def build_county_environments(
         bwd6  = _interpolate_at_lat(lat, fwd_bwd6,  oun_bwd6,  lmn_bwd6)  or 0.0
         ehi   = _interpolate_at_lat(lat, fwd_ehi,   oun_ehi,   lmn_ehi)   or 0.0
 
-        # Dryline proximity: county is "near dryline" if within ±50 miles E-W
+        # Legacy dryline proximity flag (kept for backwards compat)
         near_dl = False
         if dryline is not None:
             dist = _dryline_distance_miles(county, dryline)
             if dist is not None and -50 <= dist <= 50:
                 near_dl = True
 
-        environments.append(CountyEnvironment(
+        # Multi-boundary convergence score
+        all_boundaries: list[BoundaryObservation] = list(boundaries or [])
+        if dryline is not None and dryline not in all_boundaries:
+            all_boundaries.append(dryline)
+
+        conv_score = _compute_convergence_score(county, all_boundaries)
+        alarm = alarm_counties is not None and county in alarm_counties
+
+        env = CountyEnvironment(
             county=county,
             MLCAPE=cape,
             MLCIN=cin,
@@ -353,7 +480,11 @@ def build_county_environments(
             BWD_0_6km=bwd6,
             EHI=ehi,
             near_dryline=near_dl,
-        ))
+            convergence_score=conv_score,
+            alarm_bell=alarm,
+        )
+        env.cap_break_prob = _cap_break_prob(env)
+        environments.append(env)
 
     return environments
 
@@ -367,6 +498,8 @@ def compute_risk_zones(
     min_tier: str = "MARGINAL",
     fwd_indices=None,
     fwd_kinematics=None,
+    boundaries: Optional[list[BoundaryObservation]] = None,
+    alarm_counties: Optional[set] = None,
 ) -> list[RiskZone]:
     """
     Compute county-level risk zones for Oklahoma.
@@ -382,6 +515,8 @@ def compute_risk_zones(
     fwd_indices    : ThermodynamicIndices from FWD sounding — extends the
                      interpolation corridor southward to 32.83°N (may be None)
     fwd_kinematics : KinematicProfile from FWD sounding (may be None)
+    boundaries     : all active BoundaryObservation objects for convergence scoring
+    alarm_counties : set of OklahomaCounty members with alarm_bell from interactions
     """
     environments = build_county_environments(
         oun_indices, oun_kinematics,
@@ -389,6 +524,8 @@ def compute_risk_zones(
         dryline,
         fwd_indices=fwd_indices,
         fwd_kinematics=fwd_kinematics,
+        boundaries=boundaries,
+        alarm_counties=alarm_counties,
     )
 
     min_rank = _TIER_RANK.get(min_tier, 1)
@@ -440,6 +577,8 @@ def compute_risk_zones_from_hrrr(
     hrrr_snapshot,
     dryline: Optional[BoundaryObservation] = None,
     min_tier: str = "MARGINAL",
+    boundaries: Optional[list[BoundaryObservation]] = None,
+    alarm_counties: Optional[set] = None,
 ) -> list[RiskZone]:
     """
     Compute county risk zones using HRRR per-county data directly.
@@ -450,26 +589,36 @@ def compute_risk_zones_from_hrrr(
 
     Parameters
     ----------
-    hrrr_snapshot : HRRRCountySnapshot from HRRRClient.get_county_snapshot()
-    dryline       : Optional detected BoundaryObservation
-    min_tier      : Minimum tier to include (default "MARGINAL")
+    hrrr_snapshot  : HRRRCountySnapshot from HRRRClient.get_county_snapshot()
+    dryline        : Optional detected BoundaryObservation (legacy compat)
+    min_tier       : Minimum tier to include (default "MARGINAL")
+    boundaries     : all active BoundaryObservation objects for convergence scoring
+    alarm_counties : set of OklahomaCounty members with alarm_bell flag
     """
     if hrrr_snapshot is None:
         return []
 
     min_rank = _TIER_RANK.get(min_tier, 1)
 
+    # Build the full boundary list (include legacy dryline if present)
+    all_boundaries: list[BoundaryObservation] = list(boundaries or [])
+    if dryline is not None and dryline not in all_boundaries:
+        all_boundaries.append(dryline)
+
     scored: dict[str, list[CountyEnvironment]] = {}
 
     for pt in hrrr_snapshot.counties:
         county = pt.county
 
-        # Dryline proximity flag
+        # Legacy dryline proximity flag
         near_dl = False
         if dryline is not None:
             dist = _dryline_distance_miles(county, dryline)
             if dist is not None and -50 <= dist <= 50:
                 near_dl = True
+
+        conv_score = _compute_convergence_score(county, all_boundaries)
+        alarm = alarm_counties is not None and county in alarm_counties
 
         env = CountyEnvironment(
             county=county,
@@ -481,7 +630,10 @@ def compute_risk_zones_from_hrrr(
             BWD_0_6km=pt.BWD_0_6km,
             EHI=pt.EHI or 0.0,
             near_dryline=near_dl,
+            convergence_score=conv_score,
+            alarm_bell=alarm,
         )
+        env.cap_break_prob = _cap_break_prob(env)
 
         tier = _score_environment(env)
         if _TIER_RANK.get(tier, 0) >= min_rank:

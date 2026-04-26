@@ -70,9 +70,18 @@ class BoundaryObservation(BaseModel):
     @field_validator("detected_by")
     @classmethod
     def valid_detector(cls, v: str) -> str:
-        allowed = {"mesonet_windshift", "mesonet_td_gradient", "radar", "satellite", "manual"}
+        # WPC manual analysis sub-types (wpc_<front_type>)
+        _WPC = {
+            "wpc_cold_front", "wpc_warm_front", "wpc_stationary_front",
+            "wpc_occluded_front", "wpc_trough", "wpc_dryline",
+        }
+        # Mesonet-derived detectors
+        _MESO = {
+            "mesonet_windshift", "mesonet_td_gradient", "mesonet_wind_pressure",
+        }
+        allowed = _WPC | _MESO | {"radar", "satellite", "manual"}
         if v not in allowed:
-            raise ValueError(f"detected_by must be one of {allowed}, got '{v}'")
+            raise ValueError(f"detected_by must be one of {sorted(allowed)}, got '{v}'")
         return v
 
     @model_validator(mode="after")

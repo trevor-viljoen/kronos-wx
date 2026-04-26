@@ -182,6 +182,31 @@ export interface StationObs {
   wind_gust: number | null
 }
 
+export type BoundaryType = 'DRYLINE' | 'OUTFLOW' | 'FRONTAL' | 'DIFFERENTIAL_HEATING' | 'OLD_MCS_REMNANT'
+
+export interface BoundaryData {
+  boundary_type: BoundaryType
+  detected_by: string
+  position_lat: number[]
+  position_lon: number[]
+  confidence: number
+  motion_speed: number | null
+  motion_direction: number | null
+  counties: string[]
+  valid_time: string | null
+}
+
+export interface BoundaryInteractionData {
+  interaction_point_lat: number
+  interaction_point_lon: number
+  interaction_county: string
+  alarm_bell_flag: boolean
+  convergence_magnitude: number | null
+  boundary_1_type: string
+  boundary_2_type: string
+  notes: string | null
+}
+
 export interface DashboardState {
   updated_at: string | null
   hrrr_valid: string | null
@@ -192,6 +217,8 @@ export interface DashboardState {
   ces: CESData | null
   moisture: MoistureData | null
   dryline: DrylineData | null
+  boundaries: BoundaryData[]
+  boundary_interactions: BoundaryInteractionData[]
   tendency: TendencyRow[]
   spc: SPCData
   alert_geojson: GeoJSON.FeatureCollection | null

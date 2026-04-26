@@ -30,6 +30,8 @@ from .dryline_detector import (
     compute_dryline_surge_rate,
     analyze_dryline_from_mesonet,
 )
+from .outflow_detector import detect_outflow_boundaries
+from .boundary_interactions import find_boundary_interactions
 from .risk_zone import (
     build_county_environments,
     compute_risk_zones,
@@ -59,6 +61,8 @@ __all__ = [
     "detect_dryline",
     "compute_dryline_surge_rate",
     "analyze_dryline_from_mesonet",
+    "detect_outflow_boundaries",
+    "find_boundary_interactions",
     "build_county_environments",
     "compute_risk_zones",
     "compute_risk_zones_from_hrrr",
