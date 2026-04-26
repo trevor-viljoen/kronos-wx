@@ -15,7 +15,7 @@ const TIER_STYLE: Record<Tier, { color: string; fillOpacity: number }> = {
 
 const ALERT_STYLE: Record<string, { color: string; fillOpacity: number }> = {
   'Tornado Warning':             { color: '#ff2222', fillOpacity: 0.35 },
-  'Tornado Watch':               { color: '#ff6600', fillOpacity: 0.20 },
+  'Tornado Watch':               { color: '#33cc66', fillOpacity: 0.20 },
   'Severe Thunderstorm Warning': { color: '#ffcc00', fillOpacity: 0.20 },
 }
 
@@ -316,7 +316,7 @@ function WatchLayer({ alerts, countiesGeoJSON }: WatchLayerProps) {
     const m = new Map<string, { color: string; label: string; num?: number }>()
     for (const a of alerts) {
       if (a.event !== 'Tornado Watch' && a.event !== 'Severe Thunderstorm Watch') continue
-      const color = a.event === 'Tornado Watch' ? '#ff6600' : '#ffcc00'
+      const color = a.event === 'Tornado Watch' ? '#33cc66' : '#ffcc00'
       const label = a.event === 'Tornado Watch' ? 'TORNADO WATCH' : 'SVR TSTM WATCH'
       for (const county of parseWatchCounties(a.area_desc)) {
         m.set(county, { color, label, num: a.watch_number ?? undefined })
@@ -596,8 +596,8 @@ export function RiskMap({ state, onCountyClick }: Props) {
           ))}
           {overlays.watches && state?.spc?.alerts?.some(a => a.event === 'Tornado Watch') && (
             <div className="legend-row">
-              <div className="legend-swatch" style={{ background: '#ff6600', opacity: 0.5, border: '2px dashed #ff6600' }} />
-              <span style={{ color: '#ff6600' }}>Tor Watch</span>
+              <div className="legend-swatch" style={{ background: '#33cc66', opacity: 0.5, border: '2px dashed #33cc66' }} />
+              <span style={{ color: '#33cc66' }}>Tor Watch</span>
             </div>
           )}
           {overlays.watches && state?.spc?.alerts?.some(a => a.event === 'Severe Thunderstorm Watch') && (
