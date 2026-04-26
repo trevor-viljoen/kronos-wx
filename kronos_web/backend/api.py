@@ -175,11 +175,24 @@ async def _load_mesonet_stations() -> None:
     logger.info("Loaded Mesonet station coords for %d stations", len(coords))
 
 
+# ── Cached serialized state (updated on every broadcast) ─────────────────────
+# Reused by /api/state so multiple simultaneous clients don't each pay the
+# json.dumps cost on the full state dict.
+_state_json: str = "{}"
+
+# ── RainViewer frame-list cache (shared across all browser clients) ───────────
+import time as _time
+_rv_cache: dict = {"data": None, "fetched_at": 0.0}
+_RV_API_URL = "https://api.rainviewer.com/public/weather-maps.json"
+_RV_TTL_S   = 120   # refresh at most once every 2 minutes
+
 # ── Helper: broadcast to all SSE subscribers ─────────────────────────────────
 
 async def _broadcast() -> None:
+    global _state_json
     _state["updated_at"] = datetime.now(tz=timezone.utc).isoformat()
     payload = json.dumps(_state, default=_json_default)
+    _state_json = payload   # cache for /api/state
     dead = []
     for q in _subscribers:
         try:
@@ -978,10 +991,9 @@ app.add_middleware(
 
 @app.get("/api/state")
 async def get_state():
-    """Return the full current dashboard state as JSON."""
-    return JSONResponse(
-        content=json.loads(json.dumps(_state, default=_json_default))
-    )
+    """Return the full current dashboard state as JSON (uses cached serialization)."""
+    return Response(content=_state_json, media_type="application/json",
+                    headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/stream")
@@ -1031,7 +1043,34 @@ async def get_counties_geojson():
     """Oklahoma county boundaries GeoJSON (Census TIGER, filtered to FIPS 40)."""
     if _ok_counties_geojson is None:
         return JSONResponse({"error": "County GeoJSON not loaded yet"}, status_code=503)
-    return JSONResponse(_ok_counties_geojson)
+    # County boundaries never change — browsers and proxies can cache for 24 h.
+    return JSONResponse(_ok_counties_geojson,
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/api/radar/frames")
+async def radar_frames():
+    """
+    Cached proxy for the RainViewer frame list.
+
+    All browser clients hit this endpoint instead of calling api.rainviewer.com
+    directly — the backend fetches at most once every 2 minutes regardless of
+    how many clients are open.
+    """
+    now = _time.monotonic()
+    if _rv_cache["data"] is None or now - _rv_cache["fetched_at"] > _RV_TTL_S:
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.get(_RV_API_URL)
+                resp.raise_for_status()
+                _rv_cache["data"] = resp.json()
+                _rv_cache["fetched_at"] = now
+        except Exception as exc:
+            logger.warning("RainViewer frame-list fetch failed: %s", exc)
+            if _rv_cache["data"] is None:
+                return JSONResponse({"error": "RainViewer unavailable"}, status_code=502)
+    return JSONResponse(_rv_cache["data"],
+                        headers={"Cache-Control": f"public, max-age={_RV_TTL_S}"})
 
 
 _RIDGE2_BASE    = "https://opengeo.ncep.noaa.gov/geoserver"

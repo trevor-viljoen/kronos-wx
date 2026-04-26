@@ -499,7 +499,7 @@ const RADAR_STATIONS = [
 
 const RADAR_INTERVAL = 600
 const RADAR_OPACITY  = 0.70
-const RAINVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json'
+const RAINVIEWER_API = '/api/radar/frames'   // backend proxy — cached, shared across all clients
 const RIDGE2_FRAMES  = 12
 const RIDGE2_STEP_MS = 5 * 60 * 1000
 
