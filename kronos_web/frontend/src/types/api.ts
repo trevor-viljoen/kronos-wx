@@ -109,6 +109,7 @@ export interface AlertData {
   area_desc: string
   expires_utc: string | null
   expires_label: string
+  description: string
   watch_number: number | null
   priority: number
 }

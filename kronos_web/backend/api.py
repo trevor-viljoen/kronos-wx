@@ -313,6 +313,7 @@ def _ser_alert(a) -> dict:
         "area_desc":    a.area_desc,
         "expires_utc":  a.expires_utc.isoformat() if a.expires_utc else None,
         "expires_label":a.expires_label,
+        "description":  getattr(a, "description", ""),
         "watch_number": a.watch_number,
         "priority":     a.priority,
     }

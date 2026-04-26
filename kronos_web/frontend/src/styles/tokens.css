@@ -1,58 +1,59 @@
-/* KRONOS-WX Design Tokens — generated from kronos_web/DESIGN.md */
+/* KRONOS-WX — SIGNAL design system */
 :root {
-  /* Backgrounds */
-  --color-deep:         #050510;
-  --color-panel:        #080820;
-  --color-panel-raised: #0d1530;
-  --color-header:       #0e2040;
+  /* ── Foundation: true black ─────────────────────────────────────────── */
+  --color-deep:         #000000;
+  --color-panel:        #0b0b0b;
+  --color-panel-raised: #111111;
+  --color-header:       #050505;
 
-  /* Borders */
-  --color-border:       #1e3a5f;
-  --color-border-warn:  #5f3a1e;
-  --color-border-alert: #5f1e1e;
+  /* ── Borders: structural only, no hue ──────────────────────────────── */
+  --color-border:       #1f1f1f;
+  --color-border-warn:  rgba(255, 102, 0, 0.25);
+  --color-border-alert: rgba(255, 34, 34, 0.35);
 
-  /* Text */
-  --color-accent:       #7ec8e3;
-  --color-text:         #d0d8e8;
-  --color-text-dim:     #5a7090;
-  --color-text-muted:   #2a4060;
+  /* ── Text: achromatic — the data is the color ───────────────────────── */
+  --color-accent:       #c8c8c8;
+  --color-text:         #d0d0d0;
+  --color-text-dim:     #555555;
+  --color-text-muted:   #282828;
 
-  /* Risk Tiers */
+  /* ── Risk tiers: the only chromatic elements ────────────────────────── */
   --tier-extreme:          #ff2222;
-  --tier-extreme-bg:       #2a0505;
+  --tier-extreme-bg:       #1c0000;
   --tier-high:             #ff6600;
-  --tier-high-bg:          #2a1205;
+  --tier-high-bg:          #180800;
   --tier-dangerous:        #cc44ff;
-  --tier-dangerous-bg:     #1a0530;
+  --tier-dangerous-bg:     #0f0018;
   --tier-moderate:         #ffcc00;
-  --tier-moderate-bg:      #1a1400;
+  --tier-moderate-bg:      #121000;
   --tier-marginal:         #44aa44;
-  --tier-marginal-bg:      #051205;
-  --tier-low:              #4a5568;
-  --tier-low-bg:           #080810;
+  --tier-marginal-bg:      #001200;
+  --tier-low:              #363636;
+  --tier-low-bg:           #080808;
 
-  /* Alert types */
-  --warning-tornado:  #ff2222;
-  --warning-watch:    #ff6600;
-  --warning-svr:      #ffcc00;
-  --warning-md:       #7ec8e3;
+  /* ── Alert types ────────────────────────────────────────────────────── */
+  --warning-tornado: #ff2222;
+  --warning-watch:   #ff6600;
+  --warning-svr:     #ffcc00;
+  --warning-md:      #7ec8e3;
 
-  /* Typography */
-  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
-  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+  /* ── Typography ─────────────────────────────────────────────────────── */
+  --font-display: "Bebas Neue", "Arial Narrow", sans-serif;
+  --font-mono:    "JetBrains Mono", ui-monospace, monospace;
+  --font-sans:    "JetBrains Mono", ui-monospace, monospace;
 
-  /* Spacing */
-  --space-xs:  4px;
-  --space-sm:  8px;
-  --space-md:  16px;
-  --space-lg:  24px;
+  /* ── Spacing ────────────────────────────────────────────────────────── */
+  --space-xs:  3px;
+  --space-sm:  6px;
+  --space-md:  12px;
+  --space-lg:  20px;
   --space-xl:  32px;
   --space-2xl: 48px;
 
-  /* Radii */
-  --radius-sm:   4px;
-  --radius-md:   6px;
-  --radius-lg:   10px;
-  --radius-xl:   16px;
+  /* ── Radii: nearly none ─────────────────────────────────────────────── */
+  --radius-sm:   2px;
+  --radius-md:   2px;
+  --radius-lg:   2px;
+  --radius-xl:   3px;
   --radius-full: 9999px;
 }

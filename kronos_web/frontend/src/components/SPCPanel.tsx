@@ -15,58 +15,98 @@ function abbrevCounties(areaDesc: string, max = 6): string {
   return parts.slice(0, max).join(', ') + ` +${parts.length - max}`
 }
 
-function TornadoWarning({ a }: { a: AlertData }) {
+// ── Shared popup ──────────────────────────────────────────────────────────────
+
+interface PopupProps {
+  title: string
+  titleColor: string
+  meta: { label: string; value: string; valueColor?: string }[]
+  body: string
+  onClose: () => void
+}
+
+function AlertPopup({ title, titleColor, meta, body, onClose }: PopupProps) {
   return (
-    <div className="alert-card tornado-warning">
-      <div className="event-label" style={{ color: 'var(--warning-tornado)' }}>
-        🌪 TORNADO WARNING
+    <div className="md-popup-overlay" onClick={onClose}>
+      <div className="md-popup" onClick={e => e.stopPropagation()}>
+        <div className="md-popup-header">
+          <span style={{ color: titleColor, fontFamily: 'var(--font-display)', fontSize: 16, letterSpacing: '0.1em' }}>
+            {title}
+          </span>
+          <button className="md-popup-close" onClick={onClose}>✕</button>
+        </div>
+        {meta.map(({ label, value, valueColor }) => value ? (
+          <div key={label} className="md-popup-meta">
+            <span style={{ color: 'var(--color-text-dim)' }}>{label}:</span>{' '}
+            <span style={valueColor ? { color: valueColor, fontWeight: 700 } : undefined}>{value}</span>
+          </div>
+        ) : null)}
+        <pre className="md-popup-body">
+          {body || 'No text available.'}
+        </pre>
       </div>
-      <div className="area">{abbrevCounties(a.area_desc, 5)}</div>
-      <div className="expires">expires {a.expires_label}</div>
     </div>
   )
 }
 
-function TornadoWatch({ a }: { a: AlertData }) {
+// ── Alert cards ───────────────────────────────────────────────────────────────
+
+function AlertCard({ a, color, label }: { a: AlertData; color: string; label: string }) {
+  const [open, setOpen] = useState(false)
+  const cardClass =
+    a.event === 'Tornado Warning'           ? 'tornado-warning' :
+    a.event === 'Tornado Watch'             ? 'tornado-watch'   :
+    a.event === 'Severe Thunderstorm Warning' ? 'svr-warning'   : 'md-card'
+
   const num = a.watch_number ? ` #${a.watch_number}` : ''
-  return (
-    <div className="alert-card tornado-watch">
-      <div className="event-label" style={{ color: 'var(--warning-watch)' }}>
-        TORNADO WATCH{num}
-      </div>
-      <div className="area">{abbrevCounties(a.area_desc, 8)}</div>
-      <div className="expires">expires {a.expires_label}</div>
-    </div>
-  )
-}
 
-function SvrWarning({ alerts }: { alerts: AlertData[] }) {
-  const counties = abbrevCounties(
-    alerts.map(a => a.area_desc).join(', '), 6
-  )
   return (
-    <div className="alert-card svr-warning">
-      <div className="event-label" style={{ color: 'var(--warning-svr)' }}>
-        {alerts.length} SVR THUNDERSTORM WARNING{alerts.length > 1 ? 'S' : ''}
+    <>
+      <div
+        className={`alert-card ${cardClass}`}
+        style={{ cursor: 'pointer' }}
+        onClick={() => setOpen(true)}
+      >
+        <div className="event-label" style={{ color }}>{label}{num}</div>
+        <div className="area">{abbrevCounties(a.area_desc, 6)}</div>
+        {a.expires_label && (
+          <div className="expires">expires {a.expires_label}</div>
+        )}
+        <div style={{ fontSize: 10, color: 'var(--color-text-muted)', marginTop: 3 }}>
+          click to read ↗
+        </div>
       </div>
-      <div className="area">{counties}</div>
-    </div>
+
+      {open && (
+        <AlertPopup
+          title={`${a.event}${num}`}
+          titleColor={color}
+          meta={[
+            { label: 'Areas', value: a.area_desc },
+            { label: 'Expires', value: a.expires_label },
+            { label: 'Headline', value: a.headline },
+          ]}
+          body={a.description}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
   )
 }
 
 function MDCard({ md }: { md: MDData }) {
   const [open, setOpen] = useState(false)
-  const probPct = md.prob_watch != null ? md.prob_watch : null
+  const probPct   = md.prob_watch ?? null
   const probColor = probPct != null
     ? probPct >= 60 ? '#ff2222' : probPct >= 40 ? '#ff6600' : '#ffcc00'
     : 'var(--color-text-dim)'
+
   return (
     <>
       <div
         className="alert-card md-card"
         style={{ cursor: 'pointer' }}
         onClick={() => setOpen(true)}
-        title="Click to read full discussion"
       >
         <div className="event-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
           <span style={{ color: 'var(--warning-md)' }}>MD #{md.number}</span>
@@ -79,63 +119,37 @@ function MDCard({ md }: { md: MDData }) {
         {md.concerning && (
           <div className="area" style={{ marginTop: 2 }}>{md.concerning.slice(0, 80)}</div>
         )}
-        <div style={{ fontSize: 10, color: 'var(--color-text-dim)', marginTop: 4 }}>
+        <div style={{ fontSize: 10, color: 'var(--color-text-muted)', marginTop: 3 }}>
           click to read ↗
         </div>
       </div>
 
       {open && (
-        <div className="md-popup-overlay" onClick={() => setOpen(false)}>
-          <div className="md-popup" onClick={e => e.stopPropagation()}>
-            <div className="md-popup-header">
-              <span style={{ color: 'var(--warning-md)', fontWeight: 700 }}>
-                Mesoscale Discussion #{md.number}
-              </span>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <a
-                  href={md.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{ fontSize: 11, color: 'var(--color-accent)' }}
-                >
-                  SPC ↗
-                </a>
-                <button className="md-popup-close" onClick={() => setOpen(false)}>✕</button>
-              </div>
-            </div>
-            {md.areas_affected && (
-              <div className="md-popup-meta">
-                <span style={{ color: 'var(--color-text-dim)' }}>Areas:</span> {md.areas_affected}
-              </div>
-            )}
-            {md.concerning && (
-              <div className="md-popup-meta">
-                <span style={{ color: 'var(--color-text-dim)' }}>Concerning:</span> {md.concerning}
-              </div>
-            )}
-            {probPct != null && (
-              <div className="md-popup-meta">
-                <span style={{ color: 'var(--color-text-dim)' }}>Watch probability:</span>{' '}
-                <span style={{ color: probColor, fontWeight: 700 }}>{probPct}%</span>
-              </div>
-            )}
-            <pre className="md-popup-body">
-              {md.body_lines.join('\n') || 'No discussion text available.'}
-            </pre>
-          </div>
-        </div>
+        <AlertPopup
+          title={`Mesoscale Discussion #${md.number}`}
+          titleColor="var(--warning-md)"
+          meta={[
+            { label: 'Areas', value: md.areas_affected },
+            { label: 'Concerning', value: md.concerning },
+            { label: 'Watch probability', value: probPct != null ? `${probPct}%` : '', valueColor: probColor },
+          ]}
+          body={md.body_lines.join('\n')}
+          onClose={() => setOpen(false)}
+        />
       )}
     </>
   )
 }
 
+// ── Panel ─────────────────────────────────────────────────────────────────────
+
 export function SPCPanel({ spc }: Props) {
-  const outlook       = spc?.outlook
-  const alerts        = spc?.alerts ?? []
-  const mds           = spc?.mds    ?? []
-  const torWarnings   = alerts.filter(a => a.event === 'Tornado Warning')
-  const torWatches    = alerts.filter(a => a.event === 'Tornado Watch')
-  const svrWarnings   = alerts.filter(a => a.event === 'Severe Thunderstorm Warning')
+  const outlook     = spc?.outlook
+  const alerts      = spc?.alerts ?? []
+  const mds         = spc?.mds    ?? []
+  const torWarnings = alerts.filter(a => a.event === 'Tornado Warning')
+  const torWatches  = alerts.filter(a => a.event === 'Tornado Watch')
+  const svrWarnings = alerts.filter(a => a.event === 'Severe Thunderstorm Warning')
 
   const cat      = outlook?.category ?? 'NONE'
   const prob     = outlook?.max_tornado_prob
@@ -150,9 +164,9 @@ export function SPCPanel({ spc }: Props) {
       </div>
       <div className="panel-body" style={{ padding: '8px 12px', overflowY: 'auto' }}>
 
-        {/* D1 outlook row */}
+        {/* D1 outlook */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-          <span style={{ fontSize: 11, color: 'var(--color-text-dim)', letterSpacing: '0.06em' }}>D1</span>
+          <span style={{ fontFamily: 'var(--font-display)', fontSize: 12, letterSpacing: '0.1em', color: 'var(--color-text-dim)' }}>D1</span>
           <span className={`spc-badge ${cat}`}>{cat}</span>
           {prob != null && prob > 0 && (
             <span className="mono" style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
@@ -160,18 +174,25 @@ export function SPCPanel({ spc }: Props) {
             </span>
           )}
           {sig && (
-            <span style={{ color: '#ff2222', fontSize: 12, fontWeight: 700 }}>⚠ SIG TOR</span>
+            <span style={{ fontFamily: 'var(--font-display)', fontSize: 13, letterSpacing: '0.1em', color: '#ff2222' }}>SIG TOR</span>
           )}
         </div>
 
-        {/* Active products */}
-        {torWarnings.map((a, i) => <TornadoWarning key={i} a={a} />)}
-        {torWatches.map((a, i)  => <TornadoWatch   key={i} a={a} />)}
-        {svrWarnings.length > 0 && <SvrWarning alerts={svrWarnings} />}
-        {mds.map((md, i)        => <MDCard key={i} md={md} />)}
+        {torWarnings.map((a, i) => (
+          <AlertCard key={i} a={a} color="var(--warning-tornado)" label="TORNADO WARNING" />
+        ))}
+        {torWatches.map((a, i) => (
+          <AlertCard key={i} a={a} color="var(--warning-watch)" label="TORNADO WATCH" />
+        ))}
+        {svrWarnings.map((a, i) => (
+          <AlertCard key={i} a={a} color="var(--warning-svr)" label="SVR THUNDERSTORM WARNING" />
+        ))}
+        {mds.map((md, i) => (
+          <MDCard key={i} md={md} />
+        ))}
 
         {!hasAlerts && (
-          <div style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+          <div style={{ color: 'var(--color-text-muted)', fontSize: 11 }}>
             No active warnings, watches, or MDs
           </div>
         )}

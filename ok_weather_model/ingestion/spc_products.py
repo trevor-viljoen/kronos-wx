@@ -63,6 +63,7 @@ class NWSAlert:
     headline:     str
     expires_utc:  Optional[datetime]
     area_desc:    str             # comma-separated county names
+    description:  str = ""       # full alert text body
     watch_number: Optional[int] = None  # parsed from headline for watches
 
     @property
@@ -175,8 +176,9 @@ def fetch_active_watches_warnings(timeout: float = 12.0) -> list[NWSAlert]:
         if expires_utc and expires_utc < now_utc:
             continue
 
-        headline  = props.get("headline", "")
-        area_desc = props.get("areaDesc", "")
+        headline    = props.get("headline", "")
+        area_desc   = props.get("areaDesc", "")
+        description = props.get("description", "")
 
         # Extract watch number from headline ("Tornado Watch Number 141")
         watch_number: Optional[int] = None
@@ -189,6 +191,7 @@ def fetch_active_watches_warnings(timeout: float = 12.0) -> list[NWSAlert]:
             headline=headline,
             expires_utc=expires_utc,
             area_desc=area_desc,
+            description=description,
             watch_number=watch_number,
         ))
 
