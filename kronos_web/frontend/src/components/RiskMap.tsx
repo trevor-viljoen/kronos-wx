@@ -68,8 +68,8 @@ const OVERLAY_LABELS: Record<OverlayKey, string> = {
 
 // ── GOES-East satellite tile layers ──────────────────────────────────────────
 // IEM tile service: updated every ~5 min, free public access
-const GOES_VIS_URL  = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes_east_vis/{z}/{x}/{y}.png'
-const GOES_IR_URL   = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes_east/{z}/{x}/{y}.png'
+const GOES_VIS_URL  = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-east-vis-1km/{z}/{x}/{y}.png'
+const GOES_IR_URL   = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-east-ir-4km/{z}/{x}/{y}.png'
 
 type SatProduct = 'vis' | 'ir'
 const SAT_LABELS: Record<SatProduct, string> = { vis: 'VIS', ir: 'IR' }
@@ -453,9 +453,13 @@ interface MesonetLayerProps {
 }
 
 function windArrowSvg(dir: number, speed: number): string {
+  // dir is meteorological FROM direction (0° = FROM north, 270° = FROM west).
+  // Arrow should point in the direction the wind is traveling TO,
+  // so rotate by dir + 180°.
+  const toDir = (dir + 180) % 360
   const color = speed >= 30 ? '#ff4444' : speed >= 20 ? '#ff8800' : '#7ec8e3'
   return `<svg width="16" height="16" viewBox="-8 -8 16 16" xmlns="http://www.w3.org/2000/svg"
-    style="transform:rotate(${dir}deg);display:block">
+    style="transform:rotate(${toDir}deg);display:block">
     <line x1="0" y1="6" x2="0" y2="-6" stroke="${color}" stroke-width="1.5"/>
     <polygon points="0,-8 -3,-2 3,-2" fill="${color}"/>
   </svg>`
@@ -923,7 +927,6 @@ export function RiskMap({ state, onCountyClick }: Props) {
             url={satProduct === 'vis' ? GOES_VIS_URL : GOES_IR_URL}
             attribution='GOES-East &copy; <a href="https://mesonet.agron.iastate.edu/">IEM</a>'
             opacity={0.75}
-            tms={satProduct === 'vis'}
             maxZoom={8}
           />
         )}
