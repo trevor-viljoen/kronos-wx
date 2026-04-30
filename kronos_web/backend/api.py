@@ -1316,4 +1316,59 @@ async def radar_tile_proxy(request: Request, station: str, time_iso: str, z: int
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "updated_at": _state.get("updated_at")}
+    now = datetime.now(tz=timezone.utc)
+
+    def _age_s(ts_str: str | None) -> int | None:
+        if not ts_str:
+            return None
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            return int((now - ts).total_seconds())
+        except Exception:
+            return None
+
+    hrrr_valid   = _state.get("hrrr_valid")
+    updated_at   = _state.get("updated_at")
+    env          = _state.get("environment") or {}
+    spc          = _state.get("spc") or {}
+
+    # Derive data ages
+    hrrr_age_s   = _age_s(updated_at)
+    env_age_s    = _age_s((env.get("oun") or {}).get("valid_time"))
+
+    # Task liveness — check asyncio task registry
+    running_tasks = {t.get_name() for t in asyncio.all_tasks() if not t.done()}
+    tasks = {
+        name: ("running" if name in running_tasks else "stopped")
+        for name in ("hrrr", "env", "surface", "spc")
+    }
+
+    # Staleness thresholds (seconds)
+    HRRR_STALE  = 20 * 60   # >20 min since last broadcast → warn
+    ENV_STALE   = 90 * 60   # >90 min since last sounding   → warn
+
+    warnings = []
+    if hrrr_age_s is not None and hrrr_age_s > HRRR_STALE:
+        warnings.append(f"HRRR data is {hrrr_age_s // 60}m old")
+    if env_age_s is not None and env_age_s > ENV_STALE:
+        warnings.append(f"Sounding data is {env_age_s // 60}m old")
+    for name, status in tasks.items():
+        if status == "stopped":
+            warnings.append(f"{name} task is not running")
+
+    overall = "degraded" if warnings else "ok"
+
+    return {
+        "status":       overall,
+        "warnings":     warnings,
+        "updated_at":   updated_at,
+        "hrrr_valid":   hrrr_valid,
+        "hrrr_age_s":   hrrr_age_s,
+        "env_age_s":    env_age_s,
+        "counties":     len(_state.get("hrrr_counties", [])),
+        "mesonet_obs":  len(_state.get("mesonet_obs", [])),
+        "boundaries":   len(_state.get("boundaries", [])),
+        "alerts":       len((spc.get("alerts") or [])),
+        "subscribers":  len(_subscribers),
+        "tasks":        tasks,
+    }
