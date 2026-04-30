@@ -34,7 +34,7 @@ if str(_ROOT) not in sys.path:
 import os
 
 from ok_weather_model.ingestion import HRRRClient, MesonetClient, SoundingClient
-from ok_weather_model.ingestion.wtm_client import fetch_wtm_observations
+from ok_weather_model.ingestion.wtm_client import fetch_texas_mesonet_observations
 from ok_weather_model.ingestion.spc_products import (
     fetch_active_mds,
     fetch_active_watches_warnings,
@@ -953,11 +953,9 @@ async def _task_surface() -> None:
                     "wind_gust":  d.get("wind_gust"),
                 })
 
-            # Append West Texas Mesonet stations if Synoptic API key is configured.
-            synoptic_key = os.environ.get("SYNOPTIC_API_KEY")
-            if synoptic_key:
-                wtm_obs = await asyncio.to_thread(fetch_wtm_observations, synoptic_key)
-                mesonet_obs_list.extend(wtm_obs)
+            # Append Texas Mesonet stations (TWDB public API, no key required).
+            tx_obs = await asyncio.to_thread(fetch_texas_mesonet_observations)
+            mesonet_obs_list.extend(tx_obs)
 
             async with _lock:
                 _state["moisture"]               = _ser_moisture(moisture)
