@@ -1163,10 +1163,10 @@ async def stream(request: Request):
                 if await request.is_disconnected():
                     break
                 try:
-                    payload = await asyncio.wait_for(q.get(), timeout=30.0)
+                    payload = await asyncio.wait_for(q.get(), timeout=15.0)
                     yield {"data": payload}
                 except asyncio.TimeoutError:
-                    yield {"data": '{"ping":true}'}  # keepalive
+                    yield {"data": '{"ping":true}'}  # keepalive — 15s beats mobile proxy timeouts
         finally:
             if q in _subscribers:
                 _subscribers.remove(q)

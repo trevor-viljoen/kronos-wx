@@ -8,6 +8,14 @@ export function useSSE<T>(url: string): T | null {
   useEffect(() => {
     let cancelled = false
 
+    // Fetch current state immediately via REST so the UI isn't blank while
+    // the SSE connection negotiates (helps on slow/proxied mobile connections).
+    const restUrl = url.replace('/stream', '/state')
+    fetch(restUrl)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (!cancelled && data && !data.ping) setState(data as T) })
+      .catch(() => {/* SSE will populate state anyway */})
+
     const connect = () => {
       if (cancelled) return
       const es = new EventSource(url)
