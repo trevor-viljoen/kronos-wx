@@ -42,11 +42,17 @@ def _dewpoint_f(temp_c: float, rh: float) -> float:
     return _c_to_f(td_c)
 
 
-def _pick(*values: float | None) -> float | None:
-    """Return the first non-None, finite, plausible value from a priority list."""
+def _pick(*values) -> float | None:
+    """Return the first non-None, finite value; coerces strings to float."""
     for v in values:
-        if v is not None and math.isfinite(v):
-            return v
+        if v is None:
+            continue
+        try:
+            f = float(v)
+            if math.isfinite(f):
+                return f
+        except (TypeError, ValueError):
+            continue
     return None
 
 
@@ -69,6 +75,9 @@ def fetch_texas_mesonet_observations() -> list[dict]:
         logger.warning("Texas Mesonet fetch error: %s", exc)
         return []
 
+    # Response is {"units": {...}, "data": [...]}
+    if isinstance(records, dict):
+        records = records.get("data", [])
     if not isinstance(records, list):
         logger.warning("Texas Mesonet: unexpected response shape")
         return []
@@ -100,10 +109,10 @@ def fetch_texas_mesonet_observations() -> list[dict]:
                 continue
             rh = float(rh)
 
-            # Wind: prefer 10m, fall back to 2m, then primary
-            wspd_ms = _pick(r.get("windSpeed10m"), r.get("windSpeed2m"), r.get("windSpeed"))
-            wdir    = _pick(r.get("windDirection10m"), r.get("windDirection2m"), r.get("windDirection"))
-            wgust_ms = _pick(r.get("windGust10m"), r.get("windGust2m"), r.get("windGust"))
+            # Wind: prefer 2m (most consistently reported), fall back to primary
+            wspd_ms  = _pick(r.get("windSpeed2m"),    r.get("windSpeed"))
+            wdir     = _pick(r.get("windDirection2m"), r.get("windDirection"))
+            wgust_ms = _pick(r.get("windGust2m"),     r.get("windGust"))
 
             if wspd_ms is None or wdir is None:
                 continue
