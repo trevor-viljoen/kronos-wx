@@ -441,10 +441,14 @@ async def _task_hrrr() -> None:
                 with HRRRClient() as hc:
                     for h_back in range(3):
                         try:
-                            s = hc.get_county_snapshot(now - timedelta(hours=h_back))
+                            target = now - timedelta(hours=h_back)
+                            logger.info("HRRR: trying %s (-%dh)", target.strftime("%Y-%m-%dT%H:%MZ"), h_back)
+                            s = hc.get_county_snapshot(target)
                             if s is not None:
+                                logger.info("HRRR: got snapshot for %s", target.strftime("%Y-%m-%dT%H:%MZ"))
                                 return s
-                        except Exception:
+                        except Exception as exc:
+                            logger.warning("HRRR fetch -%dh failed: %s", h_back, exc)
                             continue
                 return None
 
