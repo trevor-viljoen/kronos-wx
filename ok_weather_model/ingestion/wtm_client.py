@@ -17,14 +17,6 @@ logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://www.texasmesonet.org/api/CurrentData"
 
-# Rough bounding box for stations relevant to Oklahoma severe weather:
-# captures West Texas dryline source region + moisture return corridor.
-# Excludes deep south Texas and far east Texas to keep the plot readable.
-_LAT_MIN = 25.5
-_LAT_MAX = 37.0
-_LON_MIN = -106.5
-_LON_MAX = -93.5
-
 
 def _c_to_f(c: float) -> float:
     return c * 9.0 / 5.0 + 32.0
@@ -90,10 +82,6 @@ def fetch_texas_mesonet_observations() -> list[dict]:
             if lat is None or lon is None:
                 continue
             lat, lon = float(lat), float(lon)
-
-            # Spatial filter — only stations relevant to OK severe wx coverage
-            if not (_LAT_MIN <= lat <= _LAT_MAX and _LON_MIN <= lon <= _LON_MAX):
-                continue
 
             stid = r.get("displayId") or r.get("name") or str(r.get("stationId", ""))
             if not stid:
