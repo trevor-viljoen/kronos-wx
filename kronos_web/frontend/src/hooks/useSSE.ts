@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 
+// Poll /api/state as a backstop when SSE is unreliable (mobile proxies, etc.)
+const POLL_MS = 30_000
+
 export function useSSE<T>(url: string): T | null {
   const [state, setState] = useState<T | null>(null)
   const retryRef = useRef<number>(1000)
@@ -7,14 +10,19 @@ export function useSSE<T>(url: string): T | null {
 
   useEffect(() => {
     let cancelled = false
-
-    // Fetch current state immediately via REST so the UI isn't blank while
-    // the SSE connection negotiates (helps on slow/proxied mobile connections).
     const restUrl = url.replace('/stream', '/state')
-    fetch(restUrl)
-      .then(r => r.ok ? r.json() : null)
-      .then(data => { if (!cancelled && data && !data.ping) setState(data as T) })
-      .catch(() => {/* SSE will populate state anyway */})
+
+    const fetchRest = () =>
+      fetch(restUrl)
+        .then(r => r.ok ? r.json() : null)
+        .then(data => { if (!cancelled && data && !data.ping) setState(data as T) })
+        .catch(() => {})
+
+    // Populate state immediately via REST — no blank screen while SSE negotiates
+    fetchRest()
+
+    // Poll every 30s as a fallback; SSE pushes override whenever they arrive
+    const pollId = setInterval(fetchRest, POLL_MS)
 
     const connect = () => {
       if (cancelled) return
@@ -38,6 +46,7 @@ export function useSSE<T>(url: string): T | null {
         es.close()
         esRef.current = null
         if (!cancelled) {
+          fetchRest()  // fetch immediately on drop rather than waiting for next poll
           const delay = Math.min(retryRef.current, 30_000)
           retryRef.current = Math.min(delay * 2, 30_000)
           setTimeout(connect, delay)
@@ -49,6 +58,7 @@ export function useSSE<T>(url: string): T | null {
 
     return () => {
       cancelled = true
+      clearInterval(pollId)
       esRef.current?.close()
       esRef.current = null
     }
