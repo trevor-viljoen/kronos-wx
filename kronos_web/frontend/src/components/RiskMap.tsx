@@ -700,24 +700,29 @@ interface RadarTilesProps {
 }
 
 function RadarTiles({ station, radarTimes, current }: RadarTilesProps) {
-  const t = radarTimes[current]
-  if (!t) return null
-
   if (station === 'mrms') {
-    // IEM NEXRAD N0Q composite — ?t= param busts cache and selects the frame
-    const tSec = Math.floor(t.ts / 1000)
+    // Pre-mount all frames so tiles are cached before they're needed.
+    // Opacity toggle (with CSS crossfade) avoids the blank-screen blink
+    // that occurs when remounting (key change) forces tile reload from scratch.
     return (
-      <TileLayer
-        key={tSec}
-        url={`${IEM_NEXRAD_URL}?t=${tSec}`}
-        opacity={RADAR_OPACITY}
-        zIndex={5}
-        attribution='NEXRAD &copy; <a href="https://mesonet.agron.iastate.edu/">IEM</a>'
-      />
+      <>
+        {radarTimes.map((t, i) => (
+          <TileLayer
+            key={t.ts}
+            className="radar-frame"
+            url={`${IEM_NEXRAD_URL}?t=${Math.floor(t.ts / 1000)}`}
+            opacity={i === current ? RADAR_OPACITY : 0}
+            zIndex={5}
+            attribution={i === 0 ? 'NEXRAD &copy; <a href="https://mesonet.agron.iastate.edu/">IEM</a>' : ''}
+          />
+        ))}
+      </>
     )
   }
 
   // Per-station RIDGE2 — proxy through backend (NOAA CORS blocked)
+  const t = radarTimes[current]
+  if (!t) return null
   const timeEnc = encodeURIComponent(t.iso)
   return (
     <TileLayer

@@ -235,6 +235,9 @@ html, body, #root {
 .feed-ts  { color: var(--color-text-muted); flex-shrink: 0; width: 44px; }
 .feed-msg { color: var(--color-text-dim); }
 
+/* ── Radar frame crossfade ───────────────────────────────────────────────── */
+.radar-frame { transition: opacity 0.4s ease; }
+
 /* ── Leaflet overrides ───────────────────────────────────────────────────── */
 .leaflet-container { background: #000 !important; }
 .leaflet-tile { filter: brightness(0.85) saturate(0.7) contrast(1.05); }
