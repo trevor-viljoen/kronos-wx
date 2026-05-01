@@ -3632,6 +3632,24 @@ def train_models(start_year: int, end_year: int):
     )
 
 
+# ── train-cap-break-model ────────────────────────────────────────────────────
+
+@cli.command("train-cap-break-model")
+def train_cap_break_model():
+    """
+    Train the cap-break-probability logistic regression.
+
+    Labels: EARLY_EROSION + CLEAN_EROSION = positive (cap erodes),
+            NO_EROSION = negative (cap holds).
+    Features: MLCAPE, MLCIN, SRH_0_1km, EHI, BWD_0_6km, lapse_rate_700_500.
+    Saves to data/models/cap_break_prob_model.joblib.
+    """
+    from ok_weather_model.modeling.cap_break_classifier import train as _train
+    console.print("[cyan]Training cap_break_prob logistic regression…[/cyan]")
+    _train()
+    console.print("[bold green]Done.[/bold green]")
+
+
 # ── evaluate-models ───────────────────────────────────────────────────────────
 
 @cli.command("evaluate-models")

@@ -99,6 +99,7 @@ _state: dict[str, Any] = {
     "model_forecast":  None,
     "alert_log":       [],
     "analogues":       [],      # list[dict] — top N historical analogues
+    "situation_brief": [],      # list[dict] — deterministic situation brief lines
 }
 
 _hrrr_base: Any = None          # first HRRR snapshot (baseline for tendency)
@@ -216,8 +217,9 @@ def _compute_state_hash(state: dict) -> str:
 
 async def _broadcast() -> None:
     global _state_json
-    _state["updated_at"]  = datetime.now(tz=timezone.utc).isoformat()
-    _state["state_hash"]  = _compute_state_hash(_state)
+    _state["updated_at"]       = datetime.now(tz=timezone.utc).isoformat()
+    _state["state_hash"]       = _compute_state_hash(_state)
+    _state["situation_brief"]  = _build_situation_brief()
     payload = json.dumps(_sanitize_nan(_state), default=_json_default)
     _state_json = payload   # cache for /api/state
     dead = []
@@ -249,6 +251,131 @@ def _sanitize_nan(obj: Any) -> Any:
     if isinstance(obj, list):
         return [_sanitize_nan(v) for v in obj]
     return obj
+
+
+def _build_situation_brief() -> list[dict]:
+    """
+    Build a 3-6 line deterministic situation brief from the current state.
+
+    Each line: {label, value, detail, severity}
+    severity: 'critical' | 'elevated' | 'favorable' | 'neutral'
+    """
+    lines: list[dict] = []
+
+    env   = _state.get("environment") or {}
+    oun   = env.get("oun") or {}
+    ces   = _state.get("ces") or {}
+    dl    = _state.get("dryline") or {}
+    surge = _state.get("dryline_surge")
+    anals = _state.get("analogues") or []
+    spc   = (_state.get("spc") or {}).get("outlook") or {}
+
+    # ── SPC outlook ───────────────────────────────────────────────────────────
+    cat = spc.get("category")
+    if cat and cat not in ("NONE", "TSTM"):
+        torn_pct = spc.get("max_tornado_prob")
+        torn_str = f"  tor {torn_pct:.0%}" if torn_pct else ""
+        sig_str  = "  SIG HATCH" if spc.get("sig_tornado_hatched") else ""
+        sev = "critical" if cat in ("HIGH", "MDT") else "elevated" if cat in ("ENH", "SLGT") else "neutral"
+        lines.append({"label": "SPC", "value": cat, "detail": f"Day 1{torn_str}{sig_str}", "severity": sev})
+
+    # ── Cap / instability ─────────────────────────────────────────────────────
+    mlcin = oun.get("MLCIN")
+    cap_s = oun.get("cap_strength")
+    mlcape = oun.get("MLCAPE")
+    lfc   = oun.get("LFC_height")
+    if mlcin is not None:
+        if mlcin >= 80:
+            cap_label, sev = "CAPPED",   "critical"
+        elif mlcin >= 40:
+            cap_label, sev = "STRONG",   "elevated"
+        elif mlcin >= 15:
+            cap_label, sev = "MODERATE", "neutral"
+        elif mlcin >= 5:
+            cap_label, sev = "WEAK",     "favorable"
+        else:
+            cap_label, sev = "NONE",     "favorable"
+        cap_detail_parts = []
+        if mlcin is not None:  cap_detail_parts.append(f"CIN {mlcin:.0f} J/kg")
+        if cap_s is not None:  cap_detail_parts.append(f"cap {cap_s:.1f}°C")
+        if mlcape is not None: cap_detail_parts.append(f"CAPE {mlcape:.0f}")
+        if lfc is None:        cap_detail_parts.append("no LFC")
+        lines.append({"label": "Cap", "value": cap_label, "detail": "  ".join(cap_detail_parts), "severity": sev})
+
+    # ── Kinematics ────────────────────────────────────────────────────────────
+    srh1 = oun.get("SRH_0_1km")
+    ehi  = oun.get("EHI")
+    bwd  = oun.get("BWD_0_6km")
+    if srh1 is not None:
+        if srh1 >= 250 or (ehi or 0) >= 2.5:
+            kin_label, sev = "HIGH",     "elevated"
+        elif srh1 >= 150 or (ehi or 0) >= 1.0:
+            kin_label, sev = "MODERATE", "neutral"
+        else:
+            kin_label, sev = "LOW",      "neutral"
+        kin_parts = []
+        if srh1 is not None: kin_parts.append(f"SRH1 {srh1:.0f} m²/s²")
+        if ehi  is not None: kin_parts.append(f"EHI {ehi:.1f}")
+        if bwd  is not None: kin_parts.append(f"shear {bwd:.0f}kt")
+        lines.append({"label": "Kinematics", "value": kin_label, "detail": "  ".join(kin_parts), "severity": sev})
+
+    # ── CES / cap erosion ─────────────────────────────────────────────────────
+    cb = ces.get("cap_behavior")
+    if cb:
+        eh = ces.get("erosion_hour")
+        tc_gap = ces.get("tc_gap_12Z")
+        cb_pretty = {
+            "CLEAN_EROSION":   "CLEAN EROSION",
+            "EARLY_EROSION":   "EARLY EROSION",
+            "LATE_EROSION":    "LATE EROSION",
+            "NO_EROSION":      "NO EROSION",
+            "BOUNDARY_FORCED": "BOUNDARY FORCED",
+            "RECONSTITUTED":   "RECONSTITUTED",
+        }.get(cb, cb)
+        sev = {
+            "CLEAN_EROSION":   "favorable",
+            "EARLY_EROSION":   "favorable",
+            "LATE_EROSION":    "neutral",
+            "NO_EROSION":      "critical",
+            "BOUNDARY_FORCED": "elevated",
+        }.get(cb, "neutral")
+        ces_parts = []
+        if eh is not None: ces_parts.append(f"~{eh:02d}Z")
+        if tc_gap is not None:
+            sign = "+" if tc_gap >= 0 else ""
+            ces_parts.append(f"Tc gap {sign}{tc_gap:.1f}°F")
+        lines.append({"label": "CES", "value": cb_pretty, "detail": "  ".join(ces_parts), "severity": sev})
+
+    # ── Dryline ───────────────────────────────────────────────────────────────
+    if dl.get("position_lat"):
+        cnts = dl.get("counties") or []
+        conf = dl.get("confidence", 0)
+        surge_str = f"  surging east at {surge:.0f} mph" if surge and surge > 0 else ""
+        cnt_str = f"  {len(cnts)} counties in corridor" if cnts else ""
+        lines.append({
+            "label": "Dryline",
+            "value": f"conf {conf:.0%}",
+            "detail": f"{surge_str}{cnt_str}".strip(),
+            "severity": "elevated" if surge and surge > 8 else "neutral",
+        })
+
+    # ── Analogues ────────────────────────────────────────────────────────────
+    if anals:
+        sig_count = sum(
+            1 for a in anals
+            if a.get("event_class") in ("SIGNIFICANT_OUTBREAK", "ISOLATED_SIGNIFICANT")
+        )
+        total = len(anals)
+        ratio = sig_count / total
+        sev = "critical" if ratio >= 0.6 else "elevated" if ratio >= 0.4 else "neutral"
+        lines.append({
+            "label": "Analogues",
+            "value": f"{sig_count}/{total} significant",
+            "detail": f"top {total} cap matches",
+            "severity": sev,
+        })
+
+    return lines
 
 
 def _log_alert(msg: str) -> None:

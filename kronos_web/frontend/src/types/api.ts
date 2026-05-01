@@ -211,6 +211,15 @@ export interface BoundaryInteractionData {
   notes: string | null
 }
 
+export type BriefSeverity = 'critical' | 'elevated' | 'favorable' | 'neutral'
+
+export interface BriefLine {
+  label: string
+  value: string
+  detail: string
+  severity: BriefSeverity
+}
+
 export interface DashboardState {
   updated_at: string | null
   hrrr_valid: string | null
@@ -235,4 +244,5 @@ export interface DashboardState {
   alert_log: AlertLogEntry[]
   analogues: AnalogueEntry[]
   initiation_candidates: string[]
+  situation_brief: BriefLine[]
 }

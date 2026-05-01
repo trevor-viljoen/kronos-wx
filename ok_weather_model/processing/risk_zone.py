@@ -95,11 +95,12 @@ class CountyEnvironment:
     SRH_0_3km:         float         # m²/s²
     BWD_0_6km:         float         # kt
     EHI:               float         # dimensionless
-    near_dryline:      bool  = False  # within 50 mi of dryline (legacy compat)
-    convergence_score: float = 0.0   # [0, 1] boundary-forcing strength
-    alarm_bell:        bool  = False  # two boundaries intersect in favorable thermo
-    in_watch:          bool  = False  # county inside active Tornado or SVR watch
-    cap_break_prob:    float = 0.0   # [0, 1] physics-derived initiation probability
+    near_dryline:       bool  = False  # within 50 mi of dryline (legacy compat)
+    convergence_score:  float = 0.0   # [0, 1] boundary-forcing strength
+    alarm_bell:         bool  = False  # two boundaries intersect in favorable thermo
+    in_watch:           bool  = False  # county inside active Tornado or SVR watch
+    cap_break_prob:     float = 0.0   # [0, 1] ML initiation probability
+    lapse_rate_700_500: float = float("nan")  # °C/km — from HRRR when available
 
 
 @dataclass
@@ -264,43 +265,29 @@ def _compute_convergence_score(
 
 def _cap_break_prob(env: CountyEnvironment) -> float:
     """
-    Physics-informed initiation probability [0, 1].
+    ML-backed initiation probability [0, 1].
 
-    Placeholder for a future ML model (cap_break_prob); uses a weighted
-    linear blend of four sub-scores, each normalised to [0, 1]:
-      - CIN score  : lower effective CIN → higher probability (weight 0.35)
-      - CAPE score : higher instability → higher probability (weight 0.30)
-      - SRH score  : low-level shear lifts boundary-layer parcels (weight 0.20)
-      - Convergence: direct mechanical forcing uplift (weight 0.15)
-
-    Effective CIN is reduced by boundary proximity (convergence_score)
-    and hard-capped at 50 J/kg when an alarm_bell is active.
+    Uses a logistic regression trained on EARLY_EROSION + CLEAN_EROSION (positive)
+    vs NO_EROSION (negative) cases from the historical database (5-fold AUC ~0.96).
+    Falls back to the physics formula when the model artifact is absent.
+    Boundary-forcing terms (convergence_score, alarm_bell) are applied post-model.
     """
     if env.MLCAPE < 200:
         return 0.0
-
-    effective_cin = env.MLCIN * max(0.3, 1.0 - 0.5 * env.convergence_score)
-    if env.alarm_bell:
-        effective_cin = min(effective_cin, 50.0)
-
-    cape_score = min(1.0, (env.MLCAPE - 200) / 2800.0)
-    cin_score  = max(0.0, 1.0 - effective_cin / 300.0)
-    srh_score  = min(1.0, env.SRH_0_1km / 300.0)
-    conv_score = env.convergence_score
-
-    raw = (
-        0.35 * cin_score
-        + 0.30 * cape_score
-        + 0.20 * srh_score
-        + 0.15 * conv_score
-    )
-
-    # Watch + boundary: SPC has already judged the environment favorable AND
-    # there is mechanical lift present — highest-confidence initiation signal.
+    from ok_weather_model.modeling.cap_break_classifier import predict as _ml_predict
+    features = {
+        "MLCAPE":              env.MLCAPE,
+        "MLCIN":               env.MLCIN,
+        "SRH_0_1km":           env.SRH_0_1km,
+        "EHI":                 env.EHI,
+        "BWD_0_6km":           env.BWD_0_6km,
+        "lapse_rate_700_500":  env.lapse_rate_700_500,
+    }
+    prob = _ml_predict(features, convergence_score=env.convergence_score, alarm_bell=env.alarm_bell)
+    # Watch + confirmed boundary: additional confidence boost.
     if env.in_watch and env.convergence_score > 0:
-        raw += 0.15
-
-    return round(min(1.0, raw), 3)
+        prob = min(1.0, prob + 0.10)
+    return round(prob, 3)
 
 
 def _dryline_distance_miles(county: OklahomaCounty, dryline: BoundaryObservation) -> Optional[float]:
@@ -655,6 +642,7 @@ def compute_risk_zones_from_hrrr(
             convergence_score=conv_score,
             alarm_bell=alarm,
             in_watch=in_watch,
+            lapse_rate_700_500=pt.lapse_rate_700_500 if pt.lapse_rate_700_500 is not None else float("nan"),
         )
         env.cap_break_prob = _cap_break_prob(env)
         all_envs[county.name] = env

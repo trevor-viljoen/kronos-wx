@@ -11,6 +11,7 @@ import { TendencyTable }     from './components/TendencyTable'
 import { AlertFeed }         from './components/AlertFeed'
 import { CountyDrawer }      from './components/CountyDrawer'
 import { AnaloguePanel }     from './components/AnaloguePanel'
+import { NarrativePanel }   from './components/NarrativePanel'
 
 type MobileTab = 'env' | 'tendency' | 'alerts'
 
@@ -113,6 +114,7 @@ function MobileLayout({ state, selectedCounty, setSelectedCounty, selectedPt, se
           >
             {activeTab === 'env' && (
               <>
+                <NarrativePanel lines={state.situation_brief ?? []} updatedAt={state.updated_at} />
                 <EnvironmentPanel
                   oun={env?.oun ?? null}
                   lmn={env?.lmn ?? null}
@@ -220,6 +222,7 @@ export default function App() {
 
           {/* Bottom rows */}
           <div className="bottom-row">
+            <NarrativePanel lines={state.situation_brief ?? []} updatedAt={state.updated_at} />
             <TendencyTable rows={state.tendency} hrrrValid={state.hrrr_valid} />
             <AnaloguePanel analogues={state.analogues ?? []} oun={env?.oun ?? null} />
             <AlertFeed entries={state.alert_log} />

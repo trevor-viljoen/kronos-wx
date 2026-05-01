@@ -661,9 +661,50 @@ html, body, #root {
   flex-shrink: 0;
 }
 
-.tend-panel  { max-height: 260px; }
-.feed-panel  { max-height: 100px; }
-.anal-panel  { max-height: 220px; }
+.tend-panel      { max-height: 260px; }
+.feed-panel      { max-height: 100px; }
+.anal-panel      { max-height: 220px; }
+.narrative-panel { flex-shrink: 0; }
+
+.narrative-body {
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.brief-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.brief-label {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--color-text-dim);
+  min-width: 80px;
+  flex-shrink: 0;
+  text-transform: uppercase;
+}
+
+.brief-value {
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.brief-detail {
+  color: var(--color-text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .anal-table {
   width: 100%;
