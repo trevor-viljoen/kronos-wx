@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
 import { useSSE } from './hooks/useSSE'
 import { useIsMobile } from './hooks/useIsMobile'
 import type { DashboardState, Tier, CountyPoint } from './types/api'
@@ -18,15 +19,22 @@ function InitiationBanner({ state, onCountyClick }: {
   onCountyClick: (c: string) => void
 }) {
   const candidates = state.initiation_candidates ?? []
-  if (candidates.length === 0) return null
   return (
-    <div style={{
-      background: 'rgba(255, 140, 0, 0.12)',
-      border: '1px solid rgba(255, 140, 0, 0.5)',
-      borderRadius: 4, padding: '6px 12px',
-      display: 'flex', alignItems: 'center', gap: 10,
-      fontSize: 12, margin: '4px 0', flexShrink: 0,
-    }}>
+    <AnimatePresence>
+      {candidates.length > 0 && (
+    <motion.div
+      initial={{ opacity: 0, y: -8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -8 }}
+      transition={{ duration: 0.3 }}
+      style={{
+        background: 'rgba(255, 140, 0, 0.12)',
+        border: '1px solid rgba(255, 140, 0, 0.5)',
+        borderRadius: 4, padding: '6px 12px',
+        display: 'flex', alignItems: 'center', gap: 10,
+        fontSize: 12, margin: '4px 0', flexShrink: 0,
+      }}
+    >
       <span style={{ fontWeight: 700, color: '#ffa500', whiteSpace: 'nowrap' }}>
         ⚡ INITIATION CANDIDATES
       </span>
@@ -49,7 +57,9 @@ function InitiationBanner({ state, onCountyClick }: {
           )
         })}
       </span>
-    </div>
+    </motion.div>
+      )}
+    </AnimatePresence>
   )
 }
 
@@ -92,28 +102,39 @@ function MobileLayout({ state, selectedCounty, setSelectedCounty, selectedPt, se
 
       {/* Tab content */}
       <div className="mobile-tab-content">
-        {activeTab === 'env' && (
-          <>
-            <EnvironmentPanel
-              oun={env?.oun ?? null}
-              lmn={env?.lmn ?? null}
-              fwd={env?.fwd ?? null}
-              ces={state.ces}
-              model={state.model_forecast}
-              hour={env?.fetched_hour ?? null}
-            />
-            <SPCPanel spc={state.spc} />
-          </>
-        )}
-        {activeTab === 'tendency' && (
-          <>
-            <TendencyTable rows={state.tendency} hrrrValid={state.hrrr_valid} />
-            <AnaloguePanel analogues={state.analogues ?? []} />
-          </>
-        )}
-        {activeTab === 'alerts' && (
-          <AlertFeed entries={state.alert_log} />
-        )}
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={activeTab}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            style={{ display: 'contents' }}
+          >
+            {activeTab === 'env' && (
+              <>
+                <EnvironmentPanel
+                  oun={env?.oun ?? null}
+                  lmn={env?.lmn ?? null}
+                  fwd={env?.fwd ?? null}
+                  ces={state.ces}
+                  model={state.model_forecast}
+                  hour={env?.fetched_hour ?? null}
+                />
+                <SPCPanel spc={state.spc} />
+              </>
+            )}
+            {activeTab === 'tendency' && (
+              <>
+                <TendencyTable rows={state.tendency} hrrrValid={state.hrrr_valid} />
+                <AnaloguePanel analogues={state.analogues ?? []} oun={env?.oun ?? null} />
+              </>
+            )}
+            {activeTab === 'alerts' && (
+              <AlertFeed entries={state.alert_log} />
+            )}
+          </motion.div>
+        </AnimatePresence>
       </div>
 
       <CountyDrawer
@@ -200,7 +221,7 @@ export default function App() {
           {/* Bottom rows */}
           <div className="bottom-row">
             <TendencyTable rows={state.tendency} hrrrValid={state.hrrr_valid} />
-            <AnaloguePanel analogues={state.analogues ?? []} />
+            <AnaloguePanel analogues={state.analogues ?? []} oun={env?.oun ?? null} />
             <AlertFeed entries={state.alert_log} />
           </div>
         </div>

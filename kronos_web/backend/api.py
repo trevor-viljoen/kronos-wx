@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -34,7 +35,7 @@ if str(_ROOT) not in sys.path:
 import os
 
 from ok_weather_model.ingestion import HRRRClient, MesonetClient, SoundingClient
-from ok_weather_model.ingestion.wtm_client import fetch_texas_mesonet_observations
+from ok_weather_model.ingestion.wtm_client import fetch_texas_mesonet_observations, fetch_wtm_ttu_observations
 from ok_weather_model.ingestion.spc_products import (
     fetch_active_mds,
     fetch_active_watches_warnings,
@@ -217,7 +218,7 @@ async def _broadcast() -> None:
     global _state_json
     _state["updated_at"]  = datetime.now(tz=timezone.utc).isoformat()
     _state["state_hash"]  = _compute_state_hash(_state)
-    payload = json.dumps(_state, default=_json_default)
+    payload = json.dumps(_sanitize_nan(_state), default=_json_default)
     _state_json = payload   # cache for /api/state
     dead = []
     for q in _subscribers:
@@ -237,6 +238,17 @@ def _json_default(obj: Any) -> Any:
     if hasattr(obj, "__str__"):
         return str(obj)
     raise TypeError(f"Not serializable: {type(obj)}")
+
+
+def _sanitize_nan(obj: Any) -> Any:
+    """Recursively replace NaN/Inf floats with None so JSON.parse() won't choke."""
+    if isinstance(obj, float):
+        return None if not math.isfinite(obj) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_nan(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_nan(v) for v in obj]
+    return obj
 
 
 def _log_alert(msg: str) -> None:
@@ -961,6 +973,10 @@ async def _task_surface() -> None:
             tx_obs = await asyncio.to_thread(fetch_texas_mesonet_observations)
             mesonet_obs_list.extend(tx_obs)
 
+            # Append West Texas Mesonet TTU stations (authoritative WTM, 180 stations).
+            wtm_obs = await asyncio.to_thread(fetch_wtm_ttu_observations)
+            mesonet_obs_list.extend(wtm_obs)
+
             async with _lock:
                 _state["moisture"]               = _ser_moisture(moisture)
                 _state["dryline"]                = _ser_dryline(dl, surge)
@@ -1162,7 +1178,7 @@ async def stream(request: Request):
     async def generator():
         try:
             # Send current state immediately on connect
-            yield {"data": json.dumps(_state, default=_json_default)}
+            yield {"data": json.dumps(_sanitize_nan(_state), default=_json_default)}
             while True:
                 if await request.is_disconnected():
                     break
@@ -1276,7 +1292,7 @@ async def radar_tile_proxy(request: Request, station: str, time_iso: str, z: int
     bbox = _tile_bbox_3857(x, y, z)
     params = {
         "SERVICE": "WMS", "VERSION": "1.3.0", "REQUEST": "GetMap",
-        "LAYERS": f"{station}_bref_raw", "FORMAT": "image/png",
+        "LAYERS": f"{station}_sr_bref", "FORMAT": "image/png",
         "TRANSPARENT": "TRUE", "TIME": time_iso,
         "CRS": "EPSG:3857", "BBOX": bbox, "WIDTH": "256", "HEIGHT": "256",
     }

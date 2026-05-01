@@ -1,3 +1,4 @@
+import { AnimatePresence, motion } from 'framer-motion'
 import type { CountyPoint, Tier } from '../types/api'
 
 interface Props {
@@ -66,8 +67,15 @@ export function CountyDrawer({ countyName, countyData: pt, tier, onClose }: Prop
   const tierColor = tier ? TIER_COLOR[tier] : 'var(--color-text)'
 
   return (
-    <div className={`county-drawer ${isOpen ? 'open' : ''}`}>
+    <AnimatePresence>
       {isOpen && (
+    <motion.div
+      className="county-drawer open"
+      initial={{ x: '100%' }}
+      animate={{ x: 0 }}
+      exit={{ x: '100%' }}
+      transition={{ type: 'spring', stiffness: 320, damping: 32 }}
+    >
         <>
           <div className="drawer-header">
             <div>
@@ -166,7 +174,8 @@ export function CountyDrawer({ countyName, countyData: pt, tier, onClose }: Prop
             )}
           </div>
         </>
+    </motion.div>
       )}
-    </div>
+    </AnimatePresence>
   )
 }

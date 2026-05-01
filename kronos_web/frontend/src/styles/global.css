@@ -433,13 +433,10 @@ html, body, #root {
   background: #0a0a0a;
   border-left: 1px solid var(--color-border);
   z-index: 1000;
-  transform: translateX(100%);
-  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
 }
-.county-drawer.open { transform: translateX(0); }
 
 .drawer-header {
   padding: var(--space-md);
@@ -762,7 +759,7 @@ html, body, #root {
   flex-direction: column;
   align-items: center;
   gap: 0;
-  pointer-events: none;
+  cursor: default;
 }
 .sta-temp {
   font-family: var(--font-mono);
@@ -785,6 +782,39 @@ html, body, #root {
   font-weight: 700;
   line-height: 1;
   text-shadow: 0 1px 3px rgba(0,0,0,1);
+}
+
+/* ── Mesonet station tooltip ─────────────────────────────────────────────── */
+.sta-tooltip {
+  background: rgba(8,8,18,0.95) !important;
+  border: 1px solid #333 !important;
+  border-radius: 0 !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.6) !important;
+  padding: 6px 10px !important;
+  pointer-events: none;
+}
+.sta-tooltip::before { display: none !important; }
+.sta-tip-id {
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--color-accent);
+  margin-bottom: 5px;
+}
+.sta-tip-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text);
+  line-height: 1.6;
+}
+.sta-tip-label {
+  color: var(--color-text-dim);
+  min-width: 32px;
 }
 
 /* ── Tornado warning flash banner ────────────────────────────────────────── */
@@ -891,7 +921,8 @@ html, body, #root {
 }
 
 /* ── Overlay toggle controls ─────────────────────────────────────────────── */
-.overlay-controls {
+/* ── Overlay panel: grouped horizontal rows ──────────────────────────────── */
+.overlay-panel {
   position: absolute;
   top: 8px;
   right: 8px;
@@ -899,32 +930,52 @@ html, body, #root {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  align-items: flex-end;
+}
+.overlay-group {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 2px;
+  background: rgba(0,0,0,0.82);
+  border: 1px solid var(--color-border);
+  padding: 2px 4px;
+  backdrop-filter: blur(4px);
+}
+.overlay-group-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: #444;
+  padding-right: 4px;
+  border-right: 1px solid #222;
+  margin-right: 2px;
+  user-select: none;
+  min-width: 38px;
+  text-align: right;
+}
+.overlay-sep {
+  width: 1px;
+  height: 14px;
+  background: #222;
+  margin: 0 2px;
+  flex-shrink: 0;
 }
 .overlay-btn {
-  background: rgba(0,0,0,0.88);
-  border: 1px solid var(--color-border);
+  background: transparent;
+  border: 1px solid transparent;
   border-radius: 0;
   color: var(--color-text-dim);
   font-family: var(--font-display);
-  font-size: 12px;
-  letter-spacing: 0.1em;
-  padding: 3px 8px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  padding: 2px 6px;
   cursor: pointer;
-  backdrop-filter: blur(4px);
-  transition: background 0.1s, color 0.1s;
+  transition: color 0.1s;
   white-space: nowrap;
 }
-.overlay-btn:hover { background: rgba(20,20,20,0.95); color: var(--color-text); }
+.overlay-btn:hover { color: var(--color-text); border-color: #333; }
 .overlay-btn.active {
-  background: rgba(20,20,20,0.95);
-  border-color: #444;
   color: var(--color-accent);
-}
-.radar-site-selector {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-top: 4px;
-  border-top: 1px solid var(--color-border);
-  padding-top: 4px;
+  border-color: #333;
 }

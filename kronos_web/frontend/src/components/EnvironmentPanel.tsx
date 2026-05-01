@@ -1,4 +1,6 @@
 import type { SoundingData, CESData, ModelForecast } from '../types/api'
+import { useCollapse } from '../hooks/useCollapse'
+import { motion } from 'framer-motion'
 
 interface Props {
   oun: SoundingData | null
@@ -84,11 +86,14 @@ function sigBarColor(pct: number): string {
 }
 
 export function EnvironmentPanel({ oun, lmn, fwd, ces, model, hour }: Props) {
+  const { collapsed, toggle } = useCollapse('env')
+
   if (!oun) {
     return (
-      <div className="panel env-panel">
+      <div className={`panel env-panel${collapsed ? ' collapsed' : ''}`}>
         <div className="panel-header">
           <span className="panel-title">Environment</span>
+          <button className="panel-collapse-btn" onClick={toggle}>{collapsed ? '▸' : '▾'}</button>
         </div>
         <div className="panel-body" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <div className="connecting"><div className="pulse" />Loading sounding…</div>
@@ -98,12 +103,13 @@ export function EnvironmentPanel({ oun, lmn, fwd, ces, model, hour }: Props) {
   }
 
   return (
-    <div className="panel env-panel" style={{ overflowY: 'auto' }}>
+    <div className={`panel env-panel${collapsed ? ' collapsed' : ''}`} style={{ overflowY: 'auto' }}>
       <div className="panel-header">
         <span className="panel-title">Environment</span>
         <span className="panel-subtitle">
           FWD · OUN{lmn ? ' · LMN' : ''}{hour != null ? ` · ${hour.toString().padStart(2, '0')}Z` : ''}
         </span>
+        <button className="panel-collapse-btn" onClick={toggle}>{collapsed ? '▸' : '▾'}</button>
       </div>
 
       <div className="panel-body" style={{ padding: '8px 12px' }}>
@@ -153,30 +159,39 @@ export function EnvironmentPanel({ oun, lmn, fwd, ces, model, hour }: Props) {
           </div>
         )}
 
-        {/* Model forecast */}
+        {/* Model forecast — only meaningful when there's instability to work with */}
         <div className="model-block">
           <div className="ces-label">Model Forecast</div>
           {model ? (
-            <>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
-                <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>Severity</span>
-                <span className="mono" style={{ fontSize: 12, color: sigBarColor(model.sig_pct) }}>
-                  {model.sig_pct.toFixed(0)}% SIGNIFICANT
-                </span>
+            (oun.MLCAPE ?? 0) < 100 && oun.LFC_height == null ? (
+              <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                Insufficient instability — model output not applicable
               </div>
-              <div className="sig-bar-wrap">
-                <div className="sig-bar" style={{
-                  width: `${model.sig_pct}%`,
-                  background: sigBarColor(model.sig_pct),
-                }} />
-              </div>
-              <div className="mono" style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 4 }}>
-                Count: {model.count_exp.toFixed(0)} expected
-                <span style={{ color: 'var(--color-text-muted)' }}>
-                  {' '}(80% PI: {model.count_lo.toFixed(0)}–{model.count_hi.toFixed(0)})
-                </span>
-              </div>
-            </>
+            ) : (
+              <>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+                  <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>Outbreak severity</span>
+                  <span className="mono" style={{ fontSize: 12, color: sigBarColor(model.sig_pct) }}>
+                    {model.sig_pct.toFixed(0)}% significant
+                  </span>
+                </div>
+                <div className="sig-bar-wrap">
+                  <motion.div
+                    className="sig-bar"
+                    initial={{ width: 0 }}
+                    animate={{ width: `${model.sig_pct}%` }}
+                    transition={{ duration: 0.6, ease: 'easeOut' }}
+                    style={{ background: sigBarColor(model.sig_pct) }}
+                  />
+                </div>
+                <div className="mono" style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 4 }}>
+                  ~{model.count_exp.toFixed(0)} tornadoes expected
+                  <span style={{ color: 'var(--color-text-muted)' }}>
+                    {' '}(80% PI: {model.count_lo.toFixed(0)}–{model.count_hi.toFixed(0)})
+                  </span>
+                </div>
+              </>
+            )
           ) : (
             <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 4 }}>
               Models not trained — run train-models

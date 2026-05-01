@@ -74,6 +74,11 @@ const GOES_IR_URL   = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goe
 type SatProduct = 'vis' | 'ir'
 const SAT_LABELS: Record<SatProduct, string> = { vis: 'VIS', ir: 'IR' }
 
+type MesonetRegion = 'ok' | 'all'
+const MESONET_REGION_LABELS: Record<MesonetRegion, string> = { ok: 'OK', all: 'All' }
+// Oklahoma bounding box (generous, includes border stations)
+const OK_MESONET_BOUNDS = { minLat: 33.5, maxLat: 37.1, minLon: -103.1, maxLon: -94.3 }
+
 // ── Fit Oklahoma bounds on first render ───────────────────────────────────────
 function FitBounds() {
   const map = useMap()
@@ -472,27 +477,85 @@ function dewColor(td: number): string {
   return '#78909c'
 }
 
-function MesonetLayer({ observations }: MesonetLayerProps) {
-  const markers = useMemo(() => {
-    return observations.map(obs => {
-      const icon = L.divIcon({
-        className: 'station-plot',
-        html: `
-          <div class="sta-temp">${obs.temp_f.toFixed(0)}</div>
-          <div class="sta-wind">${windArrowSvg(obs.wind_dir, obs.wind_speed)}</div>
-          <div class="sta-dew" style="color:${dewColor(obs.dewpoint_f)}">${obs.dewpoint_f.toFixed(0)}</div>
-        `,
-        iconSize: [28, 48],
-        iconAnchor: [14, 24],
-      })
-      return { obs, icon }
-    })
-  }, [observations])
+const COMPASS = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW']
+function toCompass(deg: number): string {
+  return COMPASS[Math.round(deg / 22.5) % 16]
+}
+
+function StationMarker({ obs }: { obs: StationObs }) {
+  const markerRef = useRef<L.Marker>(null)
+  const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const icon = useMemo(() => L.divIcon({
+    className: 'station-plot',
+    html: `
+      <div class="sta-temp">${obs.temp_f.toFixed(0)}</div>
+      <div class="sta-wind">${windArrowSvg(obs.wind_dir, obs.wind_speed)}</div>
+      <div class="sta-dew" style="color:${dewColor(obs.dewpoint_f)}">${obs.dewpoint_f.toFixed(0)}</div>
+    `,
+    iconSize: [28, 48],
+    iconAnchor: [14, 24],
+  }), [obs])
+
+  const spread = obs.temp_f - obs.dewpoint_f
+  const spreadColor = spread <= 5 ? '#00e676' : spread <= 15 ? '#ffcc00' : '#ff6644'
+
+  // Attach native touch listeners for long-press tooltip on mobile.
+  // react-leaflet's eventHandlers only covers Leaflet events, not DOM touch events.
+  useEffect(() => {
+    const el = markerRef.current?.getElement()
+    if (!el) return
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const start = () => { timer = setTimeout(() => markerRef.current?.openTooltip(), 500) }
+    const cancel = () => { if (timer) { clearTimeout(timer); timer = null } }
+    el.addEventListener('touchstart', start, { passive: true })
+    el.addEventListener('touchend',   cancel)
+    el.addEventListener('touchmove',  cancel, { passive: true })
+    return () => {
+      el.removeEventListener('touchstart', start)
+      el.removeEventListener('touchend',   cancel)
+      el.removeEventListener('touchmove',  cancel)
+    }
+  }, []) // marker element is stable after mount
 
   return (
+    <Marker ref={markerRef} position={[obs.lat, obs.lon]} icon={icon}>
+      <Tooltip className="sta-tooltip" sticky>
+        <div className="sta-tip-id">{obs.station_id}</div>
+        <div className="sta-tip-row">
+          <span className="sta-tip-label">Temp</span>
+          <span>{obs.temp_f.toFixed(1)}°F</span>
+        </div>
+        <div className="sta-tip-row">
+          <span className="sta-tip-label">Dwpt</span>
+          <span style={{ color: dewColor(obs.dewpoint_f) }}>{obs.dewpoint_f.toFixed(1)}°F</span>
+        </div>
+        <div className="sta-tip-row">
+          <span className="sta-tip-label">Sprd</span>
+          <span style={{ color: spreadColor }}>{spread.toFixed(1)}°F</span>
+        </div>
+        <div className="sta-tip-row">
+          <span className="sta-tip-label">Wind</span>
+          <span>{toCompass(obs.wind_dir)} {obs.wind_speed.toFixed(0)} mph</span>
+        </div>
+        {obs.wind_gust != null && (
+          <div className="sta-tip-row">
+            <span className="sta-tip-label">Gust</span>
+            <span style={{ color: obs.wind_gust >= 30 ? '#ff4444' : 'inherit' }}>
+              {obs.wind_gust.toFixed(0)} mph
+            </span>
+          </div>
+        )}
+      </Tooltip>
+    </Marker>
+  )
+}
+
+function MesonetLayer({ observations }: MesonetLayerProps) {
+  return (
     <>
-      {markers.map(({ obs, icon }) => (
-        <Marker key={obs.station_id} position={[obs.lat, obs.lon]} icon={icon} />
+      {observations.map(obs => (
+        <StationMarker key={obs.station_id} obs={obs} />
       ))}
     </>
   )
@@ -617,48 +680,82 @@ interface OverlayControlsProps {
   onRadarStation: (id: string) => void
   satProduct: SatProduct
   onSatProduct: (p: SatProduct) => void
+  mesonetRegion: MesonetRegion
+  onMesonetRegion: (r: MesonetRegion) => void
 }
 
-function OverlayControls({ overlays, onToggle, radarStation, onRadarStation, satProduct, onSatProduct }: OverlayControlsProps) {
+function OBtn({ label, active, onClick, title }: { label: string; active: boolean; onClick: () => void; title?: string }) {
   return (
-    <div className="overlay-controls">
-      {(Object.keys(OVERLAY_LABELS) as OverlayKey[]).map(key => (
-        <button
-          key={key}
-          className={`overlay-btn ${overlays[key] ? 'active' : ''}`}
-          onClick={() => onToggle(key)}
-        >
-          {OVERLAY_LABELS[key]}
-        </button>
-      ))}
-      {overlays.satellite && (
-        <div className="radar-site-selector">
-          {(Object.keys(SAT_LABELS) as SatProduct[]).map(p => (
-            <button
-              key={p}
-              className={`overlay-btn ${satProduct === p ? 'active' : ''}`}
-              onClick={() => onSatProduct(p)}
-              title={p === 'vis' ? 'GOES-East Visible' : 'GOES-East Infrared'}
-            >
-              {SAT_LABELS[p]}
-            </button>
-          ))}
-        </div>
-      )}
-      {overlays.radar && (
-        <div className="radar-site-selector">
-          {RADAR_STATIONS.map(stn => (
-            <button
-              key={stn.id}
-              className={`overlay-btn ${radarStation === stn.id ? 'active' : ''}`}
-              onClick={() => onRadarStation(stn.id)}
-              title={stn.desc}
-            >
-              {stn.label}
-            </button>
-          ))}
-        </div>
-      )}
+    <button className={`overlay-btn ${active ? 'active' : ''}`} onClick={onClick} title={title}>
+      {label}
+    </button>
+  )
+}
+
+function OverlayControls({ overlays, onToggle, radarStation, onRadarStation, satProduct, onSatProduct, mesonetRegion, onMesonetRegion }: OverlayControlsProps) {
+  return (
+    <div className="overlay-panel">
+
+      {/* Risk analysis row */}
+      <div className="overlay-group">
+        <span className="overlay-group-label">RISK</span>
+        <OBtn label="Tiers"  active={overlays.counties}   onClick={() => onToggle('counties')} />
+        <OBtn label="Bounds" active={overlays.boundaries} onClick={() => onToggle('boundaries')} />
+        <OBtn label="Dryline" active={overlays.dryline}   onClick={() => onToggle('dryline')} />
+      </div>
+
+      {/* SPC products row */}
+      <div className="overlay-group">
+        <span className="overlay-group-label">SPC</span>
+        <OBtn label="Cat"  active={overlays.spc}     onClick={() => onToggle('spc')} />
+        <OBtn label="Torn" active={overlays.tornado} onClick={() => onToggle('tornado')} />
+        <OBtn label="Wind" active={overlays.wind}    onClick={() => onToggle('wind')} />
+        <OBtn label="Hail" active={overlays.hail}    onClick={() => onToggle('hail')} />
+      </div>
+
+      {/* Alerts row */}
+      <div className="overlay-group">
+        <span className="overlay-group-label">ALERTS</span>
+        <OBtn label="Warn"  active={overlays.warnings} onClick={() => onToggle('warnings')} />
+        <OBtn label="Watch" active={overlays.watches}  onClick={() => onToggle('watches')} />
+      </div>
+
+      {/* Surface obs row */}
+      <div className="overlay-group">
+        <span className="overlay-group-label">OBS</span>
+        <OBtn label="Meso" active={overlays.mesonet} onClick={() => onToggle('mesonet')} />
+        {overlays.mesonet && (
+          <>
+            <span className="overlay-sep" />
+            <OBtn label="OK"  active={mesonetRegion === 'ok'}  onClick={() => onMesonetRegion('ok')}  title="Oklahoma only" />
+            <OBtn label="All" active={mesonetRegion === 'all'} onClick={() => onMesonetRegion('all')} title="All stations (TX/NM/CO)" />
+          </>
+        )}
+        <OBtn label="SAT" active={overlays.satellite} onClick={() => onToggle('satellite')} />
+        {overlays.satellite && (
+          <>
+            <span className="overlay-sep" />
+            <OBtn label="VIS" active={satProduct === 'vis'} onClick={() => onSatProduct('vis')} title="GOES-East Visible" />
+            <OBtn label="IR"  active={satProduct === 'ir'}  onClick={() => onSatProduct('ir')}  title="GOES-East Infrared" />
+          </>
+        )}
+      </div>
+
+      {/* Radar row */}
+      <div className="overlay-group">
+        <span className="overlay-group-label">RADAR</span>
+        <OBtn label="On" active={overlays.radar} onClick={() => onToggle('radar')} />
+        {overlays.radar && (
+          <>
+            <span className="overlay-sep" />
+            {RADAR_STATIONS.map(stn => (
+              <OBtn key={stn.id} label={stn.label} active={radarStation === stn.id}
+                onClick={() => onRadarStation(stn.id)} title={stn.desc} />
+            ))}
+          </>
+        )}
+      </div>
+
     </div>
   )
 }
@@ -681,8 +778,10 @@ const RADAR_OPACITY  = 0.70
 const RADAR_FRAMES   = 12
 const RADAR_STEP_MS  = 5 * 60 * 1000
 
-// IEM NEXRAD N0Q composite — Web Mercator, updates every ~5 min
+// IEM NEXRAD N0Q composite — only serves current data; ?t= is a cache-buster
 const IEM_NEXRAD_URL = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png'
+// Refresh interval for composite live tile (ms)
+const MRMS_REFRESH_MS = 2 * 60 * 1000
 
 function buildRadarTimes() {
   const base = Math.floor(Date.now() / RADAR_STEP_MS) * RADAR_STEP_MS
@@ -694,29 +793,23 @@ function buildRadarTimes() {
 
 // Inside MapContainer: tile layer only (no HUD, no flyTo)
 interface RadarTilesProps {
-  station:     string
-  radarTimes:  { ts: number; iso: string }[]
-  current:     number
+  station:    string
+  radarTimes: { ts: number; iso: string }[]
+  current:    number
+  liveTick:   number   // increments every 2 min to refresh composite URL
 }
 
-function RadarTiles({ station, radarTimes, current }: RadarTilesProps) {
+function RadarTiles({ station, radarTimes, current, liveTick }: RadarTilesProps) {
   if (station === 'mrms') {
-    // Pre-mount all frames so tiles are cached before they're needed.
-    // Opacity toggle (with CSS crossfade) avoids the blank-screen blink
-    // that occurs when remounting (key change) forces tile reload from scratch.
+    // IEM only serves current data — show a single live tile, refresh every 2 min
     return (
-      <>
-        {radarTimes.map((t, i) => (
-          <TileLayer
-            key={t.ts}
-            className="radar-frame"
-            url={`${IEM_NEXRAD_URL}?t=${Math.floor(t.ts / 1000)}`}
-            opacity={i === current ? RADAR_OPACITY : 0}
-            zIndex={5}
-            attribution={i === 0 ? 'NEXRAD &copy; <a href="https://mesonet.agron.iastate.edu/">IEM</a>' : ''}
-          />
-        ))}
-      </>
+      <TileLayer
+        key="mrms-live"
+        url={`${IEM_NEXRAD_URL}?t=${liveTick}`}
+        opacity={RADAR_OPACITY}
+        zIndex={5}
+        attribution='NEXRAD &copy; <a href="https://mesonet.agron.iastate.edu/">IEM</a>'
+      />
     )
   }
 
@@ -772,15 +865,21 @@ function RadarHUD({ station, radarTimes, current, playing, onToggle, onScrub }: 
       userSelect: 'none',
       whiteSpace: 'nowrap',
     }}>
-      <button onClick={onToggle} style={{ background: 'none', border: 'none', color: '#ccc', cursor: 'pointer', fontSize: 13, padding: 0 }}>
-        {playing ? '⏸' : '▶'}
-      </button>
-      <input
-        type="range" min={0} max={Math.max(0, count - 1)} value={current}
-        onChange={e => onScrub(Number(e.target.value))}
-        style={{ width: 110, accentColor: '#4af' }}
-      />
-      <span style={{ minWidth: 48, color: '#eee' }}>{ts}</span>
+      {isMrms ? (
+        <span style={{ color: '#ff4444', fontWeight: 600, letterSpacing: 1 }}>● LIVE</span>
+      ) : (
+        <>
+          <button onClick={onToggle} style={{ background: 'none', border: 'none', color: '#ccc', cursor: 'pointer', fontSize: 13, padding: 0 }}>
+            {playing ? '⏸' : '▶'}
+          </button>
+          <input
+            type="range" min={0} max={Math.max(0, count - 1)} value={current}
+            onChange={e => onScrub(Number(e.target.value))}
+            style={{ width: 110, accentColor: '#4af' }}
+          />
+          <span style={{ minWidth: 48, color: '#eee' }}>{ts}</span>
+        </>
+      )}
       {stn && (
         <span style={{ color: isMrms ? '#88aaff' : '#ffcc66' }}>
           {stn.label}
@@ -815,26 +914,36 @@ export function RiskMap({ state, onCountyClick }: Props) {
   })
   const [satProduct, setSatProduct] = useState<SatProduct>('vis')
   const [radarStation, setRadarStation] = useState('mrms')
+  const [mesonetRegion, setMesonetRegion] = useState<MesonetRegion>('ok')
 
   // ── Radar state (lifted so HUD can live outside MapContainer) ──────────────
   const [radarTimes,   setRadarTimes]   = useState(() => buildRadarTimes())
   const [radarCurrent, setRadarCurrent] = useState(RADAR_FRAMES - 1)
   const [radarPlaying, setRadarPlaying] = useState(true)
+  // liveTick increments every 2 min to bust the composite tile cache
+  const [liveTick,     setLiveTick]     = useState(() => Math.floor(Date.now() / MRMS_REFRESH_MS))
 
-  // Refresh radar times every 5 min (both composite and per-station use same timestamps)
+  // Refresh per-station time window every 5 min
   useEffect(() => {
-    if (!overlays.radar) return
+    if (!overlays.radar || radarStation === 'mrms') return
     const refresh = () => { setRadarTimes(buildRadarTimes()); setRadarCurrent(RADAR_FRAMES - 1) }
     const id = setInterval(refresh, 5 * 60 * 1000)
     return () => clearInterval(id)
-  }, [overlays.radar])
+  }, [overlays.radar, radarStation])
 
-  // Animation ticker
+  // Live composite refresh every 2 min
   useEffect(() => {
-    if (!overlays.radar || !radarPlaying) return
+    if (!overlays.radar || radarStation !== 'mrms') return
+    const id = setInterval(() => setLiveTick(Math.floor(Date.now() / MRMS_REFRESH_MS)), MRMS_REFRESH_MS)
+    return () => clearInterval(id)
+  }, [overlays.radar, radarStation])
+
+  // Animation ticker — per-station only
+  useEffect(() => {
+    if (!overlays.radar || radarStation === 'mrms' || !radarPlaying) return
     const id = setInterval(() => setRadarCurrent(p => (p + 1) % RADAR_FRAMES), RADAR_INTERVAL)
     return () => clearInterval(id)
-  }, [overlays.radar, radarPlaying])
+  }, [overlays.radar, radarStation, radarPlaying])
 
   // Reset to latest frame when switching stations
   const handleRadarStation = useCallback((id: string) => {
@@ -869,7 +978,13 @@ export function RiskMap({ state, onCountyClick }: Props) {
   const tornGJ    = state?.torn_geojson
   const windGJ    = state?.wind_geojson
   const hailGJ    = state?.hail_geojson
-  const mesoObs   = state?.mesonet_obs ?? []
+  const mesoObsAll = state?.mesonet_obs ?? []
+  const mesoObs = mesonetRegion === 'ok'
+    ? mesoObsAll.filter(o =>
+        o.lat >= OK_MESONET_BOUNDS.minLat && o.lat <= OK_MESONET_BOUNDS.maxLat &&
+        o.lon >= OK_MESONET_BOUNDS.minLon && o.lon <= OK_MESONET_BOUNDS.maxLon
+      )
+    : mesoObsAll
 
   const drylinePositions = useMemo<L.LatLngExpression[]>(() => {
     if (!dryline?.position_lat?.length) return []
@@ -925,6 +1040,7 @@ export function RiskMap({ state, onCountyClick }: Props) {
             station={radarStation}
             radarTimes={radarTimes}
             current={radarCurrent}
+            liveTick={liveTick}
           />
         )}
 
@@ -976,6 +1092,8 @@ export function RiskMap({ state, onCountyClick }: Props) {
         onRadarStation={handleRadarStation}
         satProduct={satProduct}
         onSatProduct={setSatProduct}
+        mesonetRegion={mesonetRegion}
+        onMesonetRegion={setMesonetRegion}
       />
 
       {/* Radar HUD — outside MapContainer so position:absolute anchors to this div */}

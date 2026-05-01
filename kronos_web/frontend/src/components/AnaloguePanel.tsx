@@ -1,7 +1,10 @@
-import type { AnalogueEntry } from '../types/api'
+import { useState } from 'react'
+import type { AnalogueEntry, SoundingData } from '../types/api'
+import { useCollapse } from '../hooks/useCollapse'
 
 interface Props {
   analogues: AnalogueEntry[]
+  oun: SoundingData | null
 }
 
 const EC_LABEL: Record<string, string> = {
@@ -43,12 +46,22 @@ function fmt(v: number | null, dec = 0): string {
   return v.toFixed(dec)
 }
 
-export function AnaloguePanel({ analogues }: Props) {
+export function AnaloguePanel({ analogues, oun }: Props) {
+  const noInstability = oun != null && (oun.MLCAPE ?? 0) < 100 && oun.LFC_height == null
+
+  // When there's no instability the panel defaults closed regardless of stored pref.
+  // A separate userOverride lets the user still expand it manually.
+  const { collapsed: storedCollapsed, toggle: storedToggle } = useCollapse('analogues')
+  const [userOverride, setUserOverride] = useState(false)
+  const collapsed = noInstability ? !userOverride : storedCollapsed
+  const toggle    = noInstability ? () => setUserOverride(p => !p) : storedToggle
+
   if (analogues.length === 0) {
     return (
-      <div className="panel anal-panel">
+      <div className={`panel anal-panel${collapsed ? ' collapsed' : ''}`}>
         <div className="panel-header">
           <span className="panel-title">Analogues</span>
+          <button className="panel-collapse-btn" onClick={toggle}>{collapsed ? '▸' : '▾'}</button>
         </div>
         <div className="panel-body" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <div className="connecting"><div className="pulse" />Computing…</div>
@@ -58,11 +71,24 @@ export function AnaloguePanel({ analogues }: Props) {
   }
 
   return (
-    <div className="panel anal-panel">
+    <div className={`panel anal-panel${collapsed ? ' collapsed' : ''}`}>
       <div className="panel-header">
         <span className="panel-title">Historical Analogues</span>
         <span className="panel-subtitle">cap similarity · top {analogues.length}</span>
+        <button className="panel-collapse-btn" onClick={toggle}>{collapsed ? '▸' : '▾'}</button>
       </div>
+      {noInstability && (
+        <div style={{
+          padding: '5px 12px',
+          fontSize: 11,
+          color: '#aaa',
+          background: 'rgba(255,255,255,0.04)',
+          borderBottom: '1px solid var(--color-border)',
+          borderLeft: '2px solid #444',
+        }}>
+          No convective instability — analogue matching not applicable today
+        </div>
+      )}
       <div className="panel-body" style={{ padding: '0', overflowX: 'auto' }}>
         <table className="anal-table">
           <thead>

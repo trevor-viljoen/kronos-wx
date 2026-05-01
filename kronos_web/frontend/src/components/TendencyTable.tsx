@@ -1,4 +1,5 @@
 import type { TendencyRow, Tier } from '../types/api'
+import { useCollapse } from '../hooks/useCollapse'
 
 interface Props {
   rows: TendencyRow[]
@@ -42,12 +43,15 @@ function CinCell({ value }: { value: number }) {
 }
 
 export function TendencyTable({ rows, hrrrValid }: Props) {
+  const { collapsed, toggle } = useCollapse('tendency')
+
   if (!rows.length) {
     return (
-      <div className="panel tend-panel">
+      <div className={`panel tend-panel${collapsed ? ' collapsed' : ''}`}>
         <div className="panel-header">
           <span className="panel-title">Tendency</span>
           {hrrrValid && <span className="panel-subtitle">HRRR {hrrrValid}</span>}
+          <button className="panel-collapse-btn" onClick={toggle}>{collapsed ? '▸' : '▾'}</button>
         </div>
         <div className="panel-body" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
@@ -59,7 +63,7 @@ export function TendencyTable({ rows, hrrrValid }: Props) {
   }
 
   return (
-    <div className="panel tend-panel">
+    <div className={`panel tend-panel${collapsed ? ' collapsed' : ''}`}>
       <div className="panel-header">
         <span className="panel-title">Tendency</span>
         {hrrrValid && (
@@ -67,6 +71,7 @@ export function TendencyTable({ rows, hrrrValid }: Props) {
             HRRR {hrrrValid}
           </span>
         )}
+        <button className="panel-collapse-btn" onClick={toggle}>{collapsed ? '▸' : '▾'}</button>
       </div>
       <div className="panel-body" style={{ padding: 0, overflowX: 'auto' }}>
         <table className="tend-table">
