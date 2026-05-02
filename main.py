@@ -1412,10 +1412,11 @@ def _analyze_now_forecast(
                 mdl_tbl.add_column("EHI",         justify="right")
                 mdl_tbl.add_column("SRH 0–3",     justify="right")
 
+                _thr = _clf.threshold_
                 for tier, pt, clf_r, reg_r in scored_counties:
                     color   = _TC2.get(tier, "white")
                     sig_p   = clf_r["significant"]
-                    sig_c   = "bright_red" if sig_p >= 0.60 else "red" if sig_p >= 0.40 else "yellow" if sig_p >= 0.25 else "white"
+                    sig_c   = "bright_red" if sig_p >= _thr else "red" if sig_p >= _thr * 0.7 else "yellow" if sig_p >= _thr * 0.4 else "white"
                     ehi_str = f"{pt.EHI:.2f}" if pt.EHI is not None else "—"
                     mdl_tbl.add_row(
                         pt.county.name,
@@ -1507,10 +1508,11 @@ def _analyze_now_forecast(
                 _vs_log   = float(_reg3._pipeline.predict(_vs_X)[0])
                 _vs_count = max(0.0, float(_np3.expm1(_vs_log)))
 
+                _thr3 = _clf3.threshold_
                 _sig_c = (
-                    "bright_red" if _vs_sig_p >= 0.60 else
-                    "red"        if _vs_sig_p >= 0.40 else
-                    "yellow"     if _vs_sig_p >= 0.25 else "white"
+                    "bright_red" if _vs_sig_p >= _thr3 else
+                    "red"        if _vs_sig_p >= _thr3 * 0.7 else
+                    "yellow"     if _vs_sig_p >= _thr3 * 0.4 else "white"
                 )
                 console.print(
                     f"[dim]HRRR prs {_prs_run_lbl} F{_prs_fxx_lbl:02d}  "
@@ -3594,10 +3596,11 @@ def train_models(start_year: int, end_year: int):
     clf_table = Table(show_header=False, box=None)
     clf_table.add_column(style="dim")
     clf_table.add_column()
-    clf_table.add_row("Cases trained",     str(clf_metrics["n_cases"]))
-    clf_table.add_row("  SIGNIFICANT",     str(clf_metrics["n_significant"]))
-    clf_table.add_row("  WEAK",            str(clf_metrics["n_weak"]))
-    clf_table.add_row("Train accuracy",    f"{clf_metrics['train_accuracy']:.1%}")
+    clf_table.add_row("Cases trained",       str(clf_metrics["n_cases"]))
+    clf_table.add_row("  SIGNIFICANT",       str(clf_metrics["n_significant"]))
+    clf_table.add_row("  WEAK",              str(clf_metrics["n_weak"]))
+    clf_table.add_row("Train accuracy",      f"{clf_metrics['train_accuracy']:.1%}")
+    clf_table.add_row("Calibrated threshold", f"{clf_metrics['calibrated_threshold']:.3f}")
     console.print(clf_table)
 
     console.print("\n[bold]Top 10 features (severity classifier)[/bold]")
@@ -3689,12 +3692,16 @@ def evaluate_models(start_year: int, end_year: int):
         clf_table = Table(show_header=False, box=None)
         clf_table.add_column(style="dim")
         clf_table.add_column()
-        clf_table.add_row("LOYO accuracy",   f"{clf_eval['loyo_accuracy']:.1%}")
-        clf_table.add_row("LOYO ROC-AUC",    f"{clf_eval['loyo_roc_auc']:.3f}")
-        clf_table.add_row("Folds",           str(clf_eval["n_folds"]))
-        clf_table.add_row("Predictions",     str(clf_eval["n_predictions"]))
+        clf_table.add_row("LOYO accuracy",      f"{clf_eval['loyo_accuracy']:.1%}")
+        clf_table.add_row("LOYO ROC-AUC",       f"{clf_eval['loyo_roc_auc']:.3f}")
+        clf_table.add_row("Tuned threshold",    f"{clf_eval['tuned_threshold']:.3f}")
+        clf_table.add_row("Folds",              str(clf_eval["n_folds"]))
+        clf_table.add_row("Predictions",        str(clf_eval["n_predictions"]))
         console.print(clf_table)
-        console.print("\n" + clf_eval["classification_report"])
+        console.print("\n[dim]Default threshold (0.5):[/dim]")
+        console.print(clf_eval["classification_report"])
+        console.print(f"\n[dim]Tuned threshold ({clf_eval['tuned_threshold']:.3f}):[/dim]")
+        console.print(clf_eval["classification_report_tuned"])
 
     # ── Tornado count regressor ───────────────────────────────────────────────
     console.print("\n[bold]Tornado count regressor[/bold]")

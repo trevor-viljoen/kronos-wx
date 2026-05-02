@@ -52,15 +52,21 @@ class SeverityClassifier:
     Usage::
 
         clf = SeverityClassifier()
-        metrics = clf.train(cases)
+        metrics = clf.train(cases)          # fits + calibrates threshold_
         probs = clf.predict_proba(indices, kinematics, ctg)
-        # {'significant': 0.72, 'weak': 0.28}
+        label = clf.predict(indices, kinematics, ctg)
+        # {'significant': 0.72, 'weak': 0.28}  /  'SIGNIFICANT_OUTBREAK'
+
+    threshold_ is the decision boundary calibrated during training via 5-fold
+    cross-validation to maximise F1 on the minority SIGNIFICANT_OUTBREAK class.
+    Default 0.5 before train() is called.
     """
 
     def __init__(self):
         self._pipeline = None
         self.feature_importances_: Optional[pd.Series] = None
         self.n_training_cases_: int = 0
+        self.threshold_: float = 0.5
 
     # ── Training ──────────────────────────────────────────────────────────────
 
@@ -68,7 +74,13 @@ class SeverityClassifier:
         """
         Fit on all provided cases. Returns summary training metrics (optimistic —
         use evaluate() for honest leave-one-year-out performance).
+
+        Also calibrates threshold_ via 5-fold cross-validation by maximising
+        F1 on the minority SIGNIFICANT_OUTBREAK class.
         """
+        from sklearn.model_selection import cross_val_predict
+        from sklearn.metrics import precision_recall_curve
+
         X, y = build_feature_matrix(cases, target="is_significant")
         if len(X) < 10:
             raise ValueError(f"Need at least 10 cases to train, got {len(X)}")
@@ -82,6 +94,19 @@ class SeverityClassifier:
             clf.feature_importances_, index=FEATURE_NAMES
         ).sort_values(ascending=False)
 
+        # Calibrate decision threshold via 5-fold CV to maximise F1 on SIGNIFICANT
+        cv_probs = cross_val_predict(
+            _make_pipeline(), X, y, cv=5, method="predict_proba", n_jobs=-1
+        )[:, 1]
+        prec, rec, thresholds = precision_recall_curve(y, cv_probs)
+        f1 = np.where(
+            (prec[:-1] + rec[:-1]) > 0,
+            2 * prec[:-1] * rec[:-1] / (prec[:-1] + rec[:-1]),
+            0.0,
+        )
+        best_idx = int(np.argmax(f1))
+        self.threshold_ = float(round(thresholds[best_idx], 3))
+
         preds = self._pipeline.predict(X)
         return {
             "n_cases": len(X),
@@ -89,6 +114,7 @@ class SeverityClassifier:
             "n_weak": int((y == 0).sum()),
             "train_accuracy": round(float((preds == y).mean()), 3),
             "positive_rate": round(float(y.mean()), 3),
+            "calibrated_threshold": self.threshold_,
         }
 
     # ── Inference ─────────────────────────────────────────────────────────────
@@ -132,16 +158,42 @@ class SeverityClassifier:
             "weak":        round(float(prob_map.get(0, 0.0)), 3),
         }
 
+    def predict(
+        self,
+        indices: ThermodynamicIndices,
+        kinematics: KinematicProfile,
+        convective_temp_gap: Optional[float] = None,
+        surface_dewpoint_f: Optional[float] = None,
+        moisture_return_gradient_f: Optional[float] = None,
+        gulf_moisture_fraction: Optional[float] = None,
+        modified_MLCAPE: Optional[float] = None,
+        modified_MLCIN: Optional[float] = None,
+    ) -> str:
+        """Return 'SIGNIFICANT_OUTBREAK' or 'WEAK_OUTBREAK' using threshold_."""
+        probs = self.predict_proba(
+            indices, kinematics, convective_temp_gap,
+            surface_dewpoint_f, moisture_return_gradient_f,
+            gulf_moisture_fraction, modified_MLCAPE, modified_MLCIN,
+        )
+        return (
+            "SIGNIFICANT_OUTBREAK"
+            if probs["significant"] >= self.threshold_
+            else "WEAK_OUTBREAK"
+        )
+
     # ── Evaluation ────────────────────────────────────────────────────────────
 
     def evaluate(self, cases: list[HistoricalCase]) -> dict:
         """
         Leave-one-year-out cross-validation.
 
-        Returns accuracy, ROC-AUC, and a scikit-learn classification_report
-        string broken down by class.
+        Returns accuracy, ROC-AUC, and classification reports at both the
+        default 0.5 threshold and the F1-optimised threshold (tuned_threshold).
         """
-        from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
+        from sklearn.metrics import (
+            accuracy_score, roc_auc_score, classification_report,
+            precision_recall_curve,
+        )
 
         rows, targets, years = [], [], []
         for case in cases:
@@ -179,13 +231,32 @@ class SeverityClassifier:
         if not all_true:
             return {"error": "No LOYO folds produced predictions"}
 
+        all_true_arr = np.array(all_true)
+        all_prob_arr = np.array(all_prob)
+
+        # Find OOF-optimal threshold
+        prec, rec, thresholds = precision_recall_curve(all_true_arr, all_prob_arr)
+        f1 = np.where(
+            (prec[:-1] + rec[:-1]) > 0,
+            2 * prec[:-1] * rec[:-1] / (prec[:-1] + rec[:-1]),
+            0.0,
+        )
+        best_idx = int(np.argmax(f1))
+        tuned_thr = float(round(thresholds[best_idx], 3))
+        all_pred_tuned = (all_prob_arr >= tuned_thr).astype(int).tolist()
+
         return {
             "loyo_accuracy": round(accuracy_score(all_true, all_pred), 3),
-            "loyo_roc_auc":  round(roc_auc_score(all_true, all_prob), 3),
+            "loyo_roc_auc":  round(roc_auc_score(all_true_arr, all_prob_arr), 3),
             "n_folds": len(set(years)) - len(skipped_years),
             "n_predictions": len(all_true),
+            "tuned_threshold": tuned_thr,
             "classification_report": classification_report(
                 all_true, all_pred,
+                target_names=["WEAK_OUTBREAK", "SIGNIFICANT_OUTBREAK"],
+            ),
+            "classification_report_tuned": classification_report(
+                all_true, all_pred_tuned,
                 target_names=["WEAK_OUTBREAK", "SIGNIFICANT_OUTBREAK"],
             ),
         }
