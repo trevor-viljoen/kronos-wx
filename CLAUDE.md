@@ -24,6 +24,8 @@ python main.py enrich-case 19990503_OK
 python main.py enrich-all 1994 2024
 python main.py compute-ces --start-year 1994 --end-year 2024
 python main.py analyze-cap-behavior 19990503_OK
+python main.py ingest-null-busts --start-year 2003 --end-year 2024       # fetch SPC KMZ archive, add NULL_BUST skeletons
+python main.py ingest-null-busts --dry-run                                # preview candidates without saving
 python main.py build-bust-database
 python main.py classify-boundary-forced --start-year 1994 --end-year 2024
 python main.py classify-boundary-forced --dry-run   # preview without writing

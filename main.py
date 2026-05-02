@@ -3244,6 +3244,90 @@ def compute_ces(start_year: int, end_year: int, force: bool):
     console.print(cross_table)
 
 
+# ── ingest-null-busts ────────────────────────────────────────────────────────
+
+@cli.command("ingest-null-busts")
+@click.option("--start-year", default=2003, show_default=True,
+              help="First year to scan (archive begins 2003)")
+@click.option("--end-year", default=CASE_LIBRARY_END_YEAR, show_default=True,
+              help="Last year to scan")
+@click.option("--spc-threshold", default=0.10, show_default=True, type=float,
+              help="Min SPC Day 1 tornado probability over OK to qualify as a bust (0–1)")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Show candidates but do not write to the database")
+def ingest_null_busts(start_year: int, end_year: int, spc_threshold: float, dry_run: bool):
+    """
+    Scan SPC Day 1 KMZ outlook archive for bust days and add them to the case library.
+
+    A bust day is defined as: SPC Day 1 tornado probability ≥ SPC_THRESHOLD over
+    Oklahoma AND zero Oklahoma tornado reports in the SPC tornado database.
+
+    KMZ files are cached locally in data/spc_outlooks/YYYY.json so subsequent
+    runs only fetch files not yet cached.  Archive coverage: 2003-01-01 onward.
+
+    After this command, run enrich-all to attach soundings and HRRR data to the
+    new NULL_BUST skeletons before training models.
+    """
+    from ok_weather_model.ingestion.spc_client import SPCClient
+    from ok_weather_model.storage.database import Database
+
+    db = Database()
+    start = date(start_year, 1, 1)
+    end = date(end_year, 12, 31)
+
+    # Load existing case dates to avoid duplicates
+    existing = db.query_parameter_space({
+        "start_date": str(start),
+        "end_date": str(end),
+    })
+    existing_dates: set[date] = {c.date for c in existing}
+    console.print(
+        f"Scanning {start_year}–{end_year} for NULL_BUST candidates "
+        f"(SPC torn prob ≥ {spc_threshold:.0%}, 0 OK tornadoes)…"
+    )
+    console.print(f"[dim]{len(existing_dates)} existing cases in date range (skipped)[/dim]")
+
+    with SPCClient() as client:
+        with console.status("Fetching SPC Day 1 outlooks (cached)…"):
+            candidates = client.build_null_bust_skeletons(
+                start, end,
+                spc_threshold=spc_threshold,
+                existing_dates=existing_dates,
+            )
+
+    if not candidates:
+        console.print("[yellow]No new NULL_BUST candidates found.[/yellow]")
+        return
+
+    # Display table of candidates
+    tbl = Table(title=f"NULL_BUST Candidates ({len(candidates)})", show_lines=True)
+    tbl.add_column("Date")
+    tbl.add_column("SPC Torn Prob", justify="right")
+    tbl.add_column("Status")
+    for c in sorted(candidates, key=lambda x: x.date):
+        prob_str = f"{c.SPC_max_tornado_prob:.0%}" if c.SPC_max_tornado_prob else "?"
+        status = "[dim]dry-run[/dim]" if dry_run else "[green]to save[/green]"
+        tbl.add_row(c.date.isoformat(), prob_str, status)
+    console.print(tbl)
+
+    if dry_run:
+        console.print(f"\n[yellow]Dry-run: {len(candidates)} candidates found, none saved.[/yellow]")
+        return
+
+    saved = 0
+    for c in candidates:
+        try:
+            db.save_case(c)
+            saved += 1
+        except Exception as exc:
+            console.print(f"[red]Failed to save {c.case_id}: {exc}[/red]")
+
+    console.print(
+        f"\n[bold green]Saved {saved} NULL_BUST skeletons.[/bold green] "
+        f"Run [cyan]enrich-all {start_year} {end_year}[/cyan] to attach sounding data."
+    )
+
+
 # ── build-bust-database ───────────────────────────────────────────────────────
 
 @cli.command("build-bust-database")

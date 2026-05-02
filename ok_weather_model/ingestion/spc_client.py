@@ -10,8 +10,12 @@ automatically classifying each day's event type from count and intensity data.
 """
 
 import io
+import json
 import logging
-from datetime import date, datetime, timezone
+import zipfile
+import xml.etree.ElementTree as ET
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -28,6 +32,32 @@ from ..models import (
 logger = logging.getLogger(__name__)
 
 TORNADO_CSV_URL = "https://www.spc.noaa.gov/wcm/data/1950-2023_actual_tornadoes.csv"
+
+# SPC Day 1 outlook KMZ archive
+_SPC_OUTLOOK_BASE = (
+    "https://www.spc.noaa.gov/products/outlook/archive/{year}/"
+    "day1otlk_{yyyymmdd}_{hhmm}.kmz"
+)
+_OUTLOOK_TIMES = ["1300", "1200", "1630", "2000", "0100"]
+
+# Local cache: data/spc_outlooks/YYYY.json  →  {YYYYMMDD: prob_float}
+_OUTLOOK_CACHE_DIR = (
+    Path(__file__).resolve().parent.parent.parent / "data" / "spc_outlooks"
+)
+
+# Oklahoma representative sample points [lat, lon] — used for polygon intersection
+_OK_SAMPLE_POINTS: list[tuple[float, float]] = [
+    (35.47, -97.52),   # OKC
+    (36.15, -95.99),   # Tulsa
+    (34.60, -98.39),   # Lawton
+    (36.39, -97.88),   # Enid
+    (35.22, -97.44),   # Norman / OUN
+    (34.90, -95.97),   # McAlester
+    (35.85, -96.94),   # Cushing
+    (36.78, -98.67),   # Woodward
+    (34.36, -99.32),   # Altus
+    (35.98, -94.93),   # Tahlequah
+]
 
 # SPC state code for Oklahoma
 OKLAHOMA_STATE_FIPS = 40
@@ -180,18 +210,131 @@ class SPCClient:
         return cases
 
     def get_day1_outlook(self, outlook_date: date) -> Optional[dict]:
-        """
-        Retrieve the archived SPC Day 1 convective outlook for a given date.
-        Returns a dict with 'tornado_probs' and 'risk_category' if available.
+        """Legacy stub — use get_day1_outlook_torn_prob() for probability data."""
+        prob = self.get_day1_outlook_torn_prob(outlook_date)
+        if prob is None:
+            return None
+        return {"tornado_probs": prob, "risk_category": None}
 
-        Note: SPC outlook archive format varies by era. Pre-2003 outlooks may
-        not be available in machine-readable form.
+    def get_day1_outlook_torn_prob(self, outlook_date: date) -> Optional[float]:
         """
-        # SPC archives Day 1 outlooks at:
-        # https://www.spc.noaa.gov/archive/YYYY/day1otlk_YYYYMMDD_HHMM_torn.lyr.geojson
-        # This is a future enhancement; returning None until implemented.
-        logger.debug("Day 1 outlook retrieval not yet implemented for %s", outlook_date)
-        return None
+        Return the maximum SPC Day 1 tornado probability over Oklahoma (0.0–1.0).
+
+        Fetches the KMZ archive for the 1300Z issuance (falling back to 1200Z,
+        1630Z, 2000Z, 0100Z). Results are cached in data/spc_outlooks/YYYY.json
+        to avoid repeat downloads. Returns None if no outlook file is available
+        (archive only covers 2003+; missing files treated as None, not 0%).
+        """
+        date_str = outlook_date.strftime("%Y%m%d")
+        year_str = outlook_date.strftime("%Y")
+
+        # Check local cache first
+        cache = _load_outlook_cache(outlook_date.year)
+        if date_str in cache:
+            v = cache[date_str]
+            return None if v is None else float(v)
+
+        # Try each issuance time until one succeeds
+        prob: Optional[float] = None
+        for hhmm in _OUTLOOK_TIMES:
+            url = _SPC_OUTLOOK_BASE.format(
+                year=year_str, yyyymmdd=date_str, hhmm=hhmm
+            )
+            try:
+                resp = self._http.get(url, follow_redirects=True, timeout=30.0)
+                if resp.status_code == 200 and b"PK" in resp.content[:4]:
+                    prob = _parse_kmz_ok_torn_prob(resp.content)
+                    logger.debug(
+                        "Outlook %s %sZ → max OK torn prob %.0f%%",
+                        date_str, hhmm, (prob or 0) * 100,
+                    )
+                    break
+                elif resp.status_code == 404:
+                    continue
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                logger.debug("Outlook fetch failed %s %sZ: %s", date_str, hhmm, exc)
+                continue
+
+        # Cache and return (None = no file found, distinct from 0%)
+        cache[date_str] = prob
+        _save_outlook_cache(outlook_date.year, cache)
+        return prob
+
+    def build_null_bust_skeletons(
+        self,
+        start_date: date,
+        end_date: date,
+        spc_threshold: float = 0.10,
+        existing_dates: Optional[set[date]] = None,
+    ) -> list[HistoricalCase]:
+        """
+        Build NULL_BUST HistoricalCase skeletons for days where SPC Day 1
+        tornado probability over Oklahoma was ≥ spc_threshold but actual
+        Oklahoma tornado count was 0.
+
+        Skips dates already present in existing_dates (to avoid duplicates).
+        Archive only covers 2003-01-01 onward; earlier dates are skipped.
+
+        Returns a list of un-enriched HistoricalCase skeletons ready for
+        enrich-case or enrich-all.
+        """
+        tornado_df = self._load_tornado_csv()
+        ok_torn = tornado_df[tornado_df["st"] == OKLAHOMA_STATE_ABBR]
+        ok_tornado_dates: set[date] = set(ok_torn["event_date"].dropna().unique())
+
+        archive_start = date(2003, 1, 1)
+        effective_start = max(start_date, archive_start)
+
+        cases: list[HistoricalCase] = []
+        current = effective_start
+        skipped_no_file = 0
+        skipped_existing = 0
+        checked = 0
+
+        while current <= end_date:
+            if existing_dates and current in existing_dates:
+                current += timedelta(days=1)
+                skipped_existing += 1
+                continue
+
+            if current in ok_tornado_dates:
+                current += timedelta(days=1)
+                continue
+
+            checked += 1
+            prob = self.get_day1_outlook_torn_prob(current)
+
+            if prob is None:
+                skipped_no_file += 1
+                current += timedelta(days=1)
+                continue
+
+            if prob >= spc_threshold:
+                case_date = current
+                case = HistoricalCase(
+                    case_id=HistoricalCase.make_case_id(case_date),
+                    date=case_date,
+                    event_class=EventClass.NULL_BUST,
+                    tornado_count=0,
+                    max_tornado_rating=None,
+                    significant_severe=False,
+                    SPC_max_tornado_prob=prob,
+                )
+                cases.append(case)
+                logger.info(
+                    "NULL_BUST candidate: %s  SPC torn prob %.0f%%",
+                    case_date.isoformat(), prob * 100,
+                )
+
+            current += timedelta(days=1)
+
+        logger.info(
+            "Bust scan %s–%s: checked %d no-tornado days, found %d NULL_BUST "
+            "candidates, %d no-file days, %d skipped (already in DB)",
+            effective_start, end_date, checked, len(cases),
+            skipped_no_file, skipped_existing,
+        )
+        return cases
 
     def close(self) -> None:
         self._http.close()
@@ -201,6 +344,150 @@ class SPCClient:
 
     def __exit__(self, *_):
         self.close()
+
+
+# ── SPC outlook KMZ parsing ───────────────────────────────────────────────────
+
+
+def _point_in_ring(lat: float, lon: float, ring: list[tuple[float, float]]) -> bool:
+    """Ray-casting point-in-polygon. ring is [(lon, lat), ...] pairs."""
+    n = len(ring)
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring[i]   # lon, lat
+        xj, yj = ring[j]
+        if (yi > lat) != (yj > lat):
+            if lon < (xj - xi) * (lat - yi) / (yj - yi) + xi:
+                inside = not inside
+        j = i
+    return inside
+
+
+def _parse_kmz_ok_torn_prob(kmz_bytes: bytes) -> Optional[float]:
+    """
+    Parse a SPC Day 1 KMZ file and return max tornado probability (0.0–1.0)
+    over any Oklahoma sample point.  Returns 0.0 if the file parses but no
+    probability polygons overlap Oklahoma; None if the KML is unreadable.
+
+    KMZ structure: ZIP → doc.kml (or *.kml)
+    KML structure: Folders named "10 %" etc. containing Placemark Polygons.
+    Coordinates are lon,lat,alt space-separated tuples.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(kmz_bytes)) as zf:
+            kml_names = [n for n in zf.namelist() if n.endswith(".kml")]
+            if not kml_names:
+                return None
+            kml_bytes = zf.read(kml_names[0])
+    except (zipfile.BadZipFile, KeyError):
+        return None
+
+    try:
+        root = ET.fromstring(kml_bytes)
+    except ET.ParseError:
+        return None
+
+    # Strip XML namespaces for simpler matching
+    ns_prefix = ""
+    if root.tag.startswith("{"):
+        ns_prefix = root.tag.split("}")[0] + "}"
+
+    def tag(name: str) -> str:
+        return f"{ns_prefix}{name}"
+
+    max_prob: float = 0.0
+
+    # Walk all Folders and Placemarks looking for probability names
+    for elem in root.iter():
+        local = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+
+        if local not in ("Folder", "Placemark"):
+            continue
+
+        # Extract probability from name or description
+        prob_val: Optional[float] = None
+        name_el = elem.find(f".//{tag('name')}")
+        if name_el is not None and name_el.text:
+            prob_val = _parse_prob_text(name_el.text)
+        if prob_val is None:
+            desc_el = elem.find(f".//{tag('description')}")
+            if desc_el is not None and desc_el.text:
+                prob_val = _parse_prob_text(desc_el.text)
+
+        if prob_val is None or prob_val < 0.05:
+            continue
+
+        # Extract polygon coordinates
+        for coords_el in elem.iter(tag("coordinates")):
+            if coords_el.text is None:
+                continue
+            ring = _parse_kml_coordinates(coords_el.text)
+            if len(ring) < 3:
+                continue
+            for lat, lon in _OK_SAMPLE_POINTS:
+                if _point_in_ring(lat, lon, ring):
+                    max_prob = max(max_prob, prob_val)
+                    break
+
+    return max_prob
+
+
+def _parse_prob_text(text: str) -> Optional[float]:
+    """Extract probability float from strings like '10 %', '0.10', '10%', 'DN=10'."""
+    import re
+    text = text.strip()
+    # DN=10 or DN: 10
+    m = re.search(r"DN\s*[=:]\s*(\d+)", text, re.IGNORECASE)
+    if m:
+        return int(m.group(1)) / 100.0
+    # '30 %' or '30%'
+    m = re.search(r"(\d+)\s*%", text)
+    if m:
+        v = int(m.group(1))
+        return v / 100.0 if v <= 1 else v / 100.0
+    # '0.10' or '0.30'
+    m = re.fullmatch(r"0?\.\d+", text)
+    if m:
+        return float(text)
+    # bare integer like '10' (from <name>10</name>)
+    m = re.fullmatch(r"(\d+)", text.strip())
+    if m:
+        v = int(m.group(1))
+        if 2 <= v <= 60:
+            return v / 100.0
+    return None
+
+
+def _parse_kml_coordinates(text: str) -> list[tuple[float, float]]:
+    """Parse KML coordinates string into (lon, lat) pairs."""
+    ring: list[tuple[float, float]] = []
+    for token in text.strip().split():
+        parts = token.split(",")
+        if len(parts) >= 2:
+            try:
+                ring.append((float(parts[0]), float(parts[1])))
+            except ValueError:
+                pass
+    return ring
+
+
+def _load_outlook_cache(year: int) -> dict[str, Optional[float]]:
+    """Load cached outlook probabilities for a year."""
+    path = _OUTLOOK_CACHE_DIR / f"{year}.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_outlook_cache(year: int, cache: dict[str, Optional[float]]) -> None:
+    """Persist outlook probability cache for a year."""
+    _OUTLOOK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = _OUTLOOK_CACHE_DIR / f"{year}.json"
+    path.write_text(json.dumps(cache, separators=(",", ":")))
 
 
 # ── Classification helpers ─────────────────────────────────────────────────────
