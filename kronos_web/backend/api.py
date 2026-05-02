@@ -394,6 +394,20 @@ _VAPID_KEYS_PATH = _ROOT / "data" / "vapid_keys.json"
 _push_subscriptions: list[dict] = []   # {endpoint, keys: {p256dh, auth}}
 _vapid_private_key: str | None = None
 _vapid_public_key:  str | None = None
+_MAX_PUSH_SUBS = 50
+
+# Known push-service host suffixes. Subscriptions whose endpoint doesn't match
+# are rejected to prevent SSRF: the server would otherwise POST to any URL an
+# attacker registers.
+_ALLOWED_PUSH_HOSTS = (
+    "fcm.googleapis.com",          # Chrome / Android
+    "push.services.mozilla.com",   # Firefox
+    "notify.windows.com",          # Edge
+    "push.apple.com",              # Safari
+)
+
+import concurrent.futures as _cf
+_push_executor = _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="push")
 
 
 def _init_vapid() -> None:
@@ -429,34 +443,39 @@ def _init_vapid() -> None:
     logger.info("Generated new VAPID keys → %s", _VAPID_KEYS_PATH)
 
 
-def _push_notify(title: str, body: str) -> None:
-    """Fire-and-forget push to all registered subscriptions."""
-    if not _push_subscriptions or not _vapid_private_key:
-        return
+def _do_push(title: str, body: str, subs: list[dict], private_key: str) -> None:
+    """Blocking push worker — runs in thread pool, never on the event loop."""
     try:
         from pywebpush import webpush, WebPushException
-        payload = json.dumps({"title": title, "body": body})
-        dead = []
-        for sub in list(_push_subscriptions):
-            try:
-                webpush(
-                    subscription_info=sub,
-                    data=payload,
-                    vapid_private_key=_vapid_private_key,
-                    vapid_claims={"sub": "mailto:kronos@localhost"},
-                )
-            except WebPushException as e:
-                status = getattr(e.response, "status_code", None)
-                if status in (404, 410):   # subscription expired / unsubscribed
-                    dead.append(sub)
-                else:
-                    logger.debug("Push failed (%s): %s", status, e)
-            except Exception as e:
-                logger.debug("Push error: %s", e)
-        for sub in dead:
-            _push_subscriptions.remove(sub)
     except ImportError:
-        pass
+        return
+    payload = json.dumps({"title": title, "body": body})
+    dead: list[str] = []
+    for sub in subs:
+        try:
+            webpush(
+                subscription_info=sub,
+                data=payload,
+                vapid_private_key=private_key,
+                vapid_claims={"sub": "mailto:kronos@localhost"},
+            )
+        except WebPushException as e:
+            status = getattr(e.response, "status_code", None)
+            if status in (404, 410):
+                dead.append(sub.get("endpoint", ""))
+            else:
+                logger.debug("Push failed (%s): %s", status, e)
+        except Exception as e:
+            logger.debug("Push error: %s", e)
+    if dead:
+        _push_subscriptions[:] = [s for s in _push_subscriptions if s.get("endpoint") not in dead]
+
+
+def _push_notify(title: str, body: str) -> None:
+    """Submit push delivery to the thread pool — never blocks the event loop."""
+    if not _push_subscriptions or not _vapid_private_key:
+        return
+    _push_executor.submit(_do_push, title, body, list(_push_subscriptions), _vapid_private_key)
 
 
 # ── Serializers ───────────────────────────────────────────────────────────────
@@ -1545,6 +1564,29 @@ async def push_vapid():
     return JSONResponse({"publicKey": _vapid_public_key})
 
 
+def _validate_push_endpoint(endpoint: str) -> bool:
+    """
+    Reject endpoints that could be used for SSRF.
+
+    Rules:
+    - Must be https://
+    - Host must match a known browser push-service suffix
+    - Caps total subscriptions to prevent unbounded growth
+    """
+    from urllib.parse import urlparse
+    try:
+        u = urlparse(endpoint)
+    except Exception:
+        return False
+    if u.scheme != "https":
+        return False
+    host = (u.hostname or "").lower()
+    if not any(host == allowed or host.endswith("." + allowed) for allowed in _ALLOWED_PUSH_HOSTS):
+        logger.warning("Push subscribe rejected — unknown host: %s", host)
+        return False
+    return True
+
+
 @app.post("/api/push/subscribe")
 async def push_subscribe(request: Request):
     """Register a browser push subscription."""
@@ -1552,6 +1594,10 @@ async def push_subscribe(request: Request):
     endpoint = body.get("endpoint")
     if not endpoint:
         return JSONResponse({"error": "missing endpoint"}, status_code=400)
+    if not _validate_push_endpoint(endpoint):
+        return JSONResponse({"error": "invalid endpoint"}, status_code=400)
+    if len(_push_subscriptions) >= _MAX_PUSH_SUBS:
+        return JSONResponse({"error": "subscription limit reached"}, status_code=429)
     # Deduplicate by endpoint URL
     if not any(s["endpoint"] == endpoint for s in _push_subscriptions):
         _push_subscriptions.append(body)
