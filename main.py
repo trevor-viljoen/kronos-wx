@@ -3247,8 +3247,8 @@ def compute_ces(start_year: int, end_year: int, force: bool):
 # ── ingest-null-busts ────────────────────────────────────────────────────────
 
 @cli.command("ingest-null-busts")
-@click.option("--start-year", default=2003, show_default=True,
-              help="First year to scan (archive begins 2003)")
+@click.option("--start-year", default=2009, show_default=True,
+              help="First year to scan (KMZ archive confirmed from 2009)")
 @click.option("--end-year", default=CASE_LIBRARY_END_YEAR, show_default=True,
               help="Last year to scan")
 @click.option("--spc-threshold", default=0.10, show_default=True, type=float,
@@ -3263,7 +3263,8 @@ def ingest_null_busts(start_year: int, end_year: int, spc_threshold: float, dry_
     Oklahoma AND zero Oklahoma tornado reports in the SPC tornado database.
 
     KMZ files are cached locally in data/spc_outlooks/YYYY.json so subsequent
-    runs only fetch files not yet cached.  Archive coverage: 2003-01-01 onward.
+    runs only fetch files not yet cached.  Archive coverage: 2009-01-01 onward
+    (KMZ format not available before 2009).
 
     After this command, run enrich-all to attach soundings and HRRR data to the
     new NULL_BUST skeletons before training models.

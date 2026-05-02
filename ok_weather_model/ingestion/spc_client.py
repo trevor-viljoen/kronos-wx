@@ -38,7 +38,11 @@ _SPC_OUTLOOK_BASE = (
     "https://www.spc.noaa.gov/products/outlook/archive/{year}/"
     "day1otlk_{yyyymmdd}_{hhmm}.kmz"
 )
+# KMZ archive issuance times to try in priority order
 _OUTLOOK_TIMES = ["1300", "1200", "1630", "2000", "0100"]
+
+# KMZ archive is only reliably available from this date onward (verified 2009-01-01)
+_KMZ_ARCHIVE_START = date(2009, 1, 1)
 
 # Local cache: data/spc_outlooks/YYYY.json  →  {YYYYMMDD: prob_float}
 _OUTLOOK_CACHE_DIR = (
@@ -282,8 +286,7 @@ class SPCClient:
         ok_torn = tornado_df[tornado_df["st"] == OKLAHOMA_STATE_ABBR]
         ok_tornado_dates: set[date] = set(ok_torn["event_date"].dropna().unique())
 
-        archive_start = date(2003, 1, 1)
-        effective_start = max(start_date, archive_start)
+        effective_start = max(start_date, _KMZ_ARCHIVE_START)
 
         cases: list[HistoricalCase] = []
         current = effective_start
