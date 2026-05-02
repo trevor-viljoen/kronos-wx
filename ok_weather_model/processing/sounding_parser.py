@@ -61,9 +61,14 @@ def compute_thermodynamic_indices(
             "Install with: pip install metpy"
         ) from exc
 
-    if len(profile.levels) < 10:
+    if len(profile.levels) < 20:
         raise ValueError(
             f"Sounding has only {len(profile.levels)} levels — insufficient for MetPy calc"
+        )
+    min_pressure = min(lev.pressure for lev in profile.levels)
+    if min_pressure > 500:
+        raise ValueError(
+            f"Sounding top is {min_pressure:.0f} hPa — must reach at least 500 hPa"
         )
 
     levels = profile.levels
