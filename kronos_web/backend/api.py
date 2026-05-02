@@ -407,7 +407,9 @@ _ALLOWED_PUSH_HOSTS = (
 )
 
 import concurrent.futures as _cf
+import threading as _threading
 _push_executor = _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="push")
+_push_lock = _threading.Lock()   # guards _push_subscriptions across event loop + thread pool
 
 
 def _init_vapid() -> None:
@@ -443,12 +445,16 @@ def _init_vapid() -> None:
     logger.info("Generated new VAPID keys → %s", _VAPID_KEYS_PATH)
 
 
-def _do_push(title: str, body: str, subs: list[dict], private_key: str) -> None:
-    """Blocking push worker — runs in thread pool, never on the event loop."""
+def _do_push(title: str, body: str, subs: list[dict], private_key: str) -> list[str]:
+    """
+    Blocking push worker — runs in thread pool, never on the event loop.
+    Returns a list of expired endpoint URLs (HTTP 404/410) to be pruned by the caller.
+    Does NOT touch _push_subscriptions directly; all mutations go through _push_lock.
+    """
     try:
         from pywebpush import webpush, WebPushException
     except ImportError:
-        return
+        return []
     payload = json.dumps({"title": title, "body": body})
     dead: list[str] = []
     for sub in subs:
@@ -467,15 +473,31 @@ def _do_push(title: str, body: str, subs: list[dict], private_key: str) -> None:
                 logger.debug("Push failed (%s): %s", status, e)
         except Exception as e:
             logger.debug("Push error: %s", e)
+    return dead
+
+
+def _prune_dead_subs(future: "_cf.Future[list[str]]") -> None:
+    """Future done-callback: prune expired endpoints under _push_lock."""
+    try:
+        dead = future.result()
+    except Exception:
+        return
     if dead:
-        _push_subscriptions[:] = [s for s in _push_subscriptions if s.get("endpoint") not in dead]
+        with _push_lock:
+            _push_subscriptions[:] = [
+                s for s in _push_subscriptions if s.get("endpoint") not in dead
+            ]
+        logger.debug("Pruned %d expired push subscription(s)", len(dead))
 
 
 def _push_notify(title: str, body: str) -> None:
     """Submit push delivery to the thread pool — never blocks the event loop."""
-    if not _push_subscriptions or not _vapid_private_key:
-        return
-    _push_executor.submit(_do_push, title, body, list(_push_subscriptions), _vapid_private_key)
+    with _push_lock:
+        if not _push_subscriptions or not _vapid_private_key:
+            return
+        snapshot = list(_push_subscriptions)
+    fut = _push_executor.submit(_do_push, title, body, snapshot, _vapid_private_key)
+    fut.add_done_callback(_prune_dead_subs)
 
 
 # ── Serializers ───────────────────────────────────────────────────────────────
@@ -662,6 +684,7 @@ def _ser_md(md) -> dict:
 
 async def _task_hrrr() -> None:
     global _hrrr_base, _hrrr_now, _prev_tier_map
+    _fail = 0
     while True:
         try:
             now = datetime.now(tz=timezone.utc)
@@ -758,9 +781,13 @@ async def _task_hrrr() -> None:
 
             await _broadcast()
             logger.info("HRRR updated: %s, %d zones", ts, len(zones))
+            _fail = 0
 
         except Exception as exc:
-            logger.error("HRRR task error: %s", exc, exc_info=True)
+            _fail += 1
+            logger.error("HRRR task error #%d: %s", _fail, exc, exc_info=True)
+            if _fail == 5:
+                _log_alert("⚠ HRRR task: 5 consecutive failures — data may be stale", push=True)
 
         await asyncio.sleep(15 * 60)
 
@@ -910,6 +937,7 @@ def _compute_analogues(indices, kinematics, tc_gap_12z, n: int = 5) -> list[dict
 
 
 async def _task_environment() -> None:
+    _fail = 0
     while True:
         try:
             stn   = OklahomaSoundingStation.OUN
@@ -1051,15 +1079,20 @@ async def _task_environment() -> None:
 
             await _broadcast()
             logger.info("Environment updated: %s %02dZ — %d analogues", today, fetched_hour, len(analogues))
+            _fail = 0
 
         except Exception as exc:
-            logger.error("Environment task error: %s", exc, exc_info=True)
+            _fail += 1
+            logger.error("Environment task error #%d: %s", _fail, exc, exc_info=True)
+            if _fail == 5:
+                _log_alert("⚠ Environment task: 5 consecutive failures — sounding data may be stale", push=True)
 
         await asyncio.sleep(60 * 60)
 
 
 async def _task_surface() -> None:
     global _dryline_obj
+    _fail = 0
     while True:
         try:
             now = datetime.now(tz=timezone.utc)
@@ -1206,15 +1239,20 @@ async def _task_surface() -> None:
                 _state["mesonet_obs"]            = mesonet_obs_list
 
             await _broadcast()
+            _fail = 0
 
         except Exception as exc:
-            logger.error("Surface task error: %s", exc, exc_info=True)
+            _fail += 1
+            logger.error("Surface task error #%d: %s", _fail, exc, exc_info=True)
+            if _fail == 5:
+                _log_alert("⚠ Surface task: 5 consecutive failures — Mesonet/dryline data may be stale", push=True)
 
         await asyncio.sleep(5 * 60)
 
 
 async def _task_spc() -> None:
     global _prev_md_set, _prev_alert_set
+    _fail = 0
     while True:
         try:
             def _do_spc():
@@ -1311,9 +1349,13 @@ async def _task_spc() -> None:
             await _broadcast()
             logger.info("SPC updated: %s, %d alerts, %d MDs",
                         outlook.category if outlook else "none", len(alerts), len(mds))
+            _fail = 0
 
         except Exception as exc:
-            logger.error("SPC task error: %s", exc, exc_info=True)
+            _fail += 1
+            logger.error("SPC task error #%d: %s", _fail, exc, exc_info=True)
+            if _fail == 5:
+                _log_alert("⚠ SPC task: 5 consecutive failures — outlooks and alerts may be stale", push=True)
 
         await asyncio.sleep(15 * 60)
 
@@ -1596,12 +1638,12 @@ async def push_subscribe(request: Request):
         return JSONResponse({"error": "missing endpoint"}, status_code=400)
     if not _validate_push_endpoint(endpoint):
         return JSONResponse({"error": "invalid endpoint"}, status_code=400)
-    if len(_push_subscriptions) >= _MAX_PUSH_SUBS:
-        return JSONResponse({"error": "subscription limit reached"}, status_code=429)
-    # Deduplicate by endpoint URL
-    if not any(s["endpoint"] == endpoint for s in _push_subscriptions):
-        _push_subscriptions.append(body)
-        logger.info("Push subscription added (%d total)", len(_push_subscriptions))
+    with _push_lock:
+        if len(_push_subscriptions) >= _MAX_PUSH_SUBS:
+            return JSONResponse({"error": "subscription limit reached"}, status_code=429)
+        if not any(s["endpoint"] == endpoint for s in _push_subscriptions):
+            _push_subscriptions.append(body)
+            logger.info("Push subscription added (%d total)", len(_push_subscriptions))
     return JSONResponse({"status": "subscribed"})
 
 
@@ -1610,9 +1652,10 @@ async def push_unsubscribe(request: Request):
     """Remove a browser push subscription."""
     body = await request.json()
     endpoint = body.get("endpoint")
-    before = len(_push_subscriptions)
-    _push_subscriptions[:] = [s for s in _push_subscriptions if s.get("endpoint") != endpoint]
-    removed = before - len(_push_subscriptions)
+    with _push_lock:
+        before = len(_push_subscriptions)
+        _push_subscriptions[:] = [s for s in _push_subscriptions if s.get("endpoint") != endpoint]
+        removed = before - len(_push_subscriptions)
     logger.info("Push subscription removed (%d remaining)", len(_push_subscriptions))
     return JSONResponse({"status": "unsubscribed", "removed": removed})
 

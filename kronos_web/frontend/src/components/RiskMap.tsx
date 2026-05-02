@@ -79,6 +79,16 @@ const MESONET_REGION_LABELS: Record<MesonetRegion, string> = { ok: 'OK', all: 'A
 // Oklahoma bounding box (generous, includes border stations)
 const OK_MESONET_BOUNDS = { minLat: 33.5, maxLat: 37.1, minLon: -103.1, maxLon: -94.3 }
 
+// Escape HTML special chars before interpolating external API text into innerHTML contexts.
+function escHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 // ── Fit Oklahoma bounds on first render ───────────────────────────────────────
 function FitBounds() {
   const map = useMap()
@@ -240,18 +250,18 @@ function AlertLayer({ geojson }: AlertLayerProps) {
     const color      = event.includes('Tornado') ? '#ff2222' : '#ffcc00'
 
     ;(layer as L.Path).bindTooltip(
-      `<strong style="color:${color}">${event}</strong><br/>${area.slice(0, 60)}<br/>exp ${expires}`,
+      `<strong style="color:${color}">${escHtml(event)}</strong><br/>${escHtml(area.slice(0, 60))}<br/>exp ${escHtml(expires)}`,
       { sticky: true, opacity: 1 }
     )
 
     const body = [desc, instr].filter(Boolean).join('\n\n— PROTECTIVE ACTION —\n\n')
     ;(layer as L.Path).bindPopup(
       `<div class="alert-popup-wrap">
-        <div class="alert-popup-event" style="color:${color}">${event}</div>
-        ${headline ? `<div class="alert-popup-headline">${headline}</div>` : ''}
-        <div class="alert-popup-meta">Areas: ${area}</div>
-        ${expires ? `<div class="alert-popup-meta">Expires: ${expires}</div>` : ''}
-        <pre class="alert-popup-body">${body || 'No text available.'}</pre>
+        <div class="alert-popup-event" style="color:${color}">${escHtml(event)}</div>
+        ${headline ? `<div class="alert-popup-headline">${escHtml(headline)}</div>` : ''}
+        <div class="alert-popup-meta">Areas: ${escHtml(area)}</div>
+        ${expires ? `<div class="alert-popup-meta">Expires: ${escHtml(expires)}</div>` : ''}
+        <pre class="alert-popup-body">${escHtml(body) || 'No text available.'}</pre>
       </div>`,
       { maxWidth: 420, maxHeight: 500, className: 'alert-popup' }
     )
