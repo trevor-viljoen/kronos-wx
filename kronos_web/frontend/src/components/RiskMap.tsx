@@ -1108,15 +1108,22 @@ export function RiskMap({ state, onCountyClick }: Props) {
         />
       )}
 
-      {/* Legend */}
-      {activeTiers.length > 0 && (
+      {/* Legend — always visible when the map has loaded */}
+      {state && (
         <div className="map-legend">
-          {activeTiers.map(({ tier, label }) => (
-            <div key={tier} className="legend-row">
-              <div className="legend-swatch" style={{ background: TIER_STYLE[tier].color, opacity: 0.8 }} />
-              <span>{label.replace('_', ' ')}</span>
-            </div>
-          ))}
+          {activeTiers.length > 0
+            ? activeTiers.map(({ tier, label }) => (
+                <div key={tier} className="legend-row">
+                  <div className="legend-swatch" style={{ background: TIER_STYLE[tier].color, opacity: 0.8 }} />
+                  <span>{label.replace('_', ' ')}</span>
+                </div>
+              ))
+            : (
+                <div className="legend-row" style={{ color: 'var(--color-text-dim)', fontSize: 10 }}>
+                  No elevated risk
+                </div>
+              )
+          }
           {overlays.watches && state?.spc?.alerts?.some(a => a.event === 'Tornado Watch') && (
             <div className="legend-row">
               <div className="legend-swatch" style={{ background: '#33cc66', opacity: 0.5, border: '2px dashed #33cc66' }} />
