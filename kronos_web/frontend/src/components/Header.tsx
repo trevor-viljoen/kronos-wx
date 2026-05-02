@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo } from 'react'
 import type { DashboardState } from '../types/api'
+import { usePushNotifications } from '../hooks/usePushNotifications'
 
 interface Props {
   state: DashboardState | null
@@ -54,6 +55,38 @@ function HeaderTicker({ state }: { state: DashboardState | null }) {
         ))}
       </div>
     </div>
+  )
+}
+
+function NotifyButton() {
+  const { state: ps, loading, subscribe, unsubscribe } = usePushNotifications()
+  if (ps === 'unsupported') return null
+
+  const label   = ps === 'subscribed' ? '🔔' : ps === 'denied' ? '🔕' : '🔔'
+  const title   = ps === 'subscribed' ? 'Notifications on — click to disable'
+                : ps === 'denied'     ? 'Notifications blocked in browser settings'
+                : 'Enable push alerts (tornado warnings, EXTREME tier, alarm bells)'
+  const dimmed  = ps !== 'subscribed'
+  const onClick = ps === 'subscribed' ? unsubscribe : ps === 'denied' ? undefined : subscribe
+
+  return (
+    <button
+      title={title}
+      disabled={loading || ps === 'denied'}
+      onClick={onClick}
+      style={{
+        background: 'none',
+        border: 'none',
+        cursor: ps === 'denied' ? 'not-allowed' : 'pointer',
+        fontSize: 16,
+        opacity: dimmed ? 0.35 : 1,
+        padding: '0 4px',
+        flexShrink: 0,
+        lineHeight: 1,
+      }}
+    >
+      {label}
+    </button>
   )
 }
 
@@ -125,6 +158,7 @@ export function Header({ state }: Props) {
           ? `upd ${new Date(state.updated_at).toISOString().slice(11, 16)}Z`
           : ''}
       </span>
+      <NotifyButton />
     </header>
   )
 }

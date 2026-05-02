@@ -378,12 +378,85 @@ def _build_situation_brief() -> list[dict]:
     return lines
 
 
-def _log_alert(msg: str) -> None:
+def _log_alert(msg: str, push: bool = False) -> None:
     entry = {
         "ts":  datetime.now(tz=timezone.utc).strftime("%H:%MZ"),
         "msg": msg,
     }
     _state["alert_log"] = ([entry] + _state["alert_log"])[:100]
+    if push:
+        _push_notify("KRONOS-WX", msg)
+
+
+# ── Web Push (VAPID) ──────────────────────────────────────────────────────────
+
+_VAPID_KEYS_PATH = _ROOT / "data" / "vapid_keys.json"
+_push_subscriptions: list[dict] = []   # {endpoint, keys: {p256dh, auth}}
+_vapid_private_key: str | None = None
+_vapid_public_key:  str | None = None
+
+
+def _init_vapid() -> None:
+    """Load or generate VAPID key pair, stored in data/vapid_keys.json."""
+    global _vapid_private_key, _vapid_public_key
+    try:
+        from py_vapid import Vapid
+    except ImportError:
+        logger.warning("pywebpush not installed — push notifications disabled")
+        return
+
+    if _VAPID_KEYS_PATH.exists():
+        keys = json.loads(_VAPID_KEYS_PATH.read_text())
+        _vapid_private_key = keys["private"]
+        _vapid_public_key  = keys["public"]
+        logger.info("Loaded VAPID keys from %s", _VAPID_KEYS_PATH)
+        return
+
+    _VAPID_KEYS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    v = Vapid()
+    v.generate_keys()
+    # pywebpush expects PEM string for private key and application server key
+    # (URL-safe base64 uncompressed point) for the public key.
+    import base64
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    pub_bytes = v.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    _vapid_private_key = v.private_pem().decode()
+    _vapid_public_key  = base64.urlsafe_b64encode(pub_bytes).rstrip(b"=").decode()
+    _VAPID_KEYS_PATH.write_text(json.dumps({
+        "private": _vapid_private_key,
+        "public":  _vapid_public_key,
+    }, indent=2))
+    logger.info("Generated new VAPID keys → %s", _VAPID_KEYS_PATH)
+
+
+def _push_notify(title: str, body: str) -> None:
+    """Fire-and-forget push to all registered subscriptions."""
+    if not _push_subscriptions or not _vapid_private_key:
+        return
+    try:
+        from pywebpush import webpush, WebPushException
+        payload = json.dumps({"title": title, "body": body})
+        dead = []
+        for sub in list(_push_subscriptions):
+            try:
+                webpush(
+                    subscription_info=sub,
+                    data=payload,
+                    vapid_private_key=_vapid_private_key,
+                    vapid_claims={"sub": "mailto:kronos@localhost"},
+                )
+            except WebPushException as e:
+                status = getattr(e.response, "status_code", None)
+                if status in (404, 410):   # subscription expired / unsubscribed
+                    dead.append(sub)
+                else:
+                    logger.debug("Push failed (%s): %s", status, e)
+            except Exception as e:
+                logger.debug("Push error: %s", e)
+        for sub in dead:
+            _push_subscriptions.remove(sub)
+    except ImportError:
+        pass
 
 
 # ── Serializers ───────────────────────────────────────────────────────────────
@@ -633,7 +706,8 @@ async def _task_hrrr() -> None:
                     new_rank = _TIER_RANK.get(tier, 0)
                     if max(old_rank, new_rank) >= 2:
                         arrow = "▲" if new_rank > old_rank else "▼"
-                        _log_alert(f"{arrow} {cname}: {old_tier} → {tier}")
+                        push = (tier == "EXTREME") or (new_rank > old_rank and new_rank >= 4)
+                        _log_alert(f"{arrow} {cname}: {old_tier} → {tier}", push=push)
 
             # Tendency
             tend = _compute_tendency(snap, new_tier_map)
@@ -1072,7 +1146,8 @@ async def _task_surface() -> None:
                 if alarm_cnt:
                     _log_alert(
                         f"⚡ {alarm_cnt} boundary alarm bell(s) — "
-                        f"{', '.join(ix.interaction_county.name for ix in interactions if ix.alarm_bell_flag)}"
+                        f"{', '.join(ix.interaction_county.name for ix in interactions if ix.alarm_bell_flag)}",
+                        push=True,
                     )
 
             # Serialize current Mesonet observations for map station plots.
@@ -1176,10 +1251,10 @@ async def _task_spc() -> None:
                 new_alert_set.add(key)
                 if key not in _prev_alert_set:
                     if "Tornado Warning" in a.event:
-                        _log_alert(f"🌪 TORNADO WARNING: {a.area_desc[:60]}")
+                        _log_alert(f"🌪 TORNADO WARNING: {a.area_desc[:60]}", push=True)
                     elif "Tornado Watch" in a.event:
                         num_s = f" #{a.watch_number}" if a.watch_number else ""
-                        _log_alert(f"📋 TORNADO WATCH{num_s} issued")
+                        _log_alert(f"📋 TORNADO WATCH{num_s} issued", push=True)
 
             new_md_set: set = set()
             for md in mds:
@@ -1265,6 +1340,9 @@ async def _lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Could not load Mesonet station coords: %s", exc)
 
+    # Initialize VAPID keys for Web Push
+    _init_vapid()
+
     # Start all background fetch tasks
     tasks = [
         asyncio.create_task(_task_hrrr(),        name="hrrr"),
@@ -1284,7 +1362,7 @@ app = FastAPI(title="KRONOS-WX API", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -1455,6 +1533,42 @@ async def radar_tile_proxy(request: Request, station: str, time_iso: str, z: int
     except Exception as exc:
         logger.warning("RIDGE2 tile proxy error: %s", exc)
         return Response(status_code=502)
+
+
+# ── Web Push endpoints ────────────────────────────────────────────────────────
+
+@app.get("/api/push/vapid")
+async def push_vapid():
+    """Return VAPID public key for browser PushManager.subscribe()."""
+    if not _vapid_public_key:
+        return JSONResponse({"error": "Push notifications not configured"}, status_code=503)
+    return JSONResponse({"publicKey": _vapid_public_key})
+
+
+@app.post("/api/push/subscribe")
+async def push_subscribe(request: Request):
+    """Register a browser push subscription."""
+    body = await request.json()
+    endpoint = body.get("endpoint")
+    if not endpoint:
+        return JSONResponse({"error": "missing endpoint"}, status_code=400)
+    # Deduplicate by endpoint URL
+    if not any(s["endpoint"] == endpoint for s in _push_subscriptions):
+        _push_subscriptions.append(body)
+        logger.info("Push subscription added (%d total)", len(_push_subscriptions))
+    return JSONResponse({"status": "subscribed"})
+
+
+@app.delete("/api/push/subscribe")
+async def push_unsubscribe(request: Request):
+    """Remove a browser push subscription."""
+    body = await request.json()
+    endpoint = body.get("endpoint")
+    before = len(_push_subscriptions)
+    _push_subscriptions[:] = [s for s in _push_subscriptions if s.get("endpoint") != endpoint]
+    removed = before - len(_push_subscriptions)
+    logger.info("Push subscription removed (%d remaining)", len(_push_subscriptions))
+    return JSONResponse({"status": "unsubscribed", "removed": removed})
 
 
 @app.get("/health")
