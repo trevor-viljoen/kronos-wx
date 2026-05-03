@@ -29,6 +29,8 @@ python main.py ingest-null-busts --dry-run                                # prev
 python main.py build-bust-database
 python main.py classify-boundary-forced --start-year 1994 --end-year 2024
 python main.py classify-boundary-forced --dry-run   # preview without writing
+python main.py coverage-report 1994 2024             # per-year sounding coverage table
+python main.py coverage-report 1994 2024 --list-gaps # also list every unenriched case
 
 # Forecast models
 python main.py train-models                          # train severity classifier + count regressor
