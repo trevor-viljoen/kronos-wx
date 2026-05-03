@@ -2420,9 +2420,10 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
     # ── Model predictions ─────────────────────────────────────────────────────
     console.rule("[bold]Forecast Model Predictions[/bold]")
     try:
-        from ok_weather_model.modeling import SeverityClassifier, TornadoRegressor, load_model
-        _clf: SeverityClassifier = load_model("severity_classifier")
-        _reg: TornadoRegressor   = load_model("tornado_regressor")
+        from ok_weather_model.modeling import SeverityClassifier, BustClassifier, TornadoRegressor, load_model
+        _clf: SeverityClassifier  = load_model("severity_classifier")
+        _bust: BustClassifier     = load_model("bust_classifier")
+        _reg: TornadoRegressor    = load_model("tornado_regressor")
 
         if _clf is not None and _reg is not None:
             _ctg = ces.get("convective_temp_gap_12Z") if ces is not None else None
@@ -2437,20 +2438,31 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
                 _mr_kwargs["modified_MLCAPE"] = modified_indices.MLCAPE
                 _mr_kwargs["modified_MLCIN"]  = modified_indices.MLCIN
 
-            _clf_result = _clf.predict_proba(indices, kinematics, _ctg, **_mr_kwargs)
-            _reg_result = _reg.predict(indices, kinematics, _ctg, **_mr_kwargs)
+            _clf_result  = _clf.predict_proba(indices, kinematics, _ctg, **_mr_kwargs)
+            _reg_result  = _reg.predict(indices, kinematics, _ctg, **_mr_kwargs)
 
             sig_pct = _clf_result["significant"]
-            sig_color = "red" if sig_pct >= 0.6 else "yellow" if sig_pct >= 0.35 else "green"
+            sig_color = "red" if sig_pct >= _clf.threshold_ else "yellow" if sig_pct >= _clf.threshold_ * 0.7 else "green"
 
             model_table = Table(show_header=True, header_style="bold", box=None)
             model_table.add_column("Model")
             model_table.add_column("Prediction", justify="right")
             model_table.add_column("Detail")
+
+            if _bust is not None:
+                _bust_result = _bust.predict_proba(indices, kinematics, _ctg, **_mr_kwargs)
+                bust_pct = _bust_result["bust"]
+                bust_color = "bright_red" if bust_pct >= _bust.threshold_ else "yellow" if bust_pct >= 0.30 else "green"
+                model_table.add_row(
+                    "Cap-hold (bust)",
+                    f"[{bust_color}]{bust_pct:.0%} bust[/{bust_color}]",
+                    f"outbreak {_bust_result['outbreak']:.0%}  (n={_bust.n_training_cases_} cases, thr={_bust.threshold_:.2f})",
+                )
+
             model_table.add_row(
                 "Severity",
                 f"[{sig_color}]{sig_pct:.0%} SIGNIFICANT[/{sig_color}]",
-                f"WEAK {_clf_result['weak']:.0%}  (n={_clf.n_training_cases_} training cases)",
+                f"WEAK {_clf_result['weak']:.0%}  (n={_clf.n_training_cases_} cases, thr={_clf.threshold_:.2f})",
             )
             model_table.add_row(
                 "Tornado count",
@@ -3662,7 +3674,7 @@ def train_models(start_year: int, end_year: int):
     honest leave-one-year-out performance).
     """
     from ok_weather_model.storage.database import Database
-    from ok_weather_model.modeling import SeverityClassifier, TornadoRegressor, save_model
+    from ok_weather_model.modeling import SeverityClassifier, BustClassifier, TornadoRegressor, save_model
 
     db = Database()
     cases = db.query_parameter_space({
@@ -3671,6 +3683,28 @@ def train_models(start_year: int, end_year: int):
         "min_completeness": 0.3,
     })
     console.print(f"Loaded [cyan]{len(cases)}[/cyan] cases ({start_year}–{end_year}).")
+
+    # ── Bust classifier ───────────────────────────────────────────────────────
+    console.print("\n[bold]Training bust classifier (NULL_BUST vs OUTBREAK)[/bold]")
+    bust_clf = BustClassifier()
+    bust_metrics = bust_clf.train(cases)
+    save_model("bust_classifier", bust_clf)
+
+    bust_table = Table(show_header=False, box=None)
+    bust_table.add_column(style="dim")
+    bust_table.add_column()
+    bust_table.add_row("Cases trained",       str(bust_metrics["n_cases"]))
+    bust_table.add_row("  NULL_BUST",         str(bust_metrics["n_bust"]))
+    bust_table.add_row("  OUTBREAK",          str(bust_metrics["n_outbreak"]))
+    bust_table.add_row("Train accuracy",      f"{bust_metrics['train_accuracy']:.1%}")
+    bust_table.add_row("Calibrated threshold", f"{bust_metrics['calibrated_threshold']:.3f}")
+    console.print(bust_table)
+
+    console.print("\n[bold]Top 10 features (bust classifier)[/bold]")
+    top_bust = bust_clf.feature_importances_.head(10)
+    for feat, imp in top_bust.items():
+        bar = "█" * int(imp * 80)
+        console.print(f"  {feat:<28} {imp:.3f}  [cyan]{bar}[/cyan]")
 
     # ── Severity classifier ───────────────────────────────────────────────────
     console.print("\n[bold]Training severity classifier (SIGNIFICANT vs WEAK)[/bold]")
@@ -3753,7 +3787,7 @@ def evaluate_models(start_year: int, end_year: int):
     optimistic (in-sample).
     """
     from ok_weather_model.storage.database import Database
-    from ok_weather_model.modeling import SeverityClassifier, TornadoRegressor
+    from ok_weather_model.modeling import SeverityClassifier, BustClassifier, TornadoRegressor
 
     db = Database()
     cases = db.query_parameter_space({
@@ -3764,6 +3798,29 @@ def evaluate_models(start_year: int, end_year: int):
     console.print(
         f"Evaluating on [cyan]{len(cases)}[/cyan] cases via leave-one-year-out CV..."
     )
+
+    # ── Bust classifier ───────────────────────────────────────────────────────
+    console.print("\n[bold]Bust classifier (NULL_BUST vs OUTBREAK)[/bold]")
+    bust_clf = BustClassifier()
+    with console.status("Running LOYO folds..."):
+        bust_eval = bust_clf.evaluate(cases)
+
+    if "error" in bust_eval:
+        console.print(f"[red]{bust_eval['error']}[/red]")
+    else:
+        bust_table = Table(show_header=False, box=None)
+        bust_table.add_column(style="dim")
+        bust_table.add_column()
+        bust_table.add_row("LOYO accuracy",     f"{bust_eval['loyo_accuracy']:.1%}")
+        bust_table.add_row("LOYO ROC-AUC",      f"{bust_eval['loyo_roc_auc']:.3f}")
+        bust_table.add_row("Tuned threshold",   f"{bust_eval['tuned_threshold']:.3f}")
+        bust_table.add_row("Folds",             str(bust_eval["n_folds"]))
+        bust_table.add_row("Predictions",       str(bust_eval["n_predictions"]))
+        console.print(bust_table)
+        console.print("\n[dim]Default threshold (0.5 bust prob):[/dim]")
+        console.print(bust_eval["classification_report"])
+        console.print(f"\n[dim]Tuned threshold ({bust_eval['tuned_threshold']:.3f} bust prob):[/dim]")
+        console.print(bust_eval["classification_report_tuned"])
 
     # ── Severity classifier ───────────────────────────────────────────────────
     console.print("\n[bold]Severity classifier (SIGNIFICANT vs WEAK)[/bold]")
