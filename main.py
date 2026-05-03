@@ -285,6 +285,27 @@ def enrich_case(case_ref: str, force: bool):
             console.print(f"[red]Mesonet pull failed: {exc}[/red]")
             logger.exception("Mesonet pull failed for %s", case_id)
 
+    # ── 12Z HRRR snapshot (2016-07-15 onward) ────────────────────────────────
+    _hrrr_start = date(2016, 7, 15)
+    if case_date >= _hrrr_start and (not case.hrrr_data_available or force):
+        with console.status("Fetching 12Z HRRR county snapshot..."):
+            try:
+                from ok_weather_model.ingestion.hrrr_client import HRRRClient
+                with HRRRClient() as hc:
+                    snap = hc.get_12z_analysis(case_date)
+                if snap is not None:
+                    db.save_hrrr_snapshot(snap, case_id)
+                    case.hrrr_data_available = True
+                    console.print(
+                        f"[green]HRRR 12Z: {len(snap.counties)} counties  "
+                        f"valid {snap.valid_time.strftime('%H:%M UTC')}[/green]"
+                    )
+                else:
+                    console.print("[dim]HRRR 12Z: not available[/dim]")
+            except Exception as exc:
+                console.print(f"[yellow]HRRR fetch failed: {exc}[/yellow]")
+                logger.debug("HRRR 12Z fetch failed for %s: %s", case_id, exc)
+
     # ── Save enriched case ───────────────────────────────────────────────────
     case.recompute_completeness()
     db.save_case(case)
@@ -354,7 +375,10 @@ def enrich_all(start_year: int, end_year: int, force: bool, upgrade: bool):
     )
 
     from ok_weather_model.ingestion import SoundingClient
+    from ok_weather_model.ingestion.hrrr_client import HRRRClient
     from ok_weather_model.processing import compute_thermodynamic_indices, compute_kinematic_profile
+
+    _HRRR_ARCHIVE_START = date(2016, 7, 15)   # reliable NOAA AWS HRRR archive start
 
     errors = []
     enriched = 0
@@ -449,6 +473,23 @@ def enrich_all(start_year: int, end_year: int, force: bool, upgrade: bool):
                 if case.sounding_12Z is not None:
                     case.sounding_data_available = True
 
+                # Fetch 12Z HRRR snapshot for 2016-07-15+ cases
+                hrrr_needed = (
+                    case.date >= _HRRR_ARCHIVE_START
+                    and (not case.hrrr_data_available or force)
+                )
+                if hrrr_needed:
+                    try:
+                        with HRRRClient() as hc:
+                            snap = hc.get_12z_analysis(case.date)
+                        if snap is not None:
+                            db.save_hrrr_snapshot(snap, case.case_id)
+                            case.hrrr_data_available = True
+                        else:
+                            logger.debug("No HRRR snapshot for %s", case.case_id)
+                    except Exception as hrrr_exc:
+                        logger.debug("HRRR fetch failed for %s: %s", case.case_id, hrrr_exc)
+
                 case.recompute_completeness()
                 db.save_case(case)
                 enriched += 1
@@ -502,7 +543,8 @@ def coverage_report(start_year: int, end_year: int, list_gaps: bool):
         yr = case.date.year
         if yr not in year_stats:
             year_stats[yr] = {"total": 0, "has_12z": 0, "has_lmn": 0,
-                              "has_00z": 0, "has_18z": 0, "has_21z": 0, "no_sounding": 0}
+                              "has_00z": 0, "has_18z": 0, "has_21z": 0,
+                              "has_hrrr": 0, "no_sounding": 0}
         s = year_stats[yr]
         s["total"] += 1
         if case.sounding_12Z is not None:
@@ -515,26 +557,30 @@ def coverage_report(start_year: int, end_year: int, list_gaps: bool):
             s["has_18z"] += 1
         if case.sounding_21Z is not None:
             s["has_21z"] += 1
+        if case.hrrr_data_available:
+            s["has_hrrr"] += 1
         if not case.sounding_data_available:
             s["no_sounding"] += 1
             gap_cases.append(case)
 
     # Summary table
-    tbl = Table(title=f"Sounding Coverage {start_year}–{end_year}")
-    tbl.add_column("Year",   justify="right")
-    tbl.add_column("Cases",  justify="right")
+    tbl = Table(title=f"Data Coverage {start_year}–{end_year}")
+    tbl.add_column("Year",    justify="right")
+    tbl.add_column("Cases",   justify="right")
     tbl.add_column("12Z OUN", justify="right")
     tbl.add_column("LMN 12Z", justify="right")
-    tbl.add_column("00Z",    justify="right")
-    tbl.add_column("18Z",    justify="right")
-    tbl.add_column("21Z",    justify="right")
+    tbl.add_column("00Z",     justify="right")
+    tbl.add_column("18Z",     justify="right")
+    tbl.add_column("21Z",     justify="right")
+    tbl.add_column("HRRR",    justify="right")
     tbl.add_column("No data", justify="right", style="red")
 
-    total_cases = total_12z = total_lmn = total_00z = total_18z = total_21z = total_gaps = 0
+    total_cases = total_12z = total_lmn = total_00z = total_18z = total_21z = total_hrrr = total_gaps = 0
 
     for yr in sorted(year_stats):
         s = year_stats[yr]
-        gap_color = "red" if s["no_sounding"] > 0 else "green"
+        gap_color  = "red" if s["no_sounding"] > 0 else "green"
+        hrrr_color = "green" if s["has_hrrr"] == s["total"] else ("yellow" if s["has_hrrr"] > 0 else "dim")
         tbl.add_row(
             str(yr),
             str(s["total"]),
@@ -543,6 +589,7 @@ def coverage_report(start_year: int, end_year: int, list_gaps: bool):
             str(s["has_00z"]),
             str(s["has_18z"]),
             str(s["has_21z"]),
+            f"[{hrrr_color}]{s['has_hrrr']}[/{hrrr_color}]",
             f"[{gap_color}]{s['no_sounding']}[/{gap_color}]",
         )
         total_cases += s["total"]
@@ -551,6 +598,7 @@ def coverage_report(start_year: int, end_year: int, list_gaps: bool):
         total_00z   += s["has_00z"]
         total_18z   += s["has_18z"]
         total_21z   += s["has_21z"]
+        total_hrrr  += s["has_hrrr"]
         total_gaps  += s["no_sounding"]
 
     tbl.add_section()
@@ -562,6 +610,7 @@ def coverage_report(start_year: int, end_year: int, list_gaps: bool):
         str(total_00z),
         str(total_18z),
         str(total_21z),
+        str(total_hrrr),
         f"[red]{total_gaps}[/red]" if total_gaps else "[green]0[/green]",
     )
 
@@ -573,6 +622,7 @@ def coverage_report(start_year: int, end_year: int, list_gaps: bool):
         f"00Z {total_00z/total_cases:.0%}  "
         f"18Z {total_18z/total_cases:.0%}  "
         f"21Z {total_21z/total_cases:.0%}  "
+        f"HRRR {total_hrrr/total_cases:.0%}  "
         f"Gaps {total_gaps}/{total_cases}"
     )
 

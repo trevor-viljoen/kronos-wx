@@ -27,6 +27,8 @@ from ..models import (
     MesonetObservation,
     SoundingProfile,
     SoundingLevel,
+    HRRRCountyPoint,
+    HRRRCountySnapshot,
 )
 from ..config import DATA_DIR
 
@@ -505,3 +507,89 @@ class Database:
             }
             for row in rows
         }
+
+    def save_hrrr_snapshot(self, snap: HRRRCountySnapshot, case_id: str) -> None:
+        """Persist an HRRRCountySnapshot for a case to Parquet (77 rows × county fields)."""
+        records = []
+        for pt in snap.counties:
+            records.append({
+                "county":             pt.county.name,
+                "valid_time":         snap.valid_time.isoformat(),
+                "run_time":           snap.run_time.isoformat(),
+                "fxx":                snap.fxx,
+                "MLCAPE":             pt.MLCAPE,
+                "MLCIN":              pt.MLCIN,
+                "SBCAPE":             pt.SBCAPE,
+                "SBCIN":              pt.SBCIN,
+                "SRH_0_1km":          pt.SRH_0_1km,
+                "SRH_0_3km":          pt.SRH_0_3km,
+                "BWD_0_6km":          pt.BWD_0_6km,
+                "lapse_rate_700_500": pt.lapse_rate_700_500,
+                "dewpoint_2m_F":      pt.dewpoint_2m_F,
+                "LCL_height_m":       pt.LCL_height_m,
+                "EHI":                pt.EHI,
+                "STP":                pt.STP,
+            })
+        df = pd.DataFrame(records)
+        out_dir = self.parquet_dir / "hrrr"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{case_id}.parquet"
+        df.to_parquet(out_path, index=False, engine="pyarrow")
+        logger.debug("Saved HRRR snapshot → %s", out_path)
+
+    def load_hrrr_snapshot(self, case_id: str) -> Optional[HRRRCountySnapshot]:
+        """Load the 12Z HRRR snapshot for a case from Parquet."""
+        path = self.parquet_dir / "hrrr" / f"{case_id}.parquet"
+        if not path.exists():
+            return None
+
+        import math as _math
+        from datetime import timezone as _tz
+
+        def _opt(v):
+            if v is None:
+                return None
+            try:
+                f = float(v)
+                return None if _math.isnan(f) else f
+            except (TypeError, ValueError):
+                return None
+
+        def _parse_dt(s):
+            s = str(s)
+            dt = datetime.fromisoformat(s)
+            return dt if dt.tzinfo else dt.replace(tzinfo=_tz.utc)
+
+        df = pd.read_parquet(path)
+        if df.empty:
+            return None
+
+        first = df.iloc[0]
+        counties = []
+        for _, row in df.iterrows():
+            try:
+                county_enum = OklahomaCounty[row["county"]]
+            except KeyError:
+                continue
+            counties.append(HRRRCountyPoint(
+                county=county_enum,
+                MLCAPE=float(row["MLCAPE"]),
+                MLCIN=float(row["MLCIN"]),
+                SBCAPE=float(row["SBCAPE"]),
+                SBCIN=float(row["SBCIN"]),
+                SRH_0_1km=float(row["SRH_0_1km"]),
+                SRH_0_3km=float(row["SRH_0_3km"]),
+                BWD_0_6km=float(row["BWD_0_6km"]),
+                lapse_rate_700_500=_opt(row["lapse_rate_700_500"]),
+                dewpoint_2m_F=float(row["dewpoint_2m_F"]),
+                LCL_height_m=_opt(row["LCL_height_m"]),
+                EHI=_opt(row["EHI"]),
+                STP=_opt(row["STP"]),
+            ))
+
+        return HRRRCountySnapshot(
+            valid_time=_parse_dt(first["valid_time"]),
+            run_time=_parse_dt(first["run_time"]),
+            fxx=int(first["fxx"]),
+            counties=counties,
+        )

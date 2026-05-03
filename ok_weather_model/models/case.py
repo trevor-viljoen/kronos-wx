@@ -118,6 +118,7 @@ class HistoricalCase(BaseModel):
     mesonet_data_available: bool = False
     sounding_data_available: bool = False
     radar_data_available: bool = False
+    hrrr_data_available: bool = False   # True when 12Z HRRR snapshot is stored
     research_references: list[str] = []
     notes: Optional[str] = None
 
