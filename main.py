@@ -188,6 +188,30 @@ def enrich_case(case_ref: str, force: bool):
                 console.print(f"[red]MetPy computation failed: {exc}[/red]")
                 logger.exception("Thermodynamic index computation failed for %s", case_id)
 
+    # ── 12Z LMN sounding (Lamont — N-S cap gradient reference) ───────────────
+    if case.sounding_lmn_12Z is None or force:
+        with console.status("Fetching 12Z LMN sounding..."):
+            with SoundingClient() as sc:
+                lmn_profile = sc.get_sounding(OklahomaSoundingStation.LMN, case_date, 12)
+
+        if lmn_profile is None:
+            console.print("[dim]LMN 12Z: not available[/dim]")
+        else:
+            db.save_sounding(lmn_profile)
+            try:
+                lmn_idx = compute_thermodynamic_indices(lmn_profile)
+                lmn_kin = compute_kinematic_profile(lmn_profile, lmn_idx)
+                case.sounding_lmn_12Z = lmn_idx
+                case.kinematics_lmn_12Z = lmn_kin
+                console.print(
+                    f"[green]LMN 12Z: {len(lmn_profile.levels)} levels  "
+                    f"MLCIN={lmn_idx.MLCIN:.0f} J/kg  "
+                    f"cap={lmn_idx.cap_strength:.1f}°C[/green]"
+                )
+            except Exception as exc:
+                console.print(f"[yellow]LMN 12Z indices failed: {exc}[/yellow]")
+                logger.debug("LMN 12Z indices failed for %s: %s", case_id, exc)
+
     # ── Mesonet full-day pull ─────────────────────────────────────────────────
     with console.status("Pulling Mesonet data..."):
         try:
@@ -356,18 +380,16 @@ def enrich_all(start_year: int, end_year: int, force: bool, upgrade: bool):
         for case in track(to_enrich, description="Enriching cases..."):
             try:
                 if upgrade and not force:
-                    # Only fetch hours not yet populated on this case
                     hours_needed = {
                         h for h, (idx_f, _) in _HOUR_FIELDS.items()
                         if getattr(case, idx_f) is None
                     }
-                    # Always include special hours that might have new data
                     hours_needed |= {h for h in SoundingClient.STANDARD_HOURS
                                      if h not in _HOUR_FIELDS}
                 else:
                     hours_needed = set(SoundingClient.STANDARD_HOURS)
 
-                # Fetch the needed hours from OUN
+                # Fetch OUN hours
                 all_profiles: dict[int, object] = {}
                 for hour in sorted(hours_needed):
                     profile = sc.get_sounding(
@@ -385,15 +407,27 @@ def enrich_all(start_year: int, end_year: int, force: bool, upgrade: bool):
                         if fallback is not None:
                             all_profiles[hour] = fallback
 
-                if not all_profiles:
+                # Fetch LMN 12Z if not already stored (N-S cap gradient).
+                # Independent of hours_needed — backfilled on cases that may
+                # already have all OUN hours but predate this field.
+                lmn_12z_needed = case.sounding_lmn_12Z is None or force
+                lmn_profile = None
+                if lmn_12z_needed:
+                    lmn_profile = sc.get_sounding(
+                        OklahomaSoundingStation.LMN, case.date, 12
+                    )
+
+                if not all_profiles and lmn_profile is None:
                     logger.debug("No sounding at any station or hour for %s", case.case_id)
                     continue
 
-                # Persist every profile to the sounding store
+                # Persist all profiles
                 for profile in all_profiles.values():
                     db.save_sounding(profile)
+                if lmn_profile is not None:
+                    db.save_sounding(lmn_profile)
 
-                # Compute indices for named hours and populate case fields
+                # Compute indices for named OUN hours
                 for hour, (idx_field, kin_field) in _HOUR_FIELDS.items():
                     if hour in all_profiles:
                         profile = all_profiles[hour]
@@ -401,6 +435,16 @@ def enrich_all(start_year: int, end_year: int, force: bool, upgrade: bool):
                         kinematics = compute_kinematic_profile(profile, indices)
                         setattr(case, idx_field, indices)
                         setattr(case, kin_field, kinematics)
+
+                # Compute LMN 12Z indices
+                if lmn_profile is not None:
+                    try:
+                        lmn_idx = compute_thermodynamic_indices(lmn_profile)
+                        lmn_kin = compute_kinematic_profile(lmn_profile, lmn_idx)
+                        case.sounding_lmn_12Z  = lmn_idx
+                        case.kinematics_lmn_12Z = lmn_kin
+                    except Exception as lmn_exc:
+                        logger.debug("LMN 12Z indices failed for %s: %s", case.case_id, lmn_exc)
 
                 if case.sounding_12Z is not None:
                     case.sounding_data_available = True

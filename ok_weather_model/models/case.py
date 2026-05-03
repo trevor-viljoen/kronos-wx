@@ -64,6 +64,9 @@ class HistoricalCase(BaseModel):
     sounding_12Z: Optional[ThermodynamicIndices] = None
     kinematics_12Z: Optional[KinematicProfile] = None
     EML_12Z: Optional[EMLCharacteristics] = None
+    # 12Z LMN (Lamont, 36.7°N) — northern Oklahoma reference for N-S cap gradient
+    sounding_lmn_12Z: Optional[ThermodynamicIndices] = None
+    kinematics_lmn_12Z: Optional[KinematicProfile] = None
     # 18Z: afternoon sounding during the convective initiation window —
     # used to verify CES predictions and observe cap evolution
     sounding_18Z: Optional[ThermodynamicIndices] = None
