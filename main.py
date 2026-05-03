@@ -468,6 +468,125 @@ def enrich_all(start_year: int, end_year: int, force: bool, upgrade: bool):
             console.print(f"  ... and {len(errors) - 10} more (see log)")
 
 
+# ── coverage-report ───────────────────────────────────────────────────────────
+
+@cli.command("coverage-report")
+@click.argument("start_year", type=int, default=1994)
+@click.argument("end_year", type=int, default=2024)
+@click.option("--list-gaps", is_flag=True, default=False,
+              help="Print every case that has no sounding data")
+def coverage_report(start_year: int, end_year: int, list_gaps: bool):
+    """
+    Report sounding coverage gaps in the case library.
+
+    Shows per-year counts of: total cases, 12Z OUN present, LMN 12Z present,
+    and cases with no sounding at any station.
+    """
+    from ok_weather_model.storage import Database
+    from rich.table import Table
+
+    db = Database()
+    cases = db.query_parameter_space(
+        {"start_date": f"{start_year}-01-01", "end_date": f"{end_year}-12-31"}
+    )
+
+    if not cases:
+        console.print(f"[yellow]No cases found for {start_year}–{end_year}.[/yellow]")
+        return
+
+    # Aggregate by year
+    year_stats: dict[int, dict] = {}
+    gap_cases: list = []
+
+    for case in cases:
+        yr = case.date.year
+        if yr not in year_stats:
+            year_stats[yr] = {"total": 0, "has_12z": 0, "has_lmn": 0,
+                              "has_00z": 0, "has_18z": 0, "has_21z": 0, "no_sounding": 0}
+        s = year_stats[yr]
+        s["total"] += 1
+        if case.sounding_12Z is not None:
+            s["has_12z"] += 1
+        if case.sounding_lmn_12Z is not None:
+            s["has_lmn"] += 1
+        if case.sounding_00Z is not None:
+            s["has_00z"] += 1
+        if case.sounding_18Z is not None:
+            s["has_18z"] += 1
+        if case.sounding_21Z is not None:
+            s["has_21z"] += 1
+        if not case.sounding_data_available:
+            s["no_sounding"] += 1
+            gap_cases.append(case)
+
+    # Summary table
+    tbl = Table(title=f"Sounding Coverage {start_year}–{end_year}")
+    tbl.add_column("Year",   justify="right")
+    tbl.add_column("Cases",  justify="right")
+    tbl.add_column("12Z OUN", justify="right")
+    tbl.add_column("LMN 12Z", justify="right")
+    tbl.add_column("00Z",    justify="right")
+    tbl.add_column("18Z",    justify="right")
+    tbl.add_column("21Z",    justify="right")
+    tbl.add_column("No data", justify="right", style="red")
+
+    total_cases = total_12z = total_lmn = total_00z = total_18z = total_21z = total_gaps = 0
+
+    for yr in sorted(year_stats):
+        s = year_stats[yr]
+        gap_color = "red" if s["no_sounding"] > 0 else "green"
+        tbl.add_row(
+            str(yr),
+            str(s["total"]),
+            str(s["has_12z"]),
+            str(s["has_lmn"]),
+            str(s["has_00z"]),
+            str(s["has_18z"]),
+            str(s["has_21z"]),
+            f"[{gap_color}]{s['no_sounding']}[/{gap_color}]",
+        )
+        total_cases += s["total"]
+        total_12z   += s["has_12z"]
+        total_lmn   += s["has_lmn"]
+        total_00z   += s["has_00z"]
+        total_18z   += s["has_18z"]
+        total_21z   += s["has_21z"]
+        total_gaps  += s["no_sounding"]
+
+    tbl.add_section()
+    tbl.add_row(
+        "TOTAL",
+        str(total_cases),
+        str(total_12z),
+        str(total_lmn),
+        str(total_00z),
+        str(total_18z),
+        str(total_21z),
+        f"[red]{total_gaps}[/red]" if total_gaps else "[green]0[/green]",
+    )
+
+    console.print(tbl)
+    console.print(
+        f"\n[bold]Coverage:[/bold]  "
+        f"12Z OUN {total_12z/total_cases:.0%}  "
+        f"LMN {total_lmn/total_cases:.0%}  "
+        f"00Z {total_00z/total_cases:.0%}  "
+        f"18Z {total_18z/total_cases:.0%}  "
+        f"21Z {total_21z/total_cases:.0%}  "
+        f"Gaps {total_gaps}/{total_cases}"
+    )
+
+    if list_gaps and gap_cases:
+        console.print(f"\n[red]Cases with no sounding ({len(gap_cases)}):[/red]")
+        for c in gap_cases:
+            console.print(f"  {c.case_id}  {c.event_class.value}")
+
+    if not list_gaps and total_gaps:
+        console.print(
+            f"\n[dim]Run with --list-gaps to see all {total_gaps} unenriched cases.[/dim]"
+        )
+
+
 # ── analyze-cap-behavior ──────────────────────────────────────────────────────
 
 @cli.command("analyze-cap-behavior")
