@@ -63,8 +63,8 @@ class KinematicProfile(BaseModel):
     hodograph_shape: HodographShape
 
     # Storm motion — Bunkers right and left mover as (u, v) in m/s
-    storm_motion_bunkers_right: tuple[float, float]
-    storm_motion_bunkers_left: tuple[float, float]
+    storm_motion_bunkers_right: Optional[tuple[float, float]] = None
+    storm_motion_bunkers_left: Optional[tuple[float, float]] = None
 
     # Composite parameters
     EHI: Optional[float] = None   # Energy Helicity Index
