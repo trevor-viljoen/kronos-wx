@@ -966,12 +966,12 @@ html, body, #root {
 .overlay-panel {
   position: absolute;
   top: 8px;
-  right: 8px;
+  left: 8px;
   z-index: 700;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  align-items: flex-end;
+  align-items: flex-start;
 }
 .overlay-group {
   display: flex;
@@ -993,7 +993,7 @@ html, body, #root {
   margin-right: 2px;
   user-select: none;
   min-width: 38px;
-  text-align: right;
+  text-align: left;
 }
 .overlay-sep {
   width: 1px;
