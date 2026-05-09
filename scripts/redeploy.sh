@@ -26,25 +26,38 @@ if ! command -v gh &>/dev/null; then
     exit 1
 fi
 
-# Get the latest CI run for this commit (may take a moment to register)
-echo "⌛ Waiting for CI run to appear..."
-for i in $(seq 1 12); do
-    RUN_ID=$(gh run list --repo trevor-viljoen/kronos-wx --branch "$BRANCH" --limit 1 \
-        --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)
+# Wait for the Docker build workflow specifically (not CodeQL or other workflows)
+echo "⌛ Waiting for Docker build CI run to appear..."
+RUN_ID=""
+for i in $(seq 1 20); do
+    RUN_ID=$(gh run list --repo trevor-viljoen/kronos-wx --branch "$BRANCH" \
+        --workflow "docker.yml" --limit 1 \
+        --json databaseId,headSha --jq \
+        ".[] | select(.headSha == \"$(git rev-parse HEAD)\") | .databaseId" \
+        2>/dev/null || true)
     [ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ] && break
     sleep 5
 done
 
 if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
-    echo "❌ No CI run found for branch $BRANCH"
+    echo "❌ No Docker build CI run found for $SHORT_HASH on branch $BRANCH"
     exit 1
 fi
 
-echo "👁️  Watching CI run $RUN_ID..."
+echo "👁️  Watching Docker build run $RUN_ID..."
 gh run watch "$RUN_ID" --repo trevor-viljoen/kronos-wx --exit-status || {
-    echo "❌ CI failed — skipping Portainer redeploy"
+    echo "❌ Docker build failed — skipping Portainer redeploy"
     exit 1
 }
+
+# Force-pull both images so Portainer always gets the freshly built layers
+echo "📦 Pulling updated images..."
+for IMAGE in kronos-wx-backend kronos-wx-frontend; do
+    curl -k -s -o /dev/null -X POST \
+        "$URL/api/endpoints/$ENDPOINT_ID/docker/images/create?fromImage=ghcr.io%2Ftrevor-viljoen%2F${IMAGE}&tag=latest" \
+        -H "X-API-Key: $API_KEY"
+    echo "  ✓ ghcr.io/trevor-viljoen/${IMAGE}:latest"
+done
 
 # Resolve stack ID by name
 STACK_ID=$(curl -k -s -H "X-API-Key: $API_KEY" "$URL/api/stacks" \
