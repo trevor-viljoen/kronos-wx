@@ -16,20 +16,17 @@ Published benchmark values for this case:
 
 import logging
 import math
-from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
 
 from ..models import (
-    OklahomaSoundingStation,
     SoundingProfile,
     SoundingLevel,
     ThermodynamicIndices,
     KinematicProfile,
     WindLevel,
     HodographShape,
-    EMLCharacteristics,
 )
 
 logger = logging.getLogger(__name__)
@@ -417,7 +414,6 @@ def _compute_cap_strength(
     """
     try:
         import metpy.calc as mpcalc
-        from metpy.units import units
 
         if lfc_height <= lcl_height:
             return 0.0
@@ -490,7 +486,6 @@ def _detect_eml(pressure, temperature, height) -> tuple[Optional[float], Optiona
     """
     try:
         import metpy.calc as mpcalc
-        from metpy.units import units
 
         # Compute potential temperature
         theta = mpcalc.potential_temperature(pressure, temperature)
@@ -554,7 +549,6 @@ def _mixing_ratio_at_level(
     """Compute mixing ratio (g/kg) at a specified pressure level."""
     try:
         import metpy.calc as mpcalc
-        from metpy.units import units
 
         mr = mpcalc.mixing_ratio_from_relative_humidity(
             pressure,
@@ -571,7 +565,6 @@ def _compute_wet_bulb_zero(pressure, temperature, dewpoint, height) -> float:
     """Find the height AGL where wet-bulb temperature crosses 0°C."""
     try:
         import metpy.calc as mpcalc
-        from metpy.units import units
 
         wet_bulb = mpcalc.wet_bulb_temperature(pressure, temperature, dewpoint)
         wb_c = wet_bulb.to("degC").magnitude

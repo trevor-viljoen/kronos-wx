@@ -21,9 +21,19 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── CDS / ERA5 ────────────────────────────────────────────────────────────────
-# Configure via ~/.cdsapirc OR via environment variable
 # CDS_API_KEY format: "<UID>:<API-KEY>"
+# Also accepted: CDSAPI_KEY (native cdsapi env var) + CDSAPI_URL
 CDS_API_KEY = os.getenv("CDS_API_KEY", "")
+CDSAPI_URL  = os.getenv("CDSAPI_URL", "https://cds.climate.copernicus.eu/api")
+
+# ── NWS API ───────────────────────────────────────────────────────────────────
+# api.weather.gov requires a contact email in the User-Agent header.
+# Set this to your own email address when self-hosting.
+NWS_CONTACT_EMAIL = os.getenv("NWS_CONTACT_EMAIL", "")
+
+# ── Web Push ──────────────────────────────────────────────────────────────────
+# VAPID contact URI sent to push services. Must be mailto: or https:.
+VAPID_CONTACT = os.getenv("VAPID_CONTACT", "mailto:kronos@localhost")
 
 # ── Date range ────────────────────────────────────────────────────────────────
 # Mesonet became operational in 1994; use this as the start of the case library
@@ -39,3 +49,11 @@ WYOMING_REQUEST_DELAY = float(os.getenv("WYOMING_REQUEST_DELAY", 2.0))
 
 # ── Ground truth validation case ─────────────────────────────────────────────
 VALIDATION_CASE_ID = "19990503_OK"  # May 3, 1999 Oklahoma tornado outbreak
+
+# ── War Room Plugin ──────────────────────────────────────────────────────────
+# Configuration for local news stream integration via bridge to tablo-web.
+WAR_ROOM_ENABLED = os.getenv("WAR_ROOM_ENABLED", "false").lower() == "true"
+WAR_ROOM_TABLO_WEB_HOST = os.getenv("WAR_ROOM_TABLO_WEB_HOST", "")
+WAR_ROOM_KOCO_ID = os.getenv("WAR_ROOM_KOCO_ID", "")
+WAR_ROOM_KFOR_ID = os.getenv("WAR_ROOM_KFOR_ID", "")
+WAR_ROOM_KWTV_ID = os.getenv("WAR_ROOM_KWTV_ID", "")

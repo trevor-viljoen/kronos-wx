@@ -33,7 +33,10 @@ _D1_TORN_URL  = "https://www.spc.noaa.gov/products/outlook/day1otlk_torn.nolyr.g
 _D1_WIND_URL  = "https://www.spc.noaa.gov/products/outlook/day1otlk_wind.nolyr.geojson"
 _D1_HAIL_URL  = "https://www.spc.noaa.gov/products/outlook/day1otlk_hail.nolyr.geojson"
 _NWS_ALERT_URL = "https://api.weather.gov/alerts/active?area=OK"
-_NWS_UA        = "kronos-wx/0.1 trevor.viljoen@gmail.com"
+def _nws_ua() -> str:
+    from ok_weather_model.config import NWS_CONTACT_EMAIL
+    contact = NWS_CONTACT_EMAIL or "kronos-wx-operator"
+    return f"kronos-wx/0.1 {contact}"
 
 # Oklahoma bounding box for outlook intersection check (rough)
 _OK_LAT_MIN, _OK_LAT_MAX = 33.5, 37.0
@@ -149,7 +152,7 @@ def fetch_active_watches_warnings(timeout: float = 12.0) -> list[NWSAlert]:
         with httpx.Client(
             timeout=timeout,
             follow_redirects=True,
-            headers={"User-Agent": _NWS_UA},
+            headers={"User-Agent": _nws_ua()},
         ) as client:
             resp = client.get(_NWS_ALERT_URL)
             resp.raise_for_status()

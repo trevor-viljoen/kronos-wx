@@ -14,7 +14,7 @@ import json
 import logging
 import zipfile
 import xml.etree.ElementTree as ET
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 

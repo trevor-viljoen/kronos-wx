@@ -155,7 +155,9 @@ def fetch_wpc_boundaries(
     url = f"{_BASE_URL}?{params}"
 
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "kronos-wx/1.0"})
+        from ok_weather_model.config import NWS_CONTACT_EMAIL
+        contact = NWS_CONTACT_EMAIL or "kronos-wx-operator"
+        req = urllib.request.Request(url, headers={"User-Agent": f"kronos-wx/1.0 {contact}"})
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.URLError as exc:

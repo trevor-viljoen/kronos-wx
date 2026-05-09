@@ -11,7 +11,7 @@ time series storage efficient.
 
 import json
 import logging
-from datetime import datetime, date
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -117,6 +117,13 @@ class Database:
             conn.execute(text("""
                 CREATE INDEX IF NOT EXISTS idx_cases_cap_behavior
                 ON historical_cases (cap_behavior)
+            """))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS push_subscriptions (
+                    endpoint TEXT PRIMARY KEY,
+                    subscription_json TEXT NOT NULL,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
             """))
             conn.commit()
         logger.debug("Database initialized at %s", self.db_path)
@@ -481,6 +488,64 @@ class Database:
             levels=levels,
             raw_source=df["raw_source"].iloc[0],
         )
+
+    # ── Push subscriptions ─────────────────────────────────────────────────────
+
+    def load_push_subscriptions(self) -> list[dict]:
+        """Return all persisted push subscriptions."""
+        from sqlalchemy import text
+        engine = self._get_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT subscription_json FROM push_subscriptions")
+            ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                result.append(json.loads(row[0]))
+            except Exception as exc:
+                logger.warning("Failed to deserialize push subscription: %s", exc)
+        return result
+
+    def save_push_subscription(self, sub: dict) -> None:
+        """Persist a push subscription, keyed by endpoint."""
+        from sqlalchemy import text
+        engine = self._get_engine()
+        with engine.connect() as conn:
+            conn.execute(
+                text("""
+                    INSERT OR REPLACE INTO push_subscriptions (endpoint, subscription_json)
+                    VALUES (:endpoint, :json)
+                """),
+                {"endpoint": sub["endpoint"], "json": json.dumps(sub)},
+            )
+            conn.commit()
+
+    def remove_push_subscription(self, endpoint: str) -> int:
+        """Delete a subscription by endpoint. Returns number of rows removed."""
+        from sqlalchemy import text
+        engine = self._get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("DELETE FROM push_subscriptions WHERE endpoint = :endpoint"),
+                {"endpoint": endpoint},
+            )
+            conn.commit()
+            return result.rowcount
+
+    def prune_push_subscriptions(self, dead_endpoints: list[str]) -> None:
+        """Remove subscriptions whose endpoints are known expired (410/404)."""
+        if not dead_endpoints:
+            return
+        from sqlalchemy import text
+        engine = self._get_engine()
+        with engine.connect() as conn:
+            for endpoint in dead_endpoints:
+                conn.execute(
+                    text("DELETE FROM push_subscriptions WHERE endpoint = :endpoint"),
+                    {"endpoint": endpoint},
+                )
+            conn.commit()
 
     def get_case_statistics(self) -> dict:
         """Return summary statistics for the case library."""

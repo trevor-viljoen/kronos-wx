@@ -3,15 +3,11 @@ Tests for Mesonet-based dryline detection.
 """
 
 from datetime import datetime, timezone
-from typing import Optional
 
-import pytest
 
 from ok_weather_model.models.enums import BoundaryType, OklahomaCounty
 from ok_weather_model.models.mesonet import MesonetObservation, MesonetTimeSeries
 from ok_weather_model.processing.dryline_detector import (
-    MIN_TD_GRADIENT_F_PER_DEG,
-    MIN_TD_ABSOLUTE_DROP_F,
     detect_dryline,
     compute_dryline_surge_rate,
     analyze_dryline_from_mesonet,
@@ -320,7 +316,6 @@ class TestAnalyzeDrylineFromMesonet:
 
     def test_18z_lon_populated(self):
         """When an 18Z dryline is detected, dryline_lon_18Z should be set."""
-        from datetime import timedelta
 
         # Build station series with observations at 15Z, 18Z, and 21Z
         assignments_and_hours = [

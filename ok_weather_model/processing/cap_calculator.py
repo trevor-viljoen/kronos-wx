@@ -10,7 +10,7 @@ This is the central diagnostic tool of the KRONOS-WX system.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Optional
 
 from ..models import (

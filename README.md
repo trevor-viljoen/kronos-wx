@@ -157,7 +157,7 @@ Storage Layer
   Parquet            — Mesonet time series, sounding level data
       │
       ▼
-Historical Case Library (1994–present)
+### Historical Case Library (1994–present)
       │
       ▼
 [Analysis Engine — Phase 2]      [Forecast Module — Phase 3]
@@ -165,7 +165,21 @@ Historical Case Library (1994–present)
 
 ---
 
+## Operational Interface
+
+### War Room Mode
+For active severe weather events, KRONOS-WX includes a high-performance tactical dashboard accessible at `/war-room`. This mode is designed for "Mission Control" environments, prioritizing live data and ground truth verification.
+
+- **Tactical Glass HUD:** A high-contrast, zero-clutter interface using semi-transparent overlays to maintain map visibility.
+- **Integrated Media Wall:** Multi-stream live TV coverage from local stations (KOCO, KFOR, KWTV).
+- **Tablo Bridge:** Live broadcasts are provided courtesy of [tablo-web](https://github.com/trevor-viljoen/tablo-web), utilizing the [tablo-api](https://github.com/trevor-viljoen/tablo-api) library for hardware-accelerated transcoding and network discovery.
+- **Initiation Radar:** A specialized widget tracking the top 5 counties where the model detects the most rapid CIN erosion.
+- **Director's Console:** Instant audio hot-swapping between stations using keyboard shortcuts (`1`, `2`, `3`).
+
+---
+
 ## Core Concepts
+
 
 **Capping Inversion / EML** — A layer of abnormally warm, well-mixed air
 aloft (typically 700–600mb) that acts as a lid on surface convection.  It

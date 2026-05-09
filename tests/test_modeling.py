@@ -433,7 +433,6 @@ class TestExtractFeaturesFromHRRR:
         reg = TornadoRegressor()
         reg.train(cases)
 
-        import pandas as pd
         pt = self._make_county_point()
         feat = extract_features_from_hrrr(pt)
         X = pd.DataFrame([feat], columns=FEATURE_NAMES)

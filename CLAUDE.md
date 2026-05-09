@@ -93,7 +93,20 @@ KRONOS-WX is an Oklahoma severe weather case library and analysis system. The pi
 - Analogue `mode` options: `cap` (default, weights MLCIN/cap/Tc-gap), `kinematics` (weights SRH/shear/EHI), `full` (blended).
 
 **Web dashboard** (`kronos_web/`)
-- Backend: `kronos_web/backend/api.py` — FastAPI app with four SSE-driven background loops (HRRR, environment/sounding, surface/Mesonet, SPC). Pushes a single `DashboardState` to all SSE subscribers on any data change. Key API endpoints:
+- Backend: `kronos_web/backend/api.py` — FastAPI app with four SSE-driven background loops (HRRR, environment/sounding, surface/Mesonet, SPC). Pushes a single `DashboardState` to all SSE subscribers on any data change.
+
+**Adaptive polling** — poll intervals scale with weather activity level, determined by `_wx_activity_level()` reading already-cached `_state` (no extra API calls):
+
+| Level | Condition | SPC | HRRR | Surface | Environment |
+|-------|-----------|-----|------|---------|-------------|
+| 0 — quiet | No outlook, no watches, no elevated HRRR | 30 min | 60 min | 10 min | 90 min |
+| 1 — marginal | TSTM/MRGL/SLGT outlook or any county MLCAPE>1000 / STP>0.5 | 15 min | 60 min | 5 min | 60 min |
+| 2 — active | ENH+ or active watch or active MD or boundary alarm | 5 min | 60 min | 5 min | 60 min |
+| 3 — high-impact | Tornado warning active | 2 min | 60 min | 5 min | 60 min |
+
+HRRR is fixed at 60 min regardless of activity — NOAA posts new runs hourly and polling faster only adds bandwidth noise. Mesonet (surface task) updates every 5 min at the source, so 5 min is the floor during active conditions. Soundings post only at 00Z/12Z so environment task has no benefit from sub-hourly polling.
+
+Key API endpoints:
   - `GET /api/state` — full current state as JSON (cached in `_state_json`, `Cache-Control: no-store`)
   - `GET /api/events` — SSE stream
   - `GET /api/counties.geojson` — Oklahoma county boundaries (24h browser cache)
@@ -179,6 +192,18 @@ All services share a `./data` volume. Coordination is via MQTT topics (`kronos/r
 
 ## Configuration
 
-Copy `.env.example` to `.env`. ERA5 data requires a Copernicus CDS account and `CDS_API_KEY` in `.env` (format: `<UID>:<API-KEY>`). Wyoming sounding and Mesonet clients work without API keys but respect rate limits (`WYOMING_REQUEST_DELAY=2.0s`, `MESONET_REQUEST_DELAY=1.1s`).
+Copy `.env.example` to `.env`. Required and optional env vars:
 
-Data is stored under `./data/` (SQLite DB + Parquet files). Logs go to `./logs/`.
+| Variable | Required | Default | Notes |
+|----------|----------|---------|-------|
+| `NWS_CONTACT_EMAIL` | **Yes** | `kronos-wx-operator` | Sent in every `User-Agent` to api.weather.gov and SPC. NWS requires a contact address; without it requests may be throttled. |
+| `VAPID_CONTACT` | **Yes** | `mailto:kronos@localhost` | URI sent to push services on every notification. Must be `mailto:` or `https:`. |
+| `CDS_API_KEY` | No | — | Copernicus CDS key for ERA5 reanalysis (`<UID>:<API-KEY>`). Not used by real-time API endpoints. |
+| `CDSAPI_URL` | No | `https://cds.climate.copernicus.eu/api` | Override CDS endpoint. |
+| `DATA_DIR` | No | `./data` | SQLite DB, Parquet files, VAPID keys, trained model artifacts. |
+| `LOG_DIR` | No | `./logs` | Application logs. |
+| `LOG_LEVEL` | No | `INFO` | Python logging level. |
+| `MESONET_REQUEST_DELAY` | No | `1.1` | Seconds between Mesonet requests. |
+| `WYOMING_REQUEST_DELAY` | No | `2.0` | Seconds between Wyoming sounding requests. |
+
+Data is stored under `./data/` (SQLite DB + Parquet files + VAPID keys + `models/` for trained ML artifacts). Logs go to `./logs/`. Both directories are excluded from the Docker image and must be mounted as volumes.

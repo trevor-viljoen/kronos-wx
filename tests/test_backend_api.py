@@ -7,9 +7,7 @@ background tasks or network calls fire during tests.
 """
 from __future__ import annotations
 
-import math
 from datetime import datetime, timezone
-from typing import Optional
 from unittest.mock import patch
 
 import pytest

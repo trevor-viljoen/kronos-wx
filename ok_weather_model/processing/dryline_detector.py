@@ -27,8 +27,7 @@ A dryline is only reported when at least one band clears the gradient threshold.
 
 from __future__ import annotations
 
-import math
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 from ..models.boundary import BoundaryObservation

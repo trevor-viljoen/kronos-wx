@@ -20,7 +20,7 @@ Dependencies: pip install cdsapi xarray cfgrib
 
 import logging
 import tempfile
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
@@ -114,11 +114,22 @@ class ERA5Client:
         self._cds = None  # Lazy-initialized
 
     def _get_cds_client(self):
-        """Lazily initialize the CDS API client."""
+        """Lazily initialize the CDS API client.
+
+        Credential resolution order:
+          1. CDS_API_KEY + CDSAPI_URL env vars (container-friendly)
+          2. CDSAPI_KEY + CDSAPI_URL env vars (native cdsapi names)
+          3. ~/.cdsapirc file (local development fallback)
+        """
         if self._cds is None:
             try:
                 import cdsapi
-                self._cds = cdsapi.Client(quiet=True)
+                from ok_weather_model.config import CDS_API_KEY, CDSAPI_URL
+                kwargs: dict = {"quiet": True}
+                if CDS_API_KEY:
+                    kwargs["key"] = CDS_API_KEY
+                    kwargs["url"] = CDSAPI_URL
+                self._cds = cdsapi.Client(**kwargs)
                 logger.info("CDS API client initialized")
             except ImportError:
                 raise ImportError(
@@ -127,7 +138,7 @@ class ERA5Client:
             except Exception as exc:
                 raise RuntimeError(
                     "Failed to initialize CDS API client. "
-                    "Ensure ~/.cdsapirc is configured correctly. "
+                    "Set CDS_API_KEY env var or configure ~/.cdsapirc. "
                     f"Error: {exc}"
                 ) from exc
         return self._cds

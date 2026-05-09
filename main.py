@@ -11,21 +11,18 @@ Commands:
 
 import logging
 import sys
-from datetime import date, datetime, time, timezone, timedelta
-from pathlib import Path
+from datetime import date, datetime, timezone, timedelta
 
 import click
 from rich.console import Console
 from rich.table import Table
 from rich.progress import track
-from rich import print as rprint
 
 from ok_weather_model.config import (
     CASE_LIBRARY_START_YEAR,
     CASE_LIBRARY_END_YEAR,
     LOG_LEVEL,
     LOG_DIR,
-    VALIDATION_CASE_ID,
 )
 from ok_weather_model.models import (
     EventClass,
@@ -502,7 +499,7 @@ def enrich_all(start_year: int, end_year: int, force: bool, upgrade: bool):
                   f"No sounding: {len(to_enrich) - enriched - len(errors)}  "
                   f"Errors: {len(errors)}")
     if errors:
-        console.print(f"\n[red]Failures:[/red]")
+        console.print("\n[red]Failures:[/red]")
         for case_id, err in errors[:10]:
             console.print(f"  {case_id}: {err}")
         if len(errors) > 10:
@@ -1060,7 +1057,6 @@ def _print_analogues(
     target_id: str,
     analogues: list[tuple[float, object]],  # (dist, HistoricalCase)
 ) -> None:
-    from ok_weather_model.models import CapBehavior
 
     def _cb_color(cb):
         return {
@@ -1600,7 +1596,6 @@ def _analyze_now_forecast(
                         "significant": round(float(prob_map.get(1, 0.0)), 3),
                         "weak":        round(float(prob_map.get(0, 0.0)), 3),
                     }
-                    import math as _math
                     log_pred   = float(_reg._pipeline.predict(
                         _pd.DataFrame([feat], columns=list(feat.keys()))
                     )[0])
@@ -1706,7 +1701,7 @@ def _analyze_now_forecast(
                     f"HRRR prs may not be posted this far ahead yet.[/dim]"
                 )
                 console.print(
-                    f"[dim]CES and historical analogues require a real sounding.[/dim]"
+                    "[dim]CES and historical analogues require a real sounding.[/dim]"
                 )
             else:
                 _vs_idx  = compute_thermodynamic_indices(_vs_result)
@@ -1746,14 +1741,14 @@ def _analyze_now_forecast(
                     "[dim](28/28 features populated — no NaN imputation)[/dim]"
                 )
                 console.print(
-                    f"\n[dim]CES and historical analogues require a real radiosonde "
-                    f"sounding — not available in forecast mode.[/dim]"
+                    "\n[dim]CES and historical analogues require a real radiosonde "
+                    "sounding — not available in forecast mode.[/dim]"
                 )
     except Exception as _vse:
         logger.debug("HRRR virtual sounding model run failed: %s", _vse, exc_info=True)
         console.print(
-            f"[dim]Virtual sounding model unavailable. "
-            f"CES and historical analogues require a real sounding.[/dim]"
+            "[dim]Virtual sounding model unavailable. "
+            "CES and historical analogues require a real sounding.[/dim]"
         )
 
 
@@ -2781,7 +2776,6 @@ def watch_now(interval: int, min_tier: str, station: str, notify: bool):
     )
     from ok_weather_model.models import OklahomaSoundingStation
     from ok_weather_model.ingestion import SoundingClient
-    from ok_weather_model.processing import compute_thermodynamic_indices, compute_kinematic_profile
 
     try:
         stn = OklahomaSoundingStation[station.upper()]
@@ -2807,7 +2801,8 @@ def watch_now(interval: int, min_tier: str, station: str, notify: bool):
         """Send a macOS system notification via osascript. No-op on other platforms."""
         if not notify:
             return
-        import subprocess, sys
+        import subprocess
+        import sys
         if sys.platform != "darwin":
             return
         try:
@@ -2849,7 +2844,7 @@ def watch_now(interval: int, min_tier: str, station: str, notify: bool):
         from ok_weather_model.ingestion import MesonetClient
         from ok_weather_model.models import OklahomaCounty
         from ok_weather_model.models.mesonet import MesonetTimeSeries as _MTS
-        from ok_weather_model.processing import detect_dryline, compute_dryline_surge_rate
+        from ok_weather_model.processing import detect_dryline
 
         now_utc = datetime.now(tz=timezone.utc)
         today   = now_utc.date()
@@ -3841,7 +3836,6 @@ def _classify_cap_behavior(
     """
     Classify CapBehavior from the erosion trajectory.
     """
-    from ok_weather_model.processing.cap_calculator import MARGINAL_CAP, MODERATE_CAP
 
     if not trajectory.erosion_achieved:
         return CapBehavior.NO_EROSION

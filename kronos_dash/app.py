@@ -28,7 +28,6 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.reactive import reactive
 
 # ── Pipeline imports at module level (avoids import-lock deadlocks in threads) ─
 from ok_weather_model.ingestion import HRRRClient, MesonetClient, SoundingClient

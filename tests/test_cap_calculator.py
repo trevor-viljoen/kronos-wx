@@ -2,7 +2,6 @@
 Tests for cap_calculator.py — heating model and Cap Erosion Score.
 """
 
-import math
 from datetime import date, time
 
 import pytest

@@ -8,7 +8,7 @@ saved with only SPC tornado counts, then later enriched with sounding
 data, then Mesonet surface analysis, then cap erosion trajectory.
 """
 
-from datetime import date, datetime, time
+from datetime import date, time
 from typing import Optional
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 

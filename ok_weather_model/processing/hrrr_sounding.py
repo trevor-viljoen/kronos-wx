@@ -35,7 +35,6 @@ from typing import Optional
 
 import numpy as np
 
-from ..models.enums import OklahomaSoundingStation
 from ..models.sounding import SoundingLevel, SoundingProfile
 from .era5_diagnostics import (
     _nearest_sounding_station,

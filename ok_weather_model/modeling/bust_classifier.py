@@ -22,7 +22,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .features import FEATURE_NAMES, extract_features, extract_features_from_indices, build_feature_matrix
+from .features import FEATURE_NAMES, extract_features, extract_features_from_indices
 from ..models.sounding import ThermodynamicIndices
 from ..models.kinematic import KinematicProfile
 from ..models.case import HistoricalCase

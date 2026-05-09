@@ -5,7 +5,6 @@ at z=0 so every upper-air feature projects down to its real lat/lon location.
 
 from __future__ import annotations
 
-import numpy as np
 
 from ..geo import get_ok_counties, get_state_boundaries, REFERENCE_CITIES
 

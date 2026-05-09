@@ -5,7 +5,6 @@ Uses synthetic xarray Datasets with analytically known temperature gradients
 and wind fields so expected advection values can be computed by hand.
 """
 
-import math
 from datetime import datetime, timezone
 
 import numpy as np

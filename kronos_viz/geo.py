@@ -15,7 +15,6 @@ import json
 import logging
 import urllib.request
 from functools import lru_cache
-from typing import Iterator
 
 import numpy as np
 
