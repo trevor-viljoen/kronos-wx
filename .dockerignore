@@ -1,0 +1,35 @@
+# Runtime data — never bake secrets or state into the image
+data/
+logs/
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Claude Code memory and settings — contains user info and API keys
+.claude/
+
+# Git internals (strips commit history from build context)
+.git/
+.github/
+
+# Development tooling
+.venv/
+.pytest_cache/
+*.egg-info/
+**/node_modules/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# Frontend source lives in its own build context; excluded from backend image
+kronos_web/frontend/
+
+# CLI, tests, and visualization are not needed in the API container
+main.py
+tests/
+kronos_viz/
+
+# Documentation
+*.md
+CLAUDE.md

@@ -22,3 +22,17 @@ logs/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Claude Code (memory, local settings — not project files)
+.claude/settings.local.json
+.claude/memory/
+
+# Stitch AI design tooling (internal, not source)
+**/.stitch/
+kronos_web/frontend/DESIGN.md
+kronos_web/frontend/PROMPT.md
+kronos_web/frontend/STITCH_PROMPT.md
+
+# TypeScript build artifacts
+tsconfig.tsbuildinfo
+**/*.tsbuildinfo

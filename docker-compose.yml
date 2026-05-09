@@ -1,0 +1,38 @@
+services:
+  kronos-backend:
+    image: ghcr.io/trevor-viljoen/kronos-wx-backend:latest
+    container_name: kronos-backend
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - NWS_CONTACT_EMAIL=${NWS_CONTACT_EMAIL:-kronos-wx-operator}
+      - VAPID_CONTACT=${VAPID_CONTACT:-mailto:kronos@localhost}
+      - CDS_API_KEY=${CDS_API_KEY:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - WAR_ROOM_ENABLED=${WAR_ROOM_ENABLED:-false}
+      - WAR_ROOM_TABLO_WEB_HOST=${WAR_ROOM_TABLO_WEB_HOST:-}
+      - WAR_ROOM_KOCO_ID=${WAR_ROOM_KOCO_ID:-}
+      - WAR_ROOM_KFOR_ID=${WAR_ROOM_KFOR_ID:-}
+      - WAR_ROOM_KWTV_ID=${WAR_ROOM_KWTV_ID:-}
+    volumes:
+      - kronos-data:/app/data
+      - kronos-logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+  kronos-frontend:
+    image: ghcr.io/trevor-viljoen/kronos-wx-frontend:latest
+    container_name: kronos-frontend
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      kronos-backend:
+        condition: service_healthy
+
+volumes:
+  kronos-data:
+  kronos-logs:
