@@ -904,12 +904,13 @@ function RadarHUD({ station, radarTimes, current, playing, onToggle, onScrub }: 
 interface Props {
   state: DashboardState | null
   onCountyClick: (name: string) => void
+  tactical?: boolean
 }
 
-export function RiskMap({ state, onCountyClick }: Props) {
+export function RiskMap({ state, onCountyClick, tactical = false }: Props) {
   const [countiesGeoJSON, setCountiesGeoJSON] = useState<GeoJSON.FeatureCollection | null>(null)
   const [overlays, setOverlays] = useState<Record<OverlayKey, boolean>>({
-    counties:   true,
+    counties:   !tactical,
     spc:        true,
     tornado:    true,
     wind:       false,
@@ -920,7 +921,7 @@ export function RiskMap({ state, onCountyClick }: Props) {
     dryline:    true,
     boundaries: true,
     satellite:  false,
-    radar:      false,
+    radar:      tactical, // Default radar to ON in tactical mode
   })
   const [satProduct, setSatProduct] = useState<SatProduct>('vis')
   const [radarStation, setRadarStation] = useState('mrms')
@@ -1095,16 +1096,18 @@ export function RiskMap({ state, onCountyClick }: Props) {
       </MapContainer>
 
       {/* Overlay toggle controls */}
-      <OverlayControls
-        overlays={overlays}
-        onToggle={toggleOverlay}
-        radarStation={radarStation}
-        onRadarStation={handleRadarStation}
-        satProduct={satProduct}
-        onSatProduct={setSatProduct}
-        mesonetRegion={mesonetRegion}
-        onMesonetRegion={setMesonetRegion}
-      />
+      {!tactical && (
+        <OverlayControls
+          overlays={overlays}
+          onToggle={toggleOverlay}
+          radarStation={radarStation}
+          onRadarStation={handleRadarStation}
+          satProduct={satProduct}
+          onSatProduct={setSatProduct}
+          mesonetRegion={mesonetRegion}
+          onMesonetRegion={setMesonetRegion}
+        />
+      )}
 
       {/* Radar HUD — outside MapContainer so position:absolute anchors to this div */}
       {overlays.radar && (
@@ -1119,7 +1122,7 @@ export function RiskMap({ state, onCountyClick }: Props) {
       )}
 
       {/* Legend — always visible when the map has loaded */}
-      {state && (
+      {state && !tactical && (
         <div className="map-legend">
           {activeTiers.length > 0
             ? activeTiers.map(({ tier, label }) => (

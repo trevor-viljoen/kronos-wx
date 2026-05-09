@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
+import { Routes, Route, useLocation } from 'react-router-dom'
 import { useSSE } from './hooks/useSSE'
 import { useIsMobile } from './hooks/useIsMobile'
 import type { DashboardState, Tier, CountyPoint } from './types/api'
@@ -12,6 +13,7 @@ import { AlertFeed }         from './components/AlertFeed'
 import { CountyDrawer }      from './components/CountyDrawer'
 import { AnaloguePanel }     from './components/AnaloguePanel'
 import { NarrativePanel }   from './components/NarrativePanel'
+import WarRoomView           from './components/WarRoom/WarRoomView'
 
 type MobileTab = 'env' | 'tendency' | 'alerts'
 
@@ -149,20 +151,14 @@ function MobileLayout({ state, selectedCounty, setSelectedCounty, selectedPt, se
   )
 }
 
-export default function App() {
-  const state = useSSE<DashboardState>('/api/stream')
-  const isMobile = useIsMobile()
-  const [selectedCounty, setSelectedCounty] = useState<string | null>(null)
-
-  const selectedPt = useMemo(() => {
-    if (!selectedCounty || !state) return null
-    return state.hrrr_counties.find(p => p.county === selectedCounty) ?? null
-  }, [selectedCounty, state])
-
-  const selectedTier = selectedCounty
-    ? ((state?.tier_map?.[selectedCounty] ?? null) as Tier | null)
-    : null
-
+function MainDashboard({ state, isMobile, selectedCounty, setSelectedCounty, selectedPt, selectedTier }: {
+  state: DashboardState | null
+  isMobile: boolean
+  selectedCounty: string | null
+  setSelectedCounty: (c: string | null) => void
+  selectedPt: CountyPoint | null
+  selectedTier: Tier | null
+}) {
   const env = state?.environment
 
   if (isMobile) {
@@ -238,5 +234,39 @@ export default function App() {
         onClose={() => setSelectedCounty(null)}
       />
     </div>
+  )
+}
+
+export default function App() {
+  const state = useSSE<DashboardState>('/api/stream')
+  const isMobile = useIsMobile()
+  const [selectedCounty, setSelectedCounty] = useState<string | null>(null)
+
+  const selectedPt = useMemo(() => {
+    if (!selectedCounty || !state) return null
+    return state.hrrr_counties.find(p => p.county === selectedCounty) ?? null
+  }, [selectedCounty, state])
+
+  const selectedTier = selectedCounty
+    ? ((state?.tier_map?.[selectedCounty] ?? null) as Tier | null)
+    : null
+
+  return (
+    <Routes>
+      <Route 
+        path="/" 
+        element={
+          <MainDashboard 
+            state={state} 
+            isMobile={isMobile} 
+            selectedCounty={selectedCounty}
+            setSelectedCounty={setSelectedCounty}
+            selectedPt={selectedPt}
+            selectedTier={selectedTier}
+          />
+        } 
+      />
+      <Route path="/war-room" element={<WarRoomView />} />
+    </Routes>
   )
 }
