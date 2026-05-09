@@ -32,8 +32,14 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import os
 
+from ok_weather_model.config import (
+    WAR_ROOM_ENABLED,
+    WAR_ROOM_TABLO_WEB_HOST,
+    WAR_ROOM_KOCO_ID,
+    WAR_ROOM_KFOR_ID,
+    WAR_ROOM_KWTV_ID
+)
 from ok_weather_model.ingestion import HRRRClient, MesonetClient, SoundingClient
 from ok_weather_model.ingestion.wtm_client import fetch_texas_mesonet_observations, fetch_wtm_ttu_observations
 from ok_weather_model.ingestion.spc_products import (
@@ -45,14 +51,12 @@ from ok_weather_model.ingestion.spc_products import (
     _D1_WIND_URL,
     _D1_HAIL_URL,
     _NWS_ALERT_URL,
-    _NWS_UA,
+    _nws_ua,
     _OK_LAT_MIN, _OK_LAT_MAX, _OK_LON_MIN, _OK_LON_MAX,
 )
 from ok_weather_model.models import OklahomaSoundingStation, OklahomaCounty
 from ok_weather_model.models.mesonet import MesonetTimeSeries
 from ok_weather_model.modeling import (
-    extract_features_from_indices,
-    FEATURE_NAMES,
     load_model,
 )
 from ok_weather_model.processing import (
@@ -394,6 +398,8 @@ _VAPID_KEYS_PATH = _ROOT / "data" / "vapid_keys.json"
 _push_subscriptions: list[dict] = []   # {endpoint, keys: {p256dh, auth}}
 _vapid_private_key: str | None = None
 _vapid_public_key:  str | None = None
+_vapid_contact: str = "mailto:kronos@localhost"  # overwritten from config at startup
+_push_db: Database | None = None
 _MAX_PUSH_SUBS = 50
 
 # Known push-service host suffixes. Subscriptions whose endpoint doesn't match
@@ -414,7 +420,9 @@ _push_lock = _threading.Lock()   # guards _push_subscriptions across event loop 
 
 def _init_vapid() -> None:
     """Load or generate VAPID key pair, stored in data/vapid_keys.json."""
-    global _vapid_private_key, _vapid_public_key
+    global _vapid_private_key, _vapid_public_key, _vapid_contact
+    from ok_weather_model.config import VAPID_CONTACT
+    _vapid_contact = VAPID_CONTACT
     try:
         from py_vapid import Vapid
     except ImportError:
@@ -445,6 +453,16 @@ def _init_vapid() -> None:
     logger.info("Generated new VAPID keys → %s", _VAPID_KEYS_PATH)
 
 
+def _load_push_subscriptions() -> None:
+    """Restore persisted push subscriptions from the database on startup."""
+    global _push_subscriptions, _push_db
+    _push_db = Database()
+    stored = _push_db.load_push_subscriptions()
+    with _push_lock:
+        _push_subscriptions[:] = stored
+    logger.info("Loaded %d push subscription(s) from database", len(stored))
+
+
 def _do_push(title: str, body: str, subs: list[dict], private_key: str) -> list[str]:
     """
     Blocking push worker — runs in thread pool, never on the event loop.
@@ -463,7 +481,7 @@ def _do_push(title: str, body: str, subs: list[dict], private_key: str) -> list[
                 subscription_info=sub,
                 data=payload,
                 vapid_private_key=private_key,
-                vapid_claims={"sub": "mailto:kronos@localhost"},
+                vapid_claims={"sub": _vapid_contact},
             )
         except WebPushException as e:
             status = getattr(e.response, "status_code", None)
@@ -487,6 +505,8 @@ def _prune_dead_subs(future: "_cf.Future[list[str]]") -> None:
             _push_subscriptions[:] = [
                 s for s in _push_subscriptions if s.get("endpoint") not in dead
             ]
+        if _push_db:
+            _push_db.prune_push_subscriptions(dead)
         logger.debug("Pruned %d expired push subscription(s)", len(dead))
 
 
@@ -680,6 +700,61 @@ def _ser_md(md) -> dict:
     }
 
 
+# ── Adaptive polling ──────────────────────────────────────────────────────────
+# Activity levels drive poll intervals. All decisions use already-cached _state
+# so no extra API calls are made.
+#
+# Level 0 — quiet:      no outlook, no watches, no elevated HRRR params
+# Level 1 — marginal:   TSTM/MRGL/SLGT outlook OR any county MLCAPE>1000/STP>0.5
+# Level 2 — active:     ENH+ OR active watch OR active MD OR boundary alarm bell
+# Level 3 — high-impact: tornado warning active in state
+
+_OUTLOOK_RANK: dict[str, int] = {
+    "TSTM": 1, "MRGL": 1, "SLGT": 1,
+    "ENH": 2, "MDT": 2, "HIGH": 2,
+}
+
+# Poll intervals in seconds indexed by activity level [0, 1, 2, 3]
+_SPC_INTERVALS     = [30 * 60, 15 * 60,  5 * 60,  2 * 60]
+_HRRR_INTERVALS    = [60 * 60, 60 * 60, 60 * 60, 60 * 60]  # HRRR posts hourly; faster is noise
+_SURFACE_INTERVALS = [10 * 60,  5 * 60,  5 * 60,  5 * 60]
+_ENV_INTERVALS     = [90 * 60, 60 * 60, 60 * 60, 60 * 60]  # soundings post 00Z/12Z only
+
+
+def _wx_activity_level() -> int:
+    """Return current weather activity level 0–3 from cached state."""
+    try:
+        spc      = _state.get("spc") or {}
+        outlook  = (spc.get("outlook") or {}).get("category") or ""
+        ol_rank  = _OUTLOOK_RANK.get(outlook.upper(), 0)
+
+        alerts   = spc.get("alerts") or []
+        has_torn_warn = any("Tornado Warning" in (a.get("event") or "") for a in alerts)
+        has_watch     = bool(_watch_counties)
+        has_md        = bool(spc.get("mds"))
+        has_alarm     = bool(_alarm_counties)
+
+        counties      = _state.get("hrrr_counties") or []
+        elevated_hrrr = any(
+            (c.get("MLCAPE") or 0) > 1000 or (c.get("STP") or 0) > 0.5
+            for c in counties
+        )
+
+        if has_torn_warn:
+            return 3
+        if ol_rank >= 2 or has_watch or has_md or has_alarm:
+            return 2
+        if ol_rank >= 1 or elevated_hrrr:
+            return 1
+        return 0
+    except Exception:
+        return 1  # safe default on any error
+
+
+def _next_sleep(intervals: list[int]) -> float:
+    return intervals[_wx_activity_level()]
+
+
 # ── Background fetch tasks ────────────────────────────────────────────────────
 
 async def _task_hrrr() -> None:
@@ -789,7 +864,7 @@ async def _task_hrrr() -> None:
             if _fail == 5:
                 _log_alert("⚠ HRRR task: 5 consecutive failures — data may be stale", push=True)
 
-        await asyncio.sleep(15 * 60)
+        await asyncio.sleep(_next_sleep(_HRRR_INTERVALS))
 
 
 def _compute_tendency(snap, tier_map: dict) -> list[dict]:
@@ -891,7 +966,6 @@ def _compute_analogues(indices, kinematics, tc_gap_12z, n: int = 5) -> list[dict
         return []
 
     try:
-        from datetime import date as _date
         db = Database()
         all_cases = db.query_parameter_space({
             "start_date": "1994-01-01",
@@ -992,21 +1066,27 @@ async def _task_environment() -> None:
             fwd_idx = fwd_kin = None
             if fetched_hour is not None:
                 def _do_lmn():
-                    with SoundingClient() as sc2:
-                        lp = sc2.get_sounding(OklahomaSoundingStation.LMN, today, fetched_hour)
-                    if lp:
-                        li = compute_thermodynamic_indices(lp)
-                        lk = compute_kinematic_profile(lp, li)
-                        return li, lk
+                    try:
+                        with SoundingClient() as sc2:
+                            lp = sc2.get_sounding(OklahomaSoundingStation.LMN, today, fetched_hour)
+                        if lp:
+                            li = compute_thermodynamic_indices(lp)
+                            lk = compute_kinematic_profile(lp, li)
+                            return li, lk
+                    except Exception as exc:
+                        logger.debug("LMN sounding unavailable: %s", exc)
                     return None, None
 
                 def _do_fwd():
-                    with SoundingClient() as sc3:
-                        fp = sc3.get_sounding(OklahomaSoundingStation.FWD, today, fetched_hour)
-                    if fp:
-                        fi = compute_thermodynamic_indices(fp)
-                        fk = compute_kinematic_profile(fp, fi)
-                        return fi, fk
+                    try:
+                        with SoundingClient() as sc3:
+                            fp = sc3.get_sounding(OklahomaSoundingStation.FWD, today, fetched_hour)
+                        if fp:
+                            fi = compute_thermodynamic_indices(fp)
+                            fk = compute_kinematic_profile(fp, fi)
+                            return fi, fk
+                    except Exception as exc:
+                        logger.debug("FWD sounding unavailable: %s", exc)
                     return None, None
 
                 (lmn_idx, lmn_kin), (fwd_idx, fwd_kin) = await asyncio.gather(
@@ -1087,7 +1167,7 @@ async def _task_environment() -> None:
             if _fail == 5:
                 _log_alert("⚠ Environment task: 5 consecutive failures — sounding data may be stale", push=True)
 
-        await asyncio.sleep(60 * 60)
+        await asyncio.sleep(_next_sleep(_ENV_INTERVALS))
 
 
 async def _task_surface() -> None:
@@ -1247,7 +1327,7 @@ async def _task_surface() -> None:
             if _fail == 5:
                 _log_alert("⚠ Surface task: 5 consecutive failures — Mesonet/dryline data may be stale", push=True)
 
-        await asyncio.sleep(5 * 60)
+        await asyncio.sleep(_next_sleep(_SURFACE_INTERVALS))
 
 
 async def _task_spc() -> None:
@@ -1266,7 +1346,7 @@ async def _task_spc() -> None:
             # Fetch raw NWS FeatureCollection (includes polygon geometry)
             async with httpx.AsyncClient(
                 timeout=12.0,
-                headers={"User-Agent": _NWS_UA},
+                headers={"User-Agent": _nws_ua()},
                 follow_redirects=True,
             ) as client:
                 try:
@@ -1357,7 +1437,7 @@ async def _task_spc() -> None:
             if _fail == 5:
                 _log_alert("⚠ SPC task: 5 consecutive failures — outlooks and alerts may be stale", push=True)
 
-        await asyncio.sleep(15 * 60)
+        await asyncio.sleep(_next_sleep(_SPC_INTERVALS))
 
 
 def _filter_geojson_ok(geojson: dict) -> list:
@@ -1387,6 +1467,45 @@ def _filter_geojson_ok(geojson: dict) -> list:
 
 # ── App lifespan ──────────────────────────────────────────────────────────────
 
+def _start_bonjour(port: int) -> "Any | None":
+    """
+    Advertise KRONOS-WX on the local network via mDNS (Bonjour).
+    Service type: _kronos._tcp.local.  — discovered by the tvOS client.
+    Returns the Zeroconf instance so the caller can unregister on shutdown.
+    """
+    try:
+        import socket
+        from zeroconf import Zeroconf, ServiceInfo
+
+        hostname = socket.gethostname()
+        addresses = []
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            addr = info[4][0]
+            if not addr.startswith("127."):
+                addresses.append(socket.inet_aton(addr))
+        if not addresses:
+            addresses = [socket.inet_aton("127.0.0.1")]
+
+        service_info = ServiceInfo(
+            "_kronos._tcp.local.",
+            "KRONOS-WX._kronos._tcp.local.",
+            addresses=addresses,
+            port=port,
+            properties={"version": "1", "path": "/api"},
+            server=f"{hostname}.local.",
+        )
+        zc = Zeroconf()
+        zc.register_service(service_info)
+        logger.info("Bonjour: registered KRONOS-WX on port %d", port)
+        return zc, service_info
+    except ImportError:
+        logger.info("zeroconf not installed — Bonjour advertisement skipped")
+        return None, None
+    except Exception as exc:
+        logger.warning("Bonjour registration failed: %s", exc)
+        return None, None
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     # Fetch OK county GeoJSON
@@ -1401,8 +1520,12 @@ async def _lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Could not load Mesonet station coords: %s", exc)
 
-    # Initialize VAPID keys for Web Push
+    # Initialize VAPID keys for Web Push and restore persisted subscriptions
     _init_vapid()
+    _load_push_subscriptions()
+
+    # Advertise on local network via Bonjour (tvOS discovery)
+    _zc, _zc_info = await asyncio.to_thread(_start_bonjour, 8000)
 
     # Start all background fetch tasks
     tasks = [
@@ -1414,6 +1537,14 @@ async def _lifespan(app: FastAPI):
     yield
     for t in tasks:
         t.cancel()
+
+    # Unregister Bonjour service
+    if _zc is not None:
+        try:
+            await asyncio.to_thread(_zc.unregister_service, _zc_info)
+            await asyncio.to_thread(_zc.close)
+        except Exception:
+            pass
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
@@ -1638,12 +1769,16 @@ async def push_subscribe(request: Request):
         return JSONResponse({"error": "missing endpoint"}, status_code=400)
     if not _validate_push_endpoint(endpoint):
         return JSONResponse({"error": "invalid endpoint"}, status_code=400)
+    added = False
     with _push_lock:
         if len(_push_subscriptions) >= _MAX_PUSH_SUBS:
             return JSONResponse({"error": "subscription limit reached"}, status_code=429)
         if not any(s["endpoint"] == endpoint for s in _push_subscriptions):
             _push_subscriptions.append(body)
+            added = True
             logger.info("Push subscription added (%d total)", len(_push_subscriptions))
+    if added and _push_db:
+        await asyncio.to_thread(_push_db.save_push_subscription, body)
     return JSONResponse({"status": "subscribed"})
 
 
@@ -1656,6 +1791,8 @@ async def push_unsubscribe(request: Request):
         before = len(_push_subscriptions)
         _push_subscriptions[:] = [s for s in _push_subscriptions if s.get("endpoint") != endpoint]
         removed = before - len(_push_subscriptions)
+    if removed and _push_db:
+        await asyncio.to_thread(_push_db.remove_push_subscription, endpoint)
     logger.info("Push subscription removed (%d remaining)", len(_push_subscriptions))
     return JSONResponse({"status": "unsubscribed", "removed": removed})
 
@@ -1717,4 +1854,21 @@ async def health():
         "alerts":       len((spc.get("alerts") or [])),
         "subscribers":  len(_subscribers),
         "tasks":        tasks,
+    }
+
+
+@app.get("/api/warroom/config")
+async def get_warroom_config():
+    """Return the War Room plugin configuration if enabled."""
+    if not WAR_ROOM_ENABLED:
+        return JSONResponse({"enabled": False}, status_code=404)
+
+    return {
+        "enabled": True,
+        "tablo_web_host": WAR_ROOM_TABLO_WEB_HOST,
+        "stations": [
+            {"call_sign": "KOCO", "channel_id": WAR_ROOM_KOCO_ID},
+            {"call_sign": "KFOR", "channel_id": WAR_ROOM_KFOR_ID},
+            {"call_sign": "KWTV", "channel_id": WAR_ROOM_KWTV_ID},
+        ]
     }
