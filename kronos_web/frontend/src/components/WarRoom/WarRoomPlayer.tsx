@@ -22,7 +22,9 @@ export function WarRoomPlayer({ station, channelId, isFocused, onFocus, tabloHos
     const host = tabloHost.replace(/\/$/, '');
     let cancelled = false;
     
-    fetch(`${host}/api/stream/${channelId}`, { method: 'POST' })
+    // ?transcode=true: Tablo streams raw MPEG-2 which Chrome can't decode.
+    // The tablo-web backend uses FFmpeg to re-encode to H.264 on the fly.
+    fetch(`${host}/api/stream/${channelId}?transcode=true`, { method: 'POST' })
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (cancelled) {
