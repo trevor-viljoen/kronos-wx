@@ -101,6 +101,9 @@ class CountyEnvironment:
     in_watch:           bool  = False  # county inside active Tornado or SVR watch
     cap_break_prob:     float = 0.0   # [0, 1] ML initiation probability
     lapse_rate_700_500: float = float("nan")  # °C/km — from HRRR when available
+    STP:                Optional[float] = None  # Significant Tornado Parameter (HRRR-derived)
+    LCL_height_m:       Optional[float] = None  # m AGL — lower is better for tornadoes
+    BWD_0_1km:          float = 0.0   # kt — low-level shear; high relative to BWD_0_6km = curved hodograph
 
 
 @dataclass
@@ -321,48 +324,102 @@ def _dryline_distance_miles(county: OklahomaCounty, dryline: BoundaryObservation
     return dlon * _MILES_PER_DEG_LON
 
 
+def _synthetic_stp(env: CountyEnvironment) -> float:
+    """
+    Compute a synthetic Significant Tornado Parameter when HRRR STP is absent.
+
+    STP = (MLCAPE/1500) * (SRH_0_1km/150) * (BWD_0_6km/20) * (2000-LCL)/1000
+    Clamped to [0, inf).  LCL term uses LCL_height_m if available, else 1000m.
+    """
+    lcl = env.LCL_height_m if env.LCL_height_m is not None else 1000.0
+    lcl_term = max(0.0, (2000.0 - lcl) / 1000.0)
+    shear_term = env.BWD_0_6km / 20.0
+    raw = (env.MLCAPE / 1500.0) * (env.SRH_0_1km / 150.0) * shear_term * lcl_term
+    return max(0.0, raw)
+
+
 def _score_environment(env: CountyEnvironment) -> str:
     """
     Map a county environment to a risk tier string.
 
-    Boundary forcing (convergence_score, alarm_bell) reduces the effective CIN
-    seen by the scoring rules, allowing capped environments near active
-    boundaries to score into higher tiers.
+    Scoring requires multiple factors to align simultaneously — no single
+    parameter can elevate a county to HIGH or EXTREME on its own.  The key
+    gates, in order of importance:
+
+    1. STP (Significant Tornado Parameter): integrates CAPE, SRH, shear, and
+       LCL height into one physically grounded discriminator.  HIGH requires
+       STP >= 1; EXTREME requires STP >= 3.  When HRRR STP is unavailable a
+       synthetic value is computed from the available parameters.
+
+    2. Shear adequacy: BWD_0_6km < 25 kt implies a nearly unidirectional
+       profile — storms will be linear/squall-line, not supercell.  HIGH and
+       EXTREME are suppressed in low-shear environments.
+
+    3. Lapse rate: 700-500mb lapse rate < 6.5 °C/km indicates the elevated
+       instability may be surface-based only; steep lapse rates (EML) are
+       required for HIGH-tier explosive convection.  Treated as permissive when
+       unknown (NaN).
+
+    4. Initiation probability (cap_break_prob): ML estimate of whether the cap
+       will actually erode.  Used to gate HIGH (>= 0.25) and EXTREME (>= 0.45).
+       Low values indicate the cap is unlikely to break regardless of kinematics.
+
+    5. Boundary forcing (convergence_score, alarm_bell): reduces effective CIN
+       and is the primary mechanism for DANGEROUS_CAPPED promotion.
     """
     cape = env.MLCAPE
     srh1 = env.SRH_0_1km
     srh3 = env.SRH_0_3km
     ehi  = env.EHI
 
-    # Minimum instability for any meaningful risk
     if cape < 200:
         return "LOW"
 
-    # Effective CIN: boundary convergence partially offsets the cap.
-    # At convergence_score = 1.0 (directly on a strong boundary), CIN is
-    # reduced by 50%.  An alarm_bell (two boundaries intersecting in a
-    # favorable environment) hard-caps effective CIN at 50 J/kg.
+    # ── Effective CIN (boundary-adjusted) ────────────────────────────────────
     effective_cin = env.MLCIN * max(0.3, 1.0 - 0.5 * env.convergence_score)
     if env.alarm_bell:
         effective_cin = min(effective_cin, 50.0)
-    # Watch + boundary: SPC has judged the environment favorable AND mechanical
-    # lift is present — treat CIN as 15% more eroded.
     if env.in_watch and env.convergence_score > 0:
         effective_cin *= 0.85
+    cin = effective_cin
 
-    cin = effective_cin  # use effective CIN throughout scoring below
+    # ── Composite gates (required for HIGH / EXTREME) ─────────────────────────
+    # STP — use HRRR-provided value when available, synthetic otherwise
+    stp = env.STP if env.STP is not None else _synthetic_stp(env)
 
-    # EXTREME: uncapped (or boundary-forced past the cap), extreme kinematics
-    if cin < 50 and cape >= 1500 and srh1 >= 250 and ehi >= 3.5:
+    # Shear adequacy: < 25 kt 0-6km shear → linear storm mode, suppress HIGH+
+    shear_ok = env.BWD_0_6km >= 25.0
+
+    # Lapse rate: unknown (NaN) treated as adequate to avoid false suppressions
+    # when sounding-interpolated environments lack HRRR profile data
+    lr = env.lapse_rate_700_500
+    lr_ok = math.isnan(lr) or lr >= 6.5
+
+    # Initiation gate: even with perfect kinematics, a very low cap_break_prob
+    # means the environment is unlikely to be tapped today
+    init_prob = env.cap_break_prob
+
+    # ── EXTREME ───────────────────────────────────────────────────────────────
+    # All ingredients fully aligned: uncapped, extreme kinematics, high STP,
+    # adequate shear, steep lapse rates, high initiation probability.
+    if (cin < 50 and cape >= 1500 and srh1 >= 250 and ehi >= 3.5
+            and stp >= 3.0 and shear_ok and lr_ok and init_prob >= 0.45):
         return "EXTREME"
 
-    # HIGH: cap is manageable (or boundary-forced), strong kinematics
-    if cin < 100 and cape >= 1000 and srh1 >= 150 and ehi >= 2.0:
+    # ── HIGH ─────────────────────────────────────────────────────────────────
+    # Strong integrated environment.  STP >= 1 is the primary gate — it ensures
+    # that CAPE, SRH, shear, and LCL height all contribute, not just one or two.
+    if (cin < 100 and cape >= 1000 and srh1 >= 150 and ehi >= 2.0
+            and stp >= 1.0 and shear_ok and lr_ok and init_prob >= 0.25):
         return "HIGH"
-    if cin < 80 and cape >= 800 and srh3 >= 300:
+    if (cin < 80 and cape >= 800 and srh3 >= 300
+            and stp >= 1.0 and shear_ok and lr_ok and init_prob >= 0.25):
         return "HIGH"
 
-    # DANGEROUS_CAPPED: strong raw cap, violent kinematics, boundary nearby
+    # ── DANGEROUS_CAPPED ─────────────────────────────────────────────────────
+    # Strong raw cap, violent kinematics, boundary nearby.  Intentionally does
+    # NOT require high init_prob — that's the point: the cap hasn't broken yet.
+    # STP not required because LCL may be high (elevated, not surface-based).
     if env.MLCIN >= 80 and cape >= 800 and srh1 >= 150 and ehi >= 2.0:
         return "DANGEROUS_CAPPED"
     if env.MLCIN >= 80 and cape >= 1000 and srh1 >= 200 and (
@@ -370,13 +427,14 @@ def _score_environment(env: CountyEnvironment) -> str:
     ):
         return "DANGEROUS_CAPPED"
 
-    # MODERATE: some potential, moderate kinematics
+    # ── MODERATE ─────────────────────────────────────────────────────────────
+    # Some potential; more permissive thresholds, no STP gate.
     if cape >= 500 and cin < 200 and (srh1 >= 100 or ehi >= 1.0):
         return "MODERATE"
     if cape >= 500 and cin < 150 and srh3 >= 200:
         return "MODERATE"
 
-    # MARGINAL
+    # ── MARGINAL ─────────────────────────────────────────────────────────────
     if cape >= 200 and cin < 250 and srh1 >= 50:
         return "MARGINAL"
 
@@ -643,6 +701,8 @@ def compute_risk_zones_from_hrrr(
             alarm_bell=alarm,
             in_watch=in_watch,
             lapse_rate_700_500=pt.lapse_rate_700_500 if pt.lapse_rate_700_500 is not None else float("nan"),
+            STP=pt.STP,
+            LCL_height_m=pt.LCL_height_m,
         )
         env.cap_break_prob = _cap_break_prob(env)
         all_envs[county.name] = env
