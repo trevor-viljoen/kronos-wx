@@ -1158,8 +1158,8 @@ async def _task_environment() -> None:
                         "count_lo":     round(count.get("interval_low", 0), 1),
                         "count_hi":     round(count.get("interval_high", 0), 1),
                     }
-            except Exception:
-                pass
+            except Exception as _model_exc:
+                logger.warning("Model inference failed: %s", _model_exc, exc_info=True)
 
             env_data = {
                 "oun": _ser_indices(idx, kin),
