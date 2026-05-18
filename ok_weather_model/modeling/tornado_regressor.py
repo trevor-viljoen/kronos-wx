@@ -133,8 +133,26 @@ class TornadoRegressor:
         log_lo = log_pred - z * self._train_residual_std
         log_hi = log_pred + z * self._train_residual_std
 
+        expected = max(0.0, float(np.expm1(log_pred)))
+
+        # Physics floor: when MLCIN≈0 the GBM suppresses predictions because it
+        # learned a spurious MLCIN=0 → low-count association (missing data artifact
+        # from null-filled historical records). Historical SIGNIFICANT cases with
+        # MLCIN≤5 produced 3–22 tornadoes (mean 9.7). Apply a minimum when the
+        # environment is clearly supportive so we don't output 0 for EHI>3 days.
+        mlcape = feat.get("MLCAPE", 0.0) or 0.0
+        ehi    = feat.get("EHI",    0.0) or 0.0
+        stp    = feat.get("STP",    0.0) or 0.0
+        mlcin  = feat.get("MLCIN",  999) or 999
+        if mlcin <= 5 and mlcape > 2000 and (ehi > 2.0 or stp > 2.0):
+            # Floor at log1p(3) ≈ 1.386 — at least 3 tornadoes for uncapped big-CAPE days
+            log_floor = math.log1p(3.0)
+            if log_pred < log_floor:
+                log_pred = log_floor
+                expected = float(np.expm1(log_pred))
+
         return {
-            "expected_count": round(max(0.0, float(np.expm1(log_pred))), 1),
+            "expected_count": round(expected, 1),
             "interval_low":   round(max(0.0, float(np.expm1(log_lo))), 1),
             "interval_high":  round(max(0.0, float(np.expm1(log_hi))), 1),
         }
