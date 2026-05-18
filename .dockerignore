@@ -1,5 +1,8 @@
 # Runtime data — never bake secrets or state into the image
+# Pre-built analogue bundle and model artifacts are included (small, no secrets)
 data/
+!data/analogues.json
+!data/models/
 logs/
 .env
 .env.*
