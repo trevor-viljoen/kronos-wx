@@ -1932,39 +1932,51 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
         if v >= 1.5: return "yellow"
         return "white"
 
-    # ── Fetch secondary station (LMN — northern OK, 36.7°N) ──────────────────
-    # LMN covers the Grant/Kay/Garfield county corridor — the most common
-    # northern-OK initiation zone. FWD (Fort Worth) anchors the southern end
-    # of the interpolation corridor (~32.83°N). Together FWD→OUN→LMN give a
-    # three-station meridional gradient without requiring model data.
+    # ── Fetch secondary soundings ─────────────────────────────────────────────
+    # LMN (Lamont, 36.7°N): northern OK cap gradient, Grant/Kay/Garfield corridor.
+    # FWD (Fort Worth, 32.8°N): southern anchor for risk-zone interpolation.
+    # AMA (Amarillo, 35.2°N): western TX — upstream dryline air mass, EML source.
+    # DDC (Dodge City, 37.8°N): NW Kansas — cold front / northern threat corridor.
     lmn_indices    = None
     lmn_kinematics = None
     lmn_fetched    = False
     fwd_indices    = None
     fwd_kinematics = None
+    ama_indices    = None
+    ama_kinematics = None
+    ama_fetched    = False
+    ddc_indices    = None
+    ddc_kinematics = None
+    ddc_fetched    = False
     if stn == OklahomaSoundingStation.OUN:
-        with console.status("Fetching LMN (Lamont) + FWD (Fort Worth) soundings..."):
-            with SoundingClient() as sc2:
-                lmn_profile = sc2.get_sounding(
-                    OklahomaSoundingStation.LMN, today, fetched_hour
-                )
-            with SoundingClient() as sc3:
-                fwd_profile = sc3.get_sounding(
-                    OklahomaSoundingStation.FWD, today, fetched_hour
-                )
-        if lmn_profile is not None:
+        with console.status("Fetching LMN / FWD / AMA / DDC soundings..."):
+            _sec_stations = {
+                OklahomaSoundingStation.LMN: None,
+                OklahomaSoundingStation.FWD: None,
+                OklahomaSoundingStation.AMA: None,
+                OklahomaSoundingStation.DDC: None,
+            }
+            for _st in list(_sec_stations):
+                with SoundingClient() as _sc:
+                    _sec_stations[_st] = _sc.get_sounding(_st, today, fetched_hour)
+
+        def _compute_station(profile):
+            if profile is None:
+                return None, None
             try:
-                lmn_indices    = compute_thermodynamic_indices(lmn_profile)
-                lmn_kinematics = compute_kinematic_profile(lmn_profile, lmn_indices)
-                lmn_fetched    = True
+                idx = compute_thermodynamic_indices(profile)
+                kin = compute_kinematic_profile(profile, idx)
+                return idx, kin
             except Exception:
-                pass  # LMN failure is non-fatal
-        if fwd_profile is not None:
-            try:
-                fwd_indices    = compute_thermodynamic_indices(fwd_profile)
-                fwd_kinematics = compute_kinematic_profile(fwd_profile, fwd_indices)
-            except Exception:
-                pass  # FWD failure is non-fatal
+                return None, None
+
+        lmn_indices, lmn_kinematics = _compute_station(_sec_stations[OklahomaSoundingStation.LMN])
+        lmn_fetched = lmn_indices is not None
+        fwd_indices, fwd_kinematics = _compute_station(_sec_stations[OklahomaSoundingStation.FWD])
+        ama_indices, ama_kinematics = _compute_station(_sec_stations[OklahomaSoundingStation.AMA])
+        ama_fetched = ama_indices is not None
+        ddc_indices, ddc_kinematics = _compute_station(_sec_stations[OklahomaSoundingStation.DDC])
+        ddc_fetched = ddc_indices is not None
 
     # ── Multi-station comparison table ────────────────────────────────────────
     def _fmt_val(val, fmt, color_fn=None):
@@ -1982,64 +1994,69 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
         title=f"Sounding Comparison — {fetched_hour:02d}Z  {today}",
         show_lines=True,
     )
-    snd_tbl.add_column("Parameter",       style="cyan")
-    snd_tbl.add_column("OUN  Norman 35.2°N", justify="right")
+    snd_tbl.add_column("Parameter",             style="cyan")
+    snd_tbl.add_column("OUN  Norman 35.2°N",    justify="right")
     if lmn_fetched:
-        snd_tbl.add_column("LMN  Lamont 36.7°N", justify="right")
+        snd_tbl.add_column("LMN  Lamont 36.7°N",   justify="right")
+    if ama_fetched:
+        snd_tbl.add_column("AMA  Amarillo 35.2°N",  justify="right")
+    if ddc_fetched:
+        snd_tbl.add_column("DDC  Dodge City 37.8°N", justify="right")
 
-    def _row(label, oun_val, lmn_val, fmt, color_fn=None):
+    def _row(label, oun_val, lmn_val, ama_val, ddc_val, fmt, color_fn=None):
         cols = [label, _fmt_val(oun_val, fmt, color_fn)]
         if lmn_fetched:
             cols.append(_fmt_val(lmn_val, fmt, color_fn))
+        if ama_fetched:
+            cols.append(_fmt_val(ama_val, fmt, color_fn))
+        if ddc_fetched:
+            cols.append(_fmt_val(ddc_val, fmt, color_fn))
         snd_tbl.add_row(*cols)
 
-    _row("MLCAPE",        indices.MLCAPE,             lmn_indices.MLCAPE             if lmn_indices else None, "{:.0f} J/kg",   _cape_c)
-    _row("MLCIN",         indices.MLCIN,              lmn_indices.MLCIN              if lmn_indices else None, "{:.0f} J/kg",   _cin_c)
-    _row("Cap Strength",  indices.cap_strength,       lmn_indices.cap_strength       if lmn_indices else None, "{:.1f}°C",      _cap_c)
-    _row("LCL Height",    indices.LCL_height,         lmn_indices.LCL_height         if lmn_indices else None, "{:.0f} m AGL")
-    _row("LFC Height",    indices.LFC_height,         lmn_indices.LFC_height         if lmn_indices else None, "{:.0f} m AGL")
-    _row("Lapse 700–500", indices.lapse_rate_700_500, lmn_indices.lapse_rate_700_500 if lmn_indices else None, "{:.1f} °C/km")
-    _row("Conv. Temp Tc", indices.convective_temperature, lmn_indices.convective_temperature if lmn_indices else None, "{:.1f}°F")
+    def _get(idx, attr):
+        return getattr(idx, attr) if idx is not None else None
+
+    _row("MLCAPE",        indices.MLCAPE,             _get(lmn_indices, "MLCAPE"),             _get(ama_indices, "MLCAPE"),             _get(ddc_indices, "MLCAPE"),             "{:.0f} J/kg",   _cape_c)
+    _row("MLCIN",         indices.MLCIN,              _get(lmn_indices, "MLCIN"),              _get(ama_indices, "MLCIN"),              _get(ddc_indices, "MLCIN"),              "{:.0f} J/kg",   _cin_c)
+    _row("Cap Strength",  indices.cap_strength,       _get(lmn_indices, "cap_strength"),       _get(ama_indices, "cap_strength"),       _get(ddc_indices, "cap_strength"),       "{:.1f}°C",      _cap_c)
+    _row("LCL Height",    indices.LCL_height,         _get(lmn_indices, "LCL_height"),         _get(ama_indices, "LCL_height"),         _get(ddc_indices, "LCL_height"),         "{:.0f} m AGL")
+    _row("LFC Height",    indices.LFC_height,         _get(lmn_indices, "LFC_height"),         _get(ama_indices, "LFC_height"),         _get(ddc_indices, "LFC_height"),         "{:.0f} m AGL")
+    _row("Lapse 700–500", indices.lapse_rate_700_500, _get(lmn_indices, "lapse_rate_700_500"), _get(ama_indices, "lapse_rate_700_500"), _get(ddc_indices, "lapse_rate_700_500"), "{:.1f} °C/km")
+    _row("Conv. Temp Tc", indices.convective_temperature, _get(lmn_indices, "convective_temperature"), _get(ama_indices, "convective_temperature"), _get(ddc_indices, "convective_temperature"), "{:.1f}°F")
 
     # Kinematics rows
-    oun_srh1  = kinematics.SRH_0_1km  if kinematics else None
-    oun_srh3  = kinematics.SRH_0_3km  if kinematics else None
-    oun_bwd6  = kinematics.BWD_0_6km  if kinematics else None
-    oun_ehi   = kinematics.EHI        if kinematics else None
-    oun_stp   = kinematics.STP        if kinematics else None
-    oun_scp   = kinematics.SCP        if kinematics else None
-    lmn_srh1  = lmn_kinematics.SRH_0_1km if lmn_kinematics else None
-    lmn_srh3  = lmn_kinematics.SRH_0_3km if lmn_kinematics else None
-    lmn_bwd6  = lmn_kinematics.BWD_0_6km if lmn_kinematics else None
-    lmn_ehi   = lmn_kinematics.EHI       if lmn_kinematics else None
-    lmn_stp   = lmn_kinematics.STP       if lmn_kinematics else None
-    lmn_scp   = lmn_kinematics.SCP       if lmn_kinematics else None
+    def _kin(kin, attr):
+        return getattr(kin, attr) if kin is not None else None
 
-    _row("SRH 0–1km",    oun_srh1, lmn_srh1, "{:.0f} m²/s²", _srh_c)
-    _row("SRH 0–3km",    oun_srh3, lmn_srh3, "{:.0f} m²/s²", _srh_c)
-    _row("Shear 0–6km",  oun_bwd6, lmn_bwd6, "{:.0f} kt")
-    _row("EHI",          oun_ehi,  lmn_ehi,  "{:.2f}",        _ehi_c)
-    _row("STP",          oun_stp,  lmn_stp,  "{:.2f}")
-    _row("SCP",          oun_scp,  lmn_scp,  "{:.2f}")
+    _row("SRH 0–1km",    _kin(kinematics, "SRH_0_1km"),  _kin(lmn_kinematics, "SRH_0_1km"),  _kin(ama_kinematics, "SRH_0_1km"),  _kin(ddc_kinematics, "SRH_0_1km"),  "{:.0f} m²/s²", _srh_c)
+    _row("SRH 0–3km",    _kin(kinematics, "SRH_0_3km"),  _kin(lmn_kinematics, "SRH_0_3km"),  _kin(ama_kinematics, "SRH_0_3km"),  _kin(ddc_kinematics, "SRH_0_3km"),  "{:.0f} m²/s²", _srh_c)
+    _row("Shear 0–6km",  _kin(kinematics, "BWD_0_6km"),  _kin(lmn_kinematics, "BWD_0_6km"),  _kin(ama_kinematics, "BWD_0_6km"),  _kin(ddc_kinematics, "BWD_0_6km"),  "{:.0f} kt")
+    _row("EHI",          _kin(kinematics, "EHI"),         _kin(lmn_kinematics, "EHI"),         _kin(ama_kinematics, "EHI"),         _kin(ddc_kinematics, "EHI"),         "{:.2f}",        _ehi_c)
+    _row("STP",          _kin(kinematics, "STP"),         _kin(lmn_kinematics, "STP"),         _kin(ama_kinematics, "STP"),         _kin(ddc_kinematics, "STP"),         "{:.2f}")
+    _row("SCP",          _kin(kinematics, "SCP"),         _kin(lmn_kinematics, "SCP"),         _kin(ama_kinematics, "SCP"),         _kin(ddc_kinematics, "SCP"),         "{:.2f}")
 
     console.print(snd_tbl)
 
     # ── DANGEROUS CAPPED warning ──────────────────────────────────────────────
-    # Check both stations; the warning fires if EITHER environment is dangerous.
-    # A capped northern-OK environment with violent shear is exactly what
-    # produced yesterday's tornadoes while OUN looked benign.
+    # Check all available stations; fires if ANY environment is dangerous.
     flag_oun, reasons_oun = _dangerous_capped_flag(indices, kinematics)
     flag_lmn, reasons_lmn = _dangerous_capped_flag(lmn_indices, lmn_kinematics)
+    flag_ama, reasons_ama = _dangerous_capped_flag(ama_indices, ama_kinematics)
+    flag_ddc, reasons_ddc = _dangerous_capped_flag(ddc_indices, ddc_kinematics)
 
-    if flag_oun or flag_lmn:
+    if flag_oun or flag_lmn or flag_ama or flag_ddc:
         from rich.panel import Panel
         lines = ["[bold red]Cap is strong but the kinematic environment is in violent-tornado range.[/bold red]",
                  "Any boundary-forced initiation — dryline surge, outflow, differential heating —",
                  "could produce significant tornadoes with little or no warning time.", ""]
         if flag_oun and reasons_oun:
-            lines.append(f"[yellow]OUN (central OK):[/yellow]  {' | '.join(reasons_oun)}")
+            lines.append(f"[yellow]OUN (central OK):[/yellow]    {' | '.join(reasons_oun)}")
         if flag_lmn and reasons_lmn:
-            lines.append(f"[yellow]LMN (northern OK):[/yellow] {' | '.join(reasons_lmn)}")
+            lines.append(f"[yellow]LMN (northern OK):[/yellow]   {' | '.join(reasons_lmn)}")
+        if flag_ama and reasons_ama:
+            lines.append(f"[yellow]AMA (western TX):[/yellow]    {' | '.join(reasons_ama)}")
+        if flag_ddc and reasons_ddc:
+            lines.append(f"[yellow]DDC (NW Kansas):[/yellow]     {' | '.join(reasons_ddc)}")
         console.print(Panel(
             "\n".join(lines),
             title="[bold red on white] ⚠  DANGEROUS CAPPED ENVIRONMENT [/bold red on white]",
