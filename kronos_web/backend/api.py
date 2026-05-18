@@ -1377,13 +1377,12 @@ async def _task_spc() -> None:
                 except Exception:
                     alert_geojson = None
 
-                # SPC Day1 categorical GeoJSON (filter to OK bbox)
+                # SPC Day1 categorical GeoJSON — pass through unfiltered so the
+                # full outlook is visible even when the primary risk is north of OK
                 try:
                     r2 = await client.get(_D1_CAT_URL)
                     r2.raise_for_status()
-                    cat_data = r2.json()
-                    ok_features = _filter_geojson_ok(cat_data)
-                    outlook_geojson = {"type": "FeatureCollection", "features": ok_features}
+                    outlook_geojson = r2.json()
                 except Exception:
                     outlook_geojson = None
 
@@ -1392,9 +1391,7 @@ async def _task_spc() -> None:
                     try:
                         r = await client.get(url)
                         r.raise_for_status()
-                        data = r.json()
-                        feats = _filter_geojson_ok(data)
-                        return {"type": "FeatureCollection", "features": feats}
+                        return r.json()
                     except Exception:
                         return None
 
