@@ -12,7 +12,11 @@ build/
 .env
 
 # Data (large files — tracked separately)
-data/
+data/*.db
+data/era5_cache/
+data/parquet/
+data/spc_outlooks/
+data/vapid_keys.json
 logs/
 
 # IDE
