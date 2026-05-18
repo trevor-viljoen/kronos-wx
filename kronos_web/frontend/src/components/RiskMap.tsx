@@ -102,6 +102,22 @@ function FitBounds() {
   return null
 }
 
+// ── Reflow Leaflet when the container resizes (panel collapse/expand) ─────────
+// Leaflet sizes its overlay SVG at mount time. Without this, collapsing panels
+// gives the map more space but the SVG stays at the old dimensions, clipping
+// GeoJSON polygons below the original boundary while markers (which use CSS
+// transforms rather than SVG coordinates) continue to render correctly.
+function MapResizeHandler() {
+  const map = useMap()
+  useEffect(() => {
+    const container = map.getContainer()
+    const ro = new ResizeObserver(() => map.invalidateSize())
+    ro.observe(container)
+    return () => ro.disconnect()
+  }, [map])
+  return null
+}
+
 // ── Inject SVG defs (CIG hatch patterns) into Leaflet's overlay SVG ──────────
 // CIG1 = sparse (12px), CIG2 = medium (8px), CIG3 = dense (5px)
 // SIGN is the legacy label — same density as CIG1
@@ -1015,6 +1031,7 @@ export function RiskMap({ state, onCountyClick, tactical = false }: Props) {
         zoomControl={true}
       >
         <FitBounds />
+        <MapResizeHandler />
         <SvgDefs />
 
         {/* CartoDB Dark Matter base tiles */}
