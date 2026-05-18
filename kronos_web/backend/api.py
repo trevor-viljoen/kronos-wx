@@ -34,6 +34,7 @@ if str(_ROOT) not in sys.path:
 
 
 from ok_weather_model.config import (
+    DATA_DIR,
     WAR_ROOM_ENABLED,
     WAR_ROOM_TABLO_WEB_HOST,
     WAR_ROOM_KOCO_ID,
@@ -959,45 +960,41 @@ def _analogue_distance(a: list[float], b: list[float]) -> float:
     return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
 
 
-def _compute_analogues(indices, kinematics, tc_gap_12z, n: int = 5) -> list[dict]:
-    """Return top-N serialized historical analogues for the given sounding."""
-    target = _analogue_feature_vector(indices, kinematics, tc_gap_12z)
-    if target is None:
-        return []
+_ANALOGUE_BUNDLE: list[dict] | None = None
+_ANALOGUE_BUNDLE_PATH = DATA_DIR / "analogues.json"
 
+
+def _load_analogue_bundle() -> list[dict]:
+    global _ANALOGUE_BUNDLE
+    if _ANALOGUE_BUNDLE is not None:
+        return _ANALOGUE_BUNDLE
+    if _ANALOGUE_BUNDLE_PATH.exists():
+        with open(_ANALOGUE_BUNDLE_PATH) as f:
+            _ANALOGUE_BUNDLE = json.load(f)
+        logger.info("Loaded %d analogue cases from bundle", len(_ANALOGUE_BUNDLE))
+        return _ANALOGUE_BUNDLE
+    # Fall back to live DB query (dev environment with full DB)
     try:
         db = Database()
-        all_cases = db.query_parameter_space({
-            "start_date": "1994-01-01",
-            "end_date":   "2024-12-31",
-        })
+        all_cases = db.query_parameter_space({"start_date": "1994-01-01", "end_date": "2024-12-31"})
     except Exception as exc:
         logger.debug("Analogue DB query failed: %s", exc)
         return []
-
-    scored: list[tuple[float, Any]] = []
+    bundle = []
     for c in all_cases:
         if c.sounding_12Z is None:
             continue
         vec = _analogue_feature_vector(c.sounding_12Z, c.kinematics_12Z, c.convective_temp_gap_12Z)
         if vec is None:
             continue
-        scored.append((_analogue_distance(target, vec), c))
-
-    scored.sort(key=lambda x: x[0])
-
-    results = []
-    for dist, c in scored[:n]:
-        date_str = c.case_id[:8]  # "YYYYMMDD"
-        idx = c.sounding_12Z
-        kin = c.kinematics_12Z
-        results.append({
+        date_str = c.case_id[:8]
+        idx, kin = c.sounding_12Z, c.kinematics_12Z
+        bundle.append({
             "case_id":       c.case_id,
             "date":          str(c.date),
             "event_class":   c.event_class.value if c.event_class else None,
             "tornado_count": c.tornado_count,
             "cap_behavior":  c.cap_behavior.value if c.cap_behavior else None,
-            "distance":      round(dist, 4),
             "MLCAPE":        round(idx.MLCAPE, 0) if idx else None,
             "MLCIN":         round(idx.MLCIN, 0) if idx else None,
             "cap_strength":  round(idx.cap_strength, 1) if idx else None,
@@ -1005,9 +1002,32 @@ def _compute_analogues(indices, kinematics, tc_gap_12z, n: int = 5) -> list[dict
             "EHI":           round(kin.EHI, 2) if kin and kin.EHI is not None else None,
             "tc_gap_12Z":    round(c.convective_temp_gap_12Z, 1) if c.convective_temp_gap_12Z is not None else None,
             "spc_url":       f"https://www.spc.noaa.gov/exper/archive/event.php?date={date_str}",
+            "vec":           vec,
         })
+    _ANALOGUE_BUNDLE = bundle
+    return bundle
 
-    return results
+
+def _compute_analogues(indices, kinematics, tc_gap_12z, n: int = 5) -> list[dict]:
+    """Return top-N serialized historical analogues for the given sounding."""
+    target = _analogue_feature_vector(indices, kinematics, tc_gap_12z)
+    if target is None:
+        return []
+
+    bundle = _load_analogue_bundle()
+    scored: list[tuple[float, dict]] = []
+    for entry in bundle:
+        vec = entry.get("vec")
+        if vec is None:
+            continue
+        scored.append((_analogue_distance(target, vec), entry))
+
+    scored.sort(key=lambda x: x[0])
+
+    return [
+        {k: v for k, v in {**entry, "distance": round(dist, 4)}.items() if k != "vec"}
+        for dist, entry in scored[:n]
+    ]
 
 
 async def _task_environment() -> None:

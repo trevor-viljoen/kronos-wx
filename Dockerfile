@@ -37,6 +37,7 @@ ENV PATH=/root/.local/bin:$PATH \
 COPY ok_weather_model/ ./ok_weather_model/
 COPY kronos_web/backend/ ./kronos_web/backend/
 COPY data/models/ ./data/models/
+COPY data/analogues.json ./data/analogues.json
 
 RUN mkdir -p data logs
 

@@ -19,6 +19,9 @@ data/spc_outlooks/
 data/vapid_keys.json
 logs/
 
+# Pre-built analogue bundle and model artifacts are tracked (small, needed by container)
+
+
 # IDE
 .DS_Store
 .idea/
