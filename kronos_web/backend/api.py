@@ -669,10 +669,11 @@ def _ser_outlook(o) -> Optional[dict]:
     if o is None:
         return None
     return {
-        "category":          o.category,
-        "max_tornado_prob":  o.max_tornado_prob,
+        "category":            o.category,
+        "max_tornado_prob":    o.max_tornado_prob,
         "sig_tornado_hatched": o.sig_tornado_hatched,
-        "issued_utc":        o.issued_utc.isoformat() if o.issued_utc else None,
+        "issued_utc":          o.issued_utc.isoformat() if o.issued_utc else None,
+        "narrative":           getattr(o, "narrative", "") or "",
     }
 
 

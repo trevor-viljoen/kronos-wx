@@ -28,10 +28,11 @@ logger = logging.getLogger(__name__)
 _MD_INDEX_URL = "https://www.spc.noaa.gov/products/md/"
 _MD_BASE_URL  = "https://www.spc.noaa.gov"
 
-_D1_CAT_URL   = "https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson"
-_D1_TORN_URL  = "https://www.spc.noaa.gov/products/outlook/day1otlk_torn.nolyr.geojson"
-_D1_WIND_URL  = "https://www.spc.noaa.gov/products/outlook/day1otlk_wind.nolyr.geojson"
-_D1_HAIL_URL  = "https://www.spc.noaa.gov/products/outlook/day1otlk_hail.nolyr.geojson"
+_D1_CAT_URL       = "https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson"
+_D1_TORN_URL      = "https://www.spc.noaa.gov/products/outlook/day1otlk_torn.nolyr.geojson"
+_D1_WIND_URL      = "https://www.spc.noaa.gov/products/outlook/day1otlk_wind.nolyr.geojson"
+_D1_HAIL_URL      = "https://www.spc.noaa.gov/products/outlook/day1otlk_hail.nolyr.geojson"
+_D1_NARRATIVE_URL = "https://www.spc.noaa.gov/products/outlook/day1otlk.html"
 _NWS_ALERT_URL = "https://api.weather.gov/alerts/active?area=OK"
 def _nws_ua() -> str:
     from ok_weather_model.config import NWS_CONTACT_EMAIL
@@ -105,13 +106,19 @@ class MesoscaleDiscussion:
 @dataclass
 class SPCOutlook:
     """
-    Current SPC Day 1 convective outlook summary for Oklahoma.
+    Current SPC Day 1 convective outlook summary.
+
+    ``category`` and ``max_tornado_prob`` reflect what intersects the
+    Oklahoma bounding box — they can be misleading when the main risk area
+    is north/west of Oklahoma and only clips the border.  Always read
+    ``narrative`` before drawing conclusions about the Oklahoma threat.
     """
     category:                str            # TSTM / MRGL / SLGT / ENH / MDT / HIGH / NONE
     max_tornado_prob:         Optional[float]  # 0.02, 0.05, 0.10 …
     sig_tornado_hatched:      bool = False  # CIG1 / SIGN hatch intersects Oklahoma
     issued_utc:               Optional[datetime] = None
     valid_label:              str = ""
+    narrative:                str = ""      # Full SPC outlook text — the authoritative source
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -434,11 +441,24 @@ def _fetch_outlook_with_client(client: httpx.Client) -> Optional[SPCOutlook]:
     except Exception as exc:
         logger.debug("SPC D1 tornado prob fetch failed: %s", exc)
 
+    # Narrative text — the authoritative source for geographic scope and reasoning
+    narrative = ""
+    try:
+        narr_resp = client.get(_D1_NARRATIVE_URL)
+        narr_resp.raise_for_status()
+        soup = BeautifulSoup(narr_resp.text, "lxml")
+        pre = soup.find("pre")
+        if pre:
+            narrative = pre.get_text().strip()
+    except Exception as exc:
+        logger.debug("SPC D1 narrative fetch failed: %s", exc)
+
     return SPCOutlook(
         category=best_cat,
         max_tornado_prob=max_torn_prob,
         sig_tornado_hatched=sig_hatched,
         valid_label=valid_label,
+        narrative=narrative,
     )
 
 

@@ -1854,6 +1854,15 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
             f"{_torn_str}{_sig_str}"
             + (f"  [dim](valid {_spc_outlook.valid_label})[/dim]" if _spc_outlook.valid_label else "")
         )
+        console.print("[dim italic]Note: category/prob reflect polygon intersection with OK bbox — read narrative for geographic context.[/dim italic]")
+        if _spc_outlook.narrative:
+            from rich.panel import Panel
+            console.print(Panel(
+                _spc_outlook.narrative,
+                title="[bold]SPC Day 1 Outlook Narrative[/bold]",
+                border_style="dim",
+                padding=(0, 1),
+            ))
     else:
         console.print("[dim]SPC D1: NONE / not available[/dim]")
 
