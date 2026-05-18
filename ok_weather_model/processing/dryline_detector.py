@@ -11,18 +11,28 @@ Secondary confirmation: wind shift from S/SSE (moist) to SW/W (dry).
 Algorithm
 ---------
 1. Collect all valid Mesonet observations within ±7 min of valid_time.
-2. Bin stations into three latitude bands (south/central/north).
-3. Within each band, walk stations W→E to find the eastern edge of the
-   CONTIGUOUS dry sector (Td ≤ DRY_SECTOR_TD_MAX_F). The first moist station
-   breaks the run — rain-cooled outflow or storm pockets east of the moist
+2. Slide a 1.0°-wide latitude window across Oklahoma in 0.5° steps (8 vertices,
+   ~34-mile spacing). This replaces the old 3-band approach and allows the
+   polyline to capture bowing or bulging sections of the dryline.
+3. Within each window, walk stations W→E to find the eastern edge of the
+   CONTIGUOUS dry sector (Td ≤ DRY_SECTOR_TD_MAX_F=60°F). The first station
+   above 60°F breaks the run — rain-cooled storm pockets east of the moist
    sector are naturally ignored because moist-sector air separates them from
-   the genuine dry sector. Pair the dry edge with the nearest moist station
-   to its east that clears the gradient thresholds.
-4. The dryline longitude in that band = midpoint of the max-gradient pair.
-5. Build a polyline through the detected lat/lon points (S→N).
-6. Confidence = blend of gradient sharpness and band coverage.
+   the genuine dry sector.
+4. Pair the dry-edge station with the nearest eastern station that (a) has
+   Td ≥ MOIST_SECTOR_TD_MIN_F=55°F (NWS severe weather moisture threshold),
+   (b) clears the gradient and absolute-drop thresholds, and (c) is within
+   MAX_PAIR_DLON degrees longitude.
+5. The dryline longitude at that vertex = midpoint of the best-gradient pair.
+6. Build a polyline through all detected vertices (S→N). With up to 8 points
+   the polyline can represent a bowed or bulging dryline shape.
+7. Confidence = blend of gradient sharpness and vertex coverage.
 
-A dryline is only reported when at least one band clears the gradient threshold.
+A dryline is only reported when at least one vertex clears the gradient threshold.
+
+The 55°F eastern-station anchor is grounded in NWS guidance: severe thunderstorms
+become significantly more likely when surface Td ≥ 55°F. The dryline is
+operationally the western boundary of this severe-weather-supportive moisture.
 """
 
 from __future__ import annotations
@@ -39,23 +49,25 @@ from ..models.mesonet import MesonetTimeSeries
 # Minimum Td drop (°F) per degree of longitude to flag as dryline
 MIN_TD_GRADIENT_F_PER_DEG: float = 8.0
 
-# Minimum *absolute* Td drop (°F) across the boundary pair (filters noise between
-# two nearly-equal stations that happen to be far apart).
-# Lowered from 10°F → 8°F to pair with the raised DRY_SECTOR_TD_MAX_F; the 2°F
-# reduction is safe because DRY_SECTOR_TD_MAX_F=52 already blocks moist-sector pairs.
+# Minimum *absolute* Td drop (°F) across the boundary pair
 MIN_TD_ABSOLUTE_DROP_F: float = 8.0
 
 # A gradient this strong (°F/deg lon) is assigned confidence = 1.0 from gradient alone
 STRONG_GRADIENT_F_PER_DEG: float = 20.0
 
-# The western station of a candidate pair must be in the dry sector (Td below this).
-# Outflow boundaries occur in the moist sector — both stations have high dewpoints.
-# Classic OK dry-sector dewpoints: 20–45°F, but early-season or weak drylines can
-# sit at 48–52°F in the transition zone when Gulf moisture hasn't fully surged west.
-# Raised from 45°F → 52°F to capture weak/early-season drylines; the absolute-drop
-# filter below keeps outflow boundaries (which have similar Td on both sides) from
-# registering as drylines.
-DRY_SECTOR_TD_MAX_F: float = 52.0
+# The western (dry-edge) station must have Td at or below this value.
+# Raised from 52°F → 60°F to capture transition-zone drylines where the
+# dry-sector dewpoints are elevated (e.g., Hollis OK at 58.9°F on 2026-05-18).
+# The contiguous-dry-sector walk still blocks outflow boundary false positives:
+# a cool pocket in the moist sector is never the dry edge because moist stations
+# to its west break the walk before reaching it.
+DRY_SECTOR_TD_MAX_F: float = 60.0
+
+# The eastern (moist) station must have Td at or above this value.
+# NWS guidance: severe thunderstorms are significantly more likely when surface
+# Td ≥ 55°F. The dryline is operationally the western boundary of this
+# moisture return.
+MOIST_SECTOR_TD_MIN_F: float = 55.0
 
 # Max station-pair separation to consider (degrees longitude).
 # Allows skipping one station that has missing/bad data.
@@ -67,13 +79,17 @@ _OBS_WINDOW_S: float = 7 * 60
 # Approximate miles per degree longitude at 35.5°N
 _MILES_PER_DEG_LON: float = 53.0
 
-# Oklahoma latitude bands for per-band detection
-# (lat_min, lat_max, representative_lat, band_name)
-_LAT_BANDS: list[tuple[float, float, float, str]] = [
-    (36.0, 37.5, 36.5, "north"),
-    (35.0, 36.0, 35.5, "central"),
-    (33.6, 35.0, 34.3, "south"),
-]
+# Sliding-window polyline parameters.
+# Each vertex searches a 1.0°-wide latitude window; vertices are spaced 0.5° apart.
+# 50% overlap ensures a station near a band boundary is seen by two adjacent vertices,
+# preventing sparse scenarios from producing zero detections.
+_POLYLINE_LAT_STEP: float = 0.5    # degrees; spacing between polyline vertices
+_DETECTION_WINDOW:  float = 1.0    # degrees; latitude window half-width = 0.5°
+_LAT_OK_SOUTH:      float = 33.5   # southernmost vertex center - 0.25°
+_LAT_OK_NORTH:      float = 37.5   # northernmost vertex center + 0.25°
+
+# Minimum stations in a window to attempt detection
+_MIN_STATIONS_PER_WINDOW: int = 2
 
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
@@ -98,16 +114,18 @@ def _max_gradient_pair(
 
     Algorithm:
       1. Sort stations W→E and walk east until the first station whose Td
-         exceeds DRY_SECTOR_TD_MAX_F, marking the dry sector's eastern edge.
-         This is the key physical constraint: a rain-cooled storm pocket east
-         of the moist sector is ignored because moist-sector air between it
-         and the genuine dry sector breaks the contiguous run.
+         exceeds DRY_SECTOR_TD_MAX_F (60°F), marking the dry sector's eastern
+         edge. A rain-cooled storm pocket east of the moist sector is ignored
+         because moist-sector air between it and the genuine dry sector breaks
+         the contiguous run.
       2. Pair the dry-edge station with the nearest eastern station (within
-         MAX_PAIR_DLON) that produces a gradient ≥ MIN_TD_GRADIENT_F_PER_DEG
-         and an absolute Td jump ≥ MIN_TD_ABSOLUTE_DROP_F.
+         MAX_PAIR_DLON) that (a) has Td ≥ MOIST_SECTOR_TD_MIN_F (55°F —
+         severe-weather-supportive moisture), (b) produces a gradient ≥
+         MIN_TD_GRADIENT_F_PER_DEG, and (c) has an absolute Td jump ≥
+         MIN_TD_ABSOLUTE_DROP_F.
 
     Returns (midpoint_lon, gradient_F_per_deg) or None if no dry sector or
-    no valid moist-sector station can be paired with it.
+    no valid moist-sector pairing is found.
     """
     if len(stations) < 2:
         return None
@@ -124,7 +142,7 @@ def _max_gradient_pair(
             break   # first moist station ends the contiguous run
 
     if dry_edge_idx is None:
-        return None  # no dry sector in this band
+        return None  # no dry sector in this window
 
     lon_w, _, td_w = srt[dry_edge_idx]
 
@@ -138,6 +156,9 @@ def _max_gradient_pair(
         if dlon > MAX_PAIR_DLON:
             break
         if dlon < 0.1:
+            continue
+        # Eastern station must be in the severe-weather-supportive moist sector
+        if td_e < MOIST_SECTOR_TD_MIN_F:
             continue
         dtd = td_e - td_w
         if dtd < MIN_TD_ABSOLUTE_DROP_F:
@@ -208,34 +229,44 @@ def detect_dryline(
         BoundaryObservation with boundary_type=DRYLINE, or None if no clear
         dryline gradient is found in the station network.
     """
-    # ── 1. Collect observations and bin by latitude band ───────────────────────
-    band_data: dict[str, list[tuple[float, float, float]]] = {
-        b[3]: [] for b in _LAT_BANDS
-    }
+    # ── 1. Collect all observations ───────────────────────────────────────────
+    all_obs: list[tuple[float, float, float]] = []  # (lon, lat, td_F)
 
     for ts in station_series.values():
         ob = _nearest_obs(ts, valid_time)
         if ob is None:
             continue
-        # Use actual station coordinates when available; fall back to county centroid.
         if station_coords and ts.station_id in station_coords:
             lat, lon = station_coords[ts.station_id]
         else:
             lat = ts.county.lat
             lon = ts.county.lon
-        for lat_min, lat_max, _rep, band_name in _LAT_BANDS:
-            if lat_min <= lat < lat_max:
-                band_data[band_name].append((lon, lat, ob.dewpoint))
-                break
+        all_obs.append((lon, lat, ob.dewpoint))
 
-    # ── 2. Find dryline longitude per band ────────────────────────────────────
+    if len(all_obs) < _MIN_STATIONS_PER_WINDOW:
+        return None
+
+    # ── 2. Slide a detection window across Oklahoma latitudes ─────────────────
+    # Each vertex at rep_lat searches stations within ±(_DETECTION_WINDOW/2)°.
+    # The 50% overlap (_POLYLINE_LAT_STEP = _DETECTION_WINDOW/2) ensures a
+    # station near a band boundary contributes to two adjacent vertices, so
+    # sparse scenarios are not penalised by an unlucky band split.
     band_results: list[tuple[float, float, float]] = []  # (rep_lat, dryline_lon, gradient)
 
-    for lat_min, lat_max, rep_lat, band_name in _LAT_BANDS:
-        result = _max_gradient_pair(band_data[band_name])
-        if result:
-            dryline_lon, gradient = result
-            band_results.append((rep_lat, dryline_lon, gradient))
+    rep_lat = _LAT_OK_SOUTH + _POLYLINE_LAT_STEP / 2
+    while rep_lat <= _LAT_OK_NORTH - _POLYLINE_LAT_STEP / 2:
+        half = _DETECTION_WINDOW / 2
+        window = [
+            (lon, lat, td)
+            for lon, lat, td in all_obs
+            if rep_lat - half <= lat < rep_lat + half
+        ]
+        if len(window) >= _MIN_STATIONS_PER_WINDOW:
+            result = _max_gradient_pair(window)
+            if result:
+                dryline_lon, gradient = result
+                band_results.append((rep_lat, dryline_lon, gradient))
+        rep_lat += _POLYLINE_LAT_STEP
 
     if not band_results:
         return None
@@ -245,23 +276,25 @@ def detect_dryline(
     lats = [r[0] for r in band_results]
     lons = [r[1] for r in band_results]
 
-    # Extend a single-point detection into a short N-S segment so the polyline
+    # Extend a single-vertex detection into a short N-S segment so the polyline
     # validator (≥2 points) is satisfied.
     if len(lats) == 1:
-        lats = [lats[0] - 0.8, lats[0] + 0.8]
+        lats = [lats[0] - 0.4, lats[0] + 0.4]
         lons = [lons[0], lons[0]]
 
     # ── 4. Confidence ─────────────────────────────────────────────────────────
     gradients = [r[2] for r in band_results]
     avg_gradient = sum(gradients) / len(gradients)
-    band_coverage = len(band_results) / len(_LAT_BANDS)
+
+    # Possible vertices = number of 0.5° steps across OK latitude range
+    n_possible = int((_LAT_OK_NORTH - _LAT_OK_SOUTH) / _POLYLINE_LAT_STEP)
+    band_coverage = len(band_results) / max(n_possible, 1)
 
     gradient_score = min(
         1.0,
         (avg_gradient - MIN_TD_GRADIENT_F_PER_DEG)
         / (STRONG_GRADIENT_F_PER_DEG - MIN_TD_GRADIENT_F_PER_DEG),
     )
-    # Clamp to [0, 1] in case avg_gradient < MIN (shouldn't happen, but safe)
     gradient_score = max(0.0, gradient_score)
 
     confidence = round(0.35 * band_coverage + 0.65 * gradient_score, 2)

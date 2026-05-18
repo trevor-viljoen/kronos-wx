@@ -103,11 +103,13 @@ class TestDetectDryline:
     def test_no_dryline_outflow_boundary_in_moist_sector(self):
         """
         Outflow boundary: sharp Td drop between two moist-sector stations.
-        Both stations have Td well above DRY_SECTOR_TD_MAX_F, so no dryline.
+        The cool outflow pocket (OKFUSKEE, 44°F) sits east of LINCOLN (moist,
+        64°F). The contiguous-dry-sector walk reaches CUSTER→CANADIAN before
+        ever reaching LINCOLN, so OKFUSKEE is never considered as a dry edge.
 
-        This was the real-world bug: a storm outflow near Okemah (eastern OK)
-        produced a sharper per-degree gradient than the actual dryline near
-        Weatherford in western OK, causing a false detection ~200 miles east.
+        Validated 2026-05-18: actual dryline at HARMON/BECKHAM was ~120 miles
+        east of the TX panhandle dry sector. The walk correctly identifies
+        CUSTER as the dry edge and pairs it with CANADIAN.
         """
         series = _station_series([
             # Western OK — actual dry sector near Weatherford
@@ -140,21 +142,20 @@ class TestDetectDryline:
 
     def test_no_dryline_weak_gradient(self):
         """
-        Td drops only 8°F over 2 degrees longitude — below both the absolute-drop
-        and gradient thresholds, so no dryline should be flagged.
+        Small Td spread with no pair clearing both the absolute-drop and
+        gradient thresholds simultaneously.
+
+        CUSTER(54°F) → CLEVELAND(62°F): abs drop = 8°F ≥ threshold, but
+        dlon ≈ 1.4° → gradient ≈ 5.7°F/deg < MIN_TD_GRADIENT_F_PER_DEG(8).
+        CUSTER(54°F) → GRADY(58°F ≥ 55 ✓): abs drop = 4°F < threshold.
+        GRADY(58°F) → CLEVELAND(62°F ≥ 55 ✓): abs drop = 4°F < threshold.
         """
         series = _station_series([
             (OklahomaCounty.CUSTER,   54.0, 200.0),
             (OklahomaCounty.GRADY,    58.0, 185.0),
             (OklahomaCounty.CLEVELAND,62.0, 175.0),
         ])
-        # CUSTER→GRADY: +4°F / ~0.9° lon ≈ 4.4°F/deg — too weak
-        # GRADY→CLEVELAND: +4°F / ~0.5° lon ≈ 8°F/deg — passes gradient but abs drop = 4
-        # Neither pair clears MIN_TD_ABSOLUTE_DROP_F (10°F) with the right absolute delta
-        # Actually CUSTER→CLEVELAND: +8°F — let's verify the function returns None
         result = detect_dryline(series, _VT)
-        # The gradient between any pair is ≤ MIN_TD_GRADIENT_F_PER_DEG or abs drop < threshold
-        # If it does detect something (valid edge case), just verify confidence is low
         if result is not None:
             assert result.confidence < 0.4
 
@@ -170,37 +171,39 @@ class TestDetectDryline:
 
     def test_sparse_stations_single_band(self):
         """
-        Only central-band stations — detection should succeed with a single-band
-        result extending into a 2-point polyline.
+        Two stations in the same latitude window — detection should succeed and
+        produce a ≥2-point polyline (padded if only one vertex detects).
         """
         series = _station_series([
-            (OklahomaCounty.BLAINE,   28.0, 270.0),  # ~-98.5°, central band
-            (OklahomaCounty.OKLAHOMA, 62.0, 175.0),  # ~-97.5°, central band
+            (OklahomaCounty.BLAINE,   28.0, 270.0),  # ~35.84°N, ~-98.5°W
+            (OklahomaCounty.OKLAHOMA, 62.0, 175.0),  # ~35.55°N, ~-97.5°W
         ])
         boundary = detect_dryline(series, _VT)
         assert boundary is not None
-        assert len(boundary.position_lat) == 2   # padded to 2-point segment
-        assert len(boundary.position_lon) == 2
+        assert len(boundary.position_lat) >= 2
+        assert len(boundary.position_lon) >= 2
 
     def test_statewide_multi_band_dryline(self):
         """
-        Statewide dryline with N/C/S coverage — should detect in all three bands
-        and produce a ≥3-point polyline with high confidence.
+        Statewide dryline with N/C/S coverage — should detect across the full
+        latitude range and produce a ≥3-point polyline with high confidence.
+        The sliding-window approach may produce more than 3 vertices when
+        adjacent windows both detect the same dryline segment.
         """
         series = _station_series([
-            # North band (36.0–37.5°N)
+            # North (36.75°N)
             (OklahomaCounty.WOODS,    30.0, 260.0),   # lat=36.75°, lon=-98.77
             (OklahomaCounty.GRANT,    60.0, 175.0),   # lat=36.79°, lon=-97.69
-            # Central band (35.0–36.0°N)
+            # Central (35.05–35.57°N)
             (OklahomaCounty.CUSTER,   27.0, 255.0),   # lat=35.57°, lon=-99.03
             (OklahomaCounty.GRADY,    62.0, 170.0),   # lat=35.05°, lon=-97.97
-            # South band (33.6–35.0°N)
+            # South (34.51–34.73°N)
             (OklahomaCounty.HARMON,   25.0, 265.0),   # lat=34.73°, lon=-99.85
             (OklahomaCounty.STEPHENS, 61.0, 175.0),   # lat=34.51°, lon=-97.95
         ])
         boundary = detect_dryline(series, _VT)
         assert boundary is not None
-        assert len(boundary.position_lat) == 3
+        assert len(boundary.position_lat) >= 3
         assert boundary.confidence > 0.5
 
     def test_observation_outside_time_window_ignored(self):
@@ -248,6 +251,39 @@ class TestDetectDryline:
         if boundary is not None and len(boundary.position_lat) > 1:
             for i in range(len(boundary.position_lat) - 1):
                 assert boundary.position_lat[i] <= boundary.position_lat[i + 1]
+
+    def test_bowing_dryline_polyline_non_straight(self):
+        """
+        Dryline with a southward bulge: the central latitude detects the dryline
+        farther east than the north and south sections. The resulting polyline
+        should have different longitudes at different latitudes — not a straight
+        N-S line.
+
+        Scenario: dryline at -99°W in north and south, but bulging east to
+        -98°W in the central corridor where warm Gulf air has surged further west.
+        """
+        series = _station_series([
+            # North segment — dryline at ~-99°W
+            (OklahomaCounty.WOODS,     28.0, 260.0),  # lat=36.75°, lon=-98.77 — dry
+            (OklahomaCounty.GRANT,     62.0, 175.0),  # lat=36.79°, lon=-97.69 — moist
+            # Central segment — dryline pushed east to ~-98°W (eastward bulge)
+            (OklahomaCounty.KINGFISHER,28.0, 255.0),  # lat=35.86°, lon=-97.93 — dry
+            (OklahomaCounty.OKLAHOMA,  64.0, 170.0),  # lat=35.55°, lon=-97.50 — moist
+            # South segment — dryline at ~-99°W
+            (OklahomaCounty.HARMON,    25.0, 265.0),  # lat=34.73°, lon=-99.85 — dry
+            (OklahomaCounty.STEPHENS,  61.0, 175.0),  # lat=34.51°, lon=-97.95 — moist
+        ])
+        boundary = detect_dryline(series, _VT)
+        assert boundary is not None
+        assert len(boundary.position_lon) >= 3, "Need ≥3 points to express a bow"
+
+        # The polyline should not be a perfectly straight N-S line:
+        # at least two longitude values should differ by more than 0.3°
+        lon_range = max(boundary.position_lon) - min(boundary.position_lon)
+        assert lon_range > 0.3, (
+            f"All polyline lons within 0.3° — straight line, bow not captured "
+            f"(lons={[round(l,2) for l in boundary.position_lon]})"
+        )
 
 
 # ── compute_dryline_surge_rate ────────────────────────────────────────────────
