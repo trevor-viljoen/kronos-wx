@@ -216,6 +216,7 @@ def detect_dryline(
     station_series: dict[str, MesonetTimeSeries],
     valid_time: datetime,
     station_coords: Optional[dict[str, tuple[float, float]]] = None,
+    supplemental_obs: "list[tuple[float, float, float]]" = (),
 ) -> Optional[BoundaryObservation]:
     """
     Detect the dryline position from Mesonet observations at valid_time.
@@ -242,6 +243,10 @@ def detect_dryline(
             lat = ts.county.lat
             lon = ts.county.lon
         all_obs.append((lon, lat, ob.dewpoint))
+
+    # Merge supplemental observations (e.g. Texas Mesonet, WTM TTU stations)
+    # that carry their own explicit lat/lon rather than an OklahomaCounty.
+    all_obs.extend(supplemental_obs)
 
     if len(all_obs) < _MIN_STATIONS_PER_WINDOW:
         return None

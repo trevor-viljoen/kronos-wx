@@ -1243,7 +1243,27 @@ async def _task_surface() -> None:
                 continue
 
             moisture = await asyncio.to_thread(compute_moisture_return, current_obs)
-            dl = await asyncio.to_thread(detect_dryline, station_series, snap_time, _station_coords)
+
+            # Fetch TX/WTM observations in parallel — they feed both the dryline
+            # detection (as supplemental_obs with explicit lat/lon) and the map
+            # station plots. Fetched here so the TX panhandle dry sector is visible
+            # to the sliding-window algorithm; without them the polyline terminates
+            # at the OK/TX border even when the gradient is obvious.
+            tx_obs, wtm_obs = await asyncio.gather(
+                asyncio.to_thread(fetch_texas_mesonet_observations),
+                asyncio.to_thread(fetch_wtm_ttu_observations),
+            )
+            supplemental_dl_obs = [
+                (d["lon"], d["lat"], d["dewpoint_f"])
+                for d in tx_obs + wtm_obs
+                if d.get("lat") is not None
+                and d.get("lon") is not None
+                and d.get("dewpoint_f") is not None
+            ]
+
+            dl = await asyncio.to_thread(
+                detect_dryline, station_series, snap_time, _station_coords, supplemental_dl_obs
+            )
 
             # Compute surge vs previous
             prev_dl = _dryline_obj
@@ -1324,12 +1344,8 @@ async def _task_surface() -> None:
                     "wind_gust":  d.get("wind_gust"),
                 })
 
-            # Append Texas Mesonet stations (TWDB public API, no key required).
-            tx_obs = await asyncio.to_thread(fetch_texas_mesonet_observations)
+            # Append TX/WTM stations (already fetched above for dryline detection).
             mesonet_obs_list.extend(tx_obs)
-
-            # Append West Texas Mesonet TTU stations (authoritative WTM, 180 stations).
-            wtm_obs = await asyncio.to_thread(fetch_wtm_ttu_observations)
             mesonet_obs_list.extend(wtm_obs)
 
             async with _lock:

@@ -36,13 +36,15 @@ ENV PATH=/root/.local/bin:$PATH \
 
 COPY ok_weather_model/ ./ok_weather_model/
 COPY kronos_web/backend/ ./kronos_web/backend/
-COPY data/models/ ./data/models/
+COPY data/models/ ./bundled_models/
 COPY data/analogues.json ./data/analogues.json
+COPY scripts/entrypoint.sh ./entrypoint.sh
 
-RUN mkdir -p data logs
+RUN mkdir -p data logs && chmod +x entrypoint.sh
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 EXPOSE 8000
+ENTRYPOINT ["./entrypoint.sh"]
 CMD ["uvicorn", "kronos_web.backend.api:app", "--host", "0.0.0.0", "--port", "8000"]
