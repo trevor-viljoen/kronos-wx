@@ -72,6 +72,9 @@ FEATURE_NAMES: list[str] = [
     # Daytime modified CAPE (12Z sounding aloft + Mesonet surface Td)
     "modified_MLCAPE",              # Optional — afternoon MLCAPE with current surface moisture
     "modified_MLCIN",               # Optional — afternoon MLCIN with current surface moisture
+    # Binary flag: MLCIN = 0 at 12Z (cap already absent, not missing data).
+    # Prevents GBM from misreading 0.0 as a null fill and suppressing count predictions.
+    "mlcin_is_zero",
 ]
 
 
@@ -126,6 +129,7 @@ def extract_features_from_indices(
         "gulf_moisture_fraction":       _f(gulf_moisture_fraction),
         "modified_MLCAPE":              _f(modified_MLCAPE),
         "modified_MLCIN":               _f(modified_MLCIN),
+        "mlcin_is_zero":                1.0 if float(indices.MLCIN) == 0.0 else 0.0,
     }
 
 
@@ -255,4 +259,5 @@ def extract_features_from_hrrr(pt: HRRRCountyPoint) -> dict[str, float]:
         "gulf_moisture_fraction":       nan,
         "modified_MLCAPE":              nan,
         "modified_MLCIN":               nan,
+        "mlcin_is_zero":                1.0 if float(pt.MLCIN) == 0.0 else 0.0,
     }
