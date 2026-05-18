@@ -1305,7 +1305,7 @@ def _analyze_now_forecast(
                 f"[dim]HRRR from API cache — {_age}s old  {_hvt.strftime('%H:%MZ')}  "
                 f"hash:[bold]{_hash}[/bold][/dim]"
             )
-            _rzones = compute_risk_zones_from_hrrr(_snap, min_tier="MARGINAL")
+            _rzones, _ = compute_risk_zones_from_hrrr(_snap, min_tier="MARGINAL")
             if not _rzones:
                 console.print("[dim]No elevated risk areas identified.[/dim]")
                 return
@@ -1413,7 +1413,7 @@ def _analyze_now_forecast(
         return
 
     # ── Risk zones ────────────────────────────────────────────────────────────
-    risk_zones = compute_risk_zones_from_hrrr(hrrr_fc, min_tier="MARGINAL")
+    risk_zones, _ = compute_risk_zones_from_hrrr(hrrr_fc, min_tier="MARGINAL")
 
     def _cape_c(v):
         if v >= 3000: return "bright_red"
@@ -1833,6 +1833,34 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
             hours_to_try = [0]
 
     console.rule(f"[bold]Real-Time Cap Analysis — {stn.value} / {today.isoformat()}[/bold]")
+
+    # ── SPC Day 1 outlook ─────────────────────────────────────────────────────
+    from ok_weather_model.ingestion.spc_products import fetch_spc_outlook, fetch_active_watches_warnings
+    _spc_outlook = None
+    _spc_watches = []
+    with console.status("Fetching SPC outlook..."):
+        _spc_outlook = fetch_spc_outlook()
+        _spc_watches = fetch_active_watches_warnings()
+
+    if _spc_outlook and _spc_outlook.category not in ("NONE", None):
+        _cat_colors = {"HIGH": "bold red", "MDT": "red", "ENH": "yellow",
+                       "SLGT": "cyan", "MRGL": "green", "TSTM": "dim"}
+        _cc = _cat_colors.get(_spc_outlook.category, "white")
+        _torn_str = (f"  •  Torn: {_spc_outlook.max_tornado_prob:.0%}"
+                     if _spc_outlook.max_tornado_prob else "")
+        _sig_str = "  •  [bold red]SIG HATCH[/bold red]" if _spc_outlook.sig_tornado_hatched else ""
+        console.print(
+            f"SPC D1: [{_cc}]{_spc_outlook.category}[/{_cc}]"
+            f"{_torn_str}{_sig_str}"
+            + (f"  [dim](valid {_spc_outlook.valid_label})[/dim]" if _spc_outlook.valid_label else "")
+        )
+    else:
+        console.print("[dim]SPC D1: NONE / not available[/dim]")
+
+    for w in sorted(_spc_watches, key=lambda a: a.priority, reverse=True):
+        _wc = "bold red" if "Tornado" in w.event else "yellow"
+        _wnum = f" #{w.watch_number}" if w.watch_number else ""
+        console.print(f"  [{_wc}]{w.event}{_wnum}[/{_wc}] — {w.area_desc[:80]}")
 
     profile = None
     fetched_hour = None
@@ -2339,7 +2367,7 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
                 logger.debug("HRRR fetch failed: %s", _hrrr_err)
 
     if hrrr_snap is not None:
-        risk_zones = compute_risk_zones_from_hrrr(
+        risk_zones, _ = compute_risk_zones_from_hrrr(
             hrrr_snap, dryline=_dryline_for_risk, min_tier="MARGINAL"
         )
         _hrrr_label = _hrrr_valid.strftime("%H:%MZ") if _hrrr_valid else "?"
@@ -2471,7 +2499,7 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
         _baseline_risk_zones = []
         if _hrrr_baseline is not None and _hrrr_baseline is not hrrr_snap:
             from ok_weather_model.processing.risk_zone import compute_risk_zones_from_hrrr as _rzh
-            _baseline_risk_zones = _rzh(
+            _baseline_risk_zones, _ = _rzh(
                 _hrrr_baseline, dryline=_dryline_for_risk, min_tier="MARGINAL"
             )
 
@@ -2940,12 +2968,12 @@ def watch_now(interval: int, min_tier: str, station: str, notify: bool):
 
         # Pass dryline to risk zone scoring so counties near the dryline
         # get their tier boosted appropriately
-        risk_zones = compute_risk_zones_from_hrrr(
+        risk_zones, _ = compute_risk_zones_from_hrrr(
             curr_snap, dryline=current_dryline, min_tier="MARGINAL"
         )
-        base_risk_zones = compute_risk_zones_from_hrrr(
+        base_risk_zones, _ = compute_risk_zones_from_hrrr(
             hrrr_baseline, dryline=current_dryline, min_tier="MARGINAL"
-        ) if hrrr_baseline and hrrr_baseline is not curr_snap else []
+        ) if hrrr_baseline and hrrr_baseline is not curr_snap else ([], {})
 
         # Tendency counties: use elevated zones from current or baseline
         _elevated_now  = any(z.tier_rank >= 3 for z in risk_zones)
