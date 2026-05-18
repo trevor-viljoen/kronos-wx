@@ -1,8 +1,8 @@
 #!/bin/sh
 # Seed model artifacts from the bundled image copy into the data volume.
 # The named volume at /app/data shadows baked-in image files, so models
-# must be seeded on first container start. Existing volume files are not
-# overwritten (allows container-retrained models to persist).
+# must be seeded on every container start. Bundled models (from the image)
+# are always authoritative — they are overwritten to fix stale volume files.
 SEED_DIR="/app/bundled_models"
 MODEL_DIR="/app/data/models"
 if [ -d "$SEED_DIR" ]; then
@@ -10,10 +10,8 @@ if [ -d "$SEED_DIR" ]; then
     for f in "$SEED_DIR"/*.joblib; do
         [ -f "$f" ] || continue
         fname=$(basename "$f")
-        if [ ! -f "$MODEL_DIR/$fname" ]; then
-            cp "$f" "$MODEL_DIR/$fname"
-            echo "Seeded model: $fname"
-        fi
+        cp "$f" "$MODEL_DIR/$fname"
+        echo "Seeded model: $fname"
     done
 fi
 exec "$@"

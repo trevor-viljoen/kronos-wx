@@ -102,6 +102,7 @@ _state: dict[str, Any] = {
     "hail_geojson":    None,    # SPC Day1 hail probability FeatureCollection
     "mesonet_obs":     [],      # list[dict] — current Mesonet station observations
     "model_forecast":  None,
+    "model_error":     None,   # diagnostic: last model inference failure message
     "alert_log":       [],
     "analogues":       [],      # list[dict] — top N historical analogues
     "situation_brief": [],      # list[dict] — deterministic situation brief lines
@@ -1146,10 +1147,16 @@ async def _task_environment() -> None:
 
             # Model predictions
             model_pred = None
+            _model_error: str | None = None
             try:
+                from ok_weather_model.modeling.registry import _REGISTRY_DIR as _model_dir
                 clf = load_model("severity_classifier")
                 reg = load_model("tornado_regressor")
-                if clf and reg:
+                if clf is None or reg is None:
+                    _missing = [n for n, m in (("severity_classifier", clf), ("tornado_regressor", reg)) if m is None]
+                    _model_error = f"Artifact not found: {', '.join(_missing)} (looked in {_model_dir})"
+                    logger.error("Model artifacts missing: %s", _model_error)
+                else:
                     proba = clf.predict_proba(idx, kin)
                     count = reg.predict(idx, kin)
                     model_pred = {
@@ -1159,6 +1166,7 @@ async def _task_environment() -> None:
                         "count_hi":     round(count.get("interval_high", 0), 1),
                     }
             except Exception as _model_exc:
+                _model_error = f"{type(_model_exc).__name__}: {_model_exc}"
                 logger.warning("Model inference failed: %s", _model_exc, exc_info=True)
 
             env_data = {
@@ -1176,6 +1184,7 @@ async def _task_environment() -> None:
                 _state["environment"]   = env_data
                 _state["ces"]           = ces_data
                 _state["model_forecast"]= model_pred
+                _state["model_error"]   = _model_error
                 _state["analogues"]     = analogues
 
             await _broadcast()
@@ -1829,6 +1838,36 @@ async def push_unsubscribe(request: Request):
         await asyncio.to_thread(_push_db.remove_push_subscription, endpoint)
     logger.info("Push subscription removed (%d remaining)", len(_push_subscriptions))
     return JSONResponse({"status": "unsubscribed", "removed": removed})
+
+
+@app.get("/api/model-status")
+async def model_status():
+    """Diagnostic: report model artifact paths, file existence, and last error."""
+    from ok_weather_model.modeling.registry import _REGISTRY_DIR as _model_dir
+    import os
+    artifacts = ["severity_classifier", "tornado_regressor", "bust_classifier", "cap_break_prob_model"]
+    files = {
+        name: {
+            "path": str(_model_dir / f"{name}.joblib"),
+            "exists": (_model_dir / f"{name}.joblib").exists(),
+            "size_kb": round((_model_dir / f"{name}.joblib").stat().st_size / 1024, 1)
+            if (_model_dir / f"{name}.joblib").exists() else None,
+        }
+        for name in artifacts
+    }
+    bundled_dir = "/app/bundled_models"
+    bundled = {
+        name: os.path.exists(f"{bundled_dir}/{name}.joblib")
+        for name in artifacts
+    } if os.path.isdir(bundled_dir) else {"note": "not in Docker (local dev)"}
+    async with _lock:
+        last_error = _state.get("model_error")
+    return JSONResponse({
+        "model_dir": str(_model_dir),
+        "artifacts": files,
+        "bundled_models": bundled,
+        "last_error": last_error,
+    })
 
 
 @app.get("/health")
