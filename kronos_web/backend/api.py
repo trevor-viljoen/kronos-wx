@@ -1084,9 +1084,10 @@ async def _task_environment() -> None:
             kin = await asyncio.to_thread(compute_kinematic_profile, profile, idx)
 
             # LMN + FWD soundings (fetched in parallel threads)
+            # LMN (ARM site) only posts 00Z/12Z — skip for non-standard hours to avoid 404 noise
             lmn_idx = lmn_kin = None
             fwd_idx = fwd_kin = None
-            if fetched_hour is not None:
+            if fetched_hour is not None and fetched_hour in (0, 12):
                 def _do_lmn():
                     try:
                         with SoundingClient() as sc2:

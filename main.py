@@ -978,6 +978,9 @@ def _dangerous_capped_flag(
     """
     if indices is None or indices.MLCIN < 80:
         return False, []
+    # Skip if no meaningful CAPE — cap without moisture is not the boundary-forced pattern
+    if indices.MLCAPE < 500:
+        return False, []
 
     reasons: list[str] = []
     if kinematics:
@@ -2712,14 +2715,25 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
             model_table.add_column("Detail")
 
             if _bust is not None:
-                _bust_result = _bust.predict_proba(indices, kinematics, _ctg, **_mr_kwargs)
-                bust_pct = _bust_result["bust"]
-                bust_color = "bright_red" if bust_pct >= _bust.threshold_ else "yellow" if bust_pct >= 0.30 else "green"
-                model_table.add_row(
-                    "Cap-hold (bust)",
-                    f"[{bust_color}]{bust_pct:.0%} bust[/{bust_color}]",
-                    f"outbreak {_bust_result['outbreak']:.0%}  (n={_bust.n_training_cases_} cases, thr={_bust.threshold_:.2f})",
+                _active_watch = any(
+                    "Watch" in w.event for w in _spc_watches
+                    if "Tornado" in w.event or "Thunderstorm" in w.event
                 )
+                if _active_watch:
+                    model_table.add_row(
+                        "Cap-hold (bust)",
+                        "[dim]suppressed[/dim]",
+                        "[dim]active watch — cap already broke[/dim]",
+                    )
+                else:
+                    _bust_result = _bust.predict_proba(indices, kinematics, _ctg, **_mr_kwargs)
+                    bust_pct = _bust_result["bust"]
+                    bust_color = "bright_red" if bust_pct >= _bust.threshold_ else "yellow" if bust_pct >= 0.30 else "green"
+                    model_table.add_row(
+                        "Cap-hold (bust)",
+                        f"[{bust_color}]{bust_pct:.0%} bust[/{bust_color}]",
+                        f"outbreak {_bust_result['outbreak']:.0%}  (n={_bust.n_training_cases_} cases, thr={_bust.threshold_:.2f})",
+                    )
 
             model_table.add_row(
                 "Severity",
