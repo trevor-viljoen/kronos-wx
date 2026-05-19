@@ -340,7 +340,7 @@ html, body, #root {
   font-size: 12px;
   box-shadow: 0 4px 20px rgba(0,0,0,0.8);
   pointer-events: none;
-  min-width: 180px;
+  min-width: 220px;
 }
 .county-tooltip .county-name {
   font-family: var(--font-display);
@@ -354,6 +354,26 @@ html, body, #root {
   font-size: 11px;
   color: var(--color-text-dim);
   line-height: 1.7;
+}
+.county-tooltip .cp-grid {
+  display: grid;
+  grid-template-columns: 36px 56px 36px 56px;
+  gap: 0 4px;
+  line-height: 1.6;
+  font-size: 11px;
+}
+.county-tooltip .cp-label {
+  color: #555;
+}
+.county-tooltip .cp-divider {
+  grid-column: 1 / -1;
+  border-top: 1px solid #2a2a2a;
+  margin: 3px 0;
+}
+.county-tooltip .cp-full {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
 }
 
 /* ── MD popup ────────────────────────────────────────────────────────────── */

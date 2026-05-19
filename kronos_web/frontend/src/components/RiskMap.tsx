@@ -212,22 +212,64 @@ function CountyLayer({ geojson, countyData, tierMap, onCountyClick }: CountyLaye
   )
 }
 
+// Color thresholds: returns inline color string for a numeric value
+function _vc(v: number | null | undefined, lo: number, hi: number): string {
+  if (v == null) return '#666'
+  if (v >= hi) return '#ff4444'
+  if (v >= lo) return '#ffcc00'
+  return '#ccc'
+}
+function _vcDp(v: number): string {
+  return v >= 65 ? '#00e676' : v >= 55 ? '#66bb6a' : '#ccc'
+}
+function _vcInitProb(v: number | null): string {
+  if (v == null) return '#666'
+  return v >= 0.60 ? '#00e676' : v >= 0.40 ? '#ffcc00' : '#888'
+}
+
 function buildTooltip(rawName: string, tier?: Tier, pt?: CountyPoint): string {
   const tierColor = tier ? (TIER_STYLE[tier]?.color ?? '#fff') : 'rgba(255,255,255,0.4)'
   const tierLabel = tier && tier !== 'LOW' ? tier.replace('_', ' ') : 'LOW'
-  const vals = pt
-    ? `CAPE ${pt.MLCAPE.toFixed(0)} · CIN ${pt.MLCIN.toFixed(0)}<br/>` +
-      `SRH-1 ${pt.SRH_0_1km.toFixed(0)} · SRH-3 ${pt.SRH_0_3km.toFixed(0)}<br/>` +
-      `EHI ${pt.EHI != null ? pt.EHI.toFixed(2) : '—'} · Td ${pt.dewpoint_2m_F.toFixed(0)}°F`
-    : 'Loading…'
-  return `
-    <div class="county-tooltip">
+
+  if (!pt) {
+    return `<div class="county-tooltip">
       <div class="county-name">${rawName} Co.</div>
-      <div style="margin-bottom:4px">
-        <span class="tier-badge ${tier ?? 'LOW'}" style="color:${tierColor}">${tierLabel}</span>
-      </div>
-      <div class="county-vals">${vals}</div>
+      <div style="margin-bottom:6px"><span class="tier-badge ${tier ?? 'LOW'}" style="color:${tierColor}">${tierLabel}</span></div>
+      <div class="county-vals">Loading…</div>
     </div>`
+  }
+
+  const row = (l1: string, v1: string, c1: string, l2: string, v2: string, c2: string) =>
+    `<span class="cp-label">${l1}</span><span style="color:${c1}">${v1}</span>` +
+    `<span class="cp-label">${l2}</span><span style="color:${c2}">${v2}</span>`
+
+  const ehi = pt.EHI != null ? pt.EHI.toFixed(2) : '—'
+  const stp = pt.STP != null ? pt.STP.toFixed(2) : '—'
+  const lr  = pt.lapse_rate != null ? `${pt.lapse_rate.toFixed(1)}` : '—'
+  const lcl = pt.LCL_height_m != null ? `${pt.LCL_height_m.toFixed(0)}m` : '—'
+  const initPct  = pt.cap_break_prob != null ? `${(pt.cap_break_prob * 100).toFixed(0)}%` : '—'
+
+  return `<div class="county-tooltip">
+    <div class="county-name">${rawName} Co.</div>
+    <div style="margin-bottom:6px"><span class="tier-badge ${tier ?? 'LOW'}" style="color:${tierColor}">${tierLabel}</span></div>
+    <div class="cp-grid">
+      ${row('CAPE', pt.MLCAPE.toFixed(0),     _vc(pt.MLCAPE, 1000, 2500),
+            'CIN',  pt.MLCIN.toFixed(0),      _vc(pt.MLCIN,  50,   150))}
+      ${row('SRH1', pt.SRH_0_1km.toFixed(0),  _vc(pt.SRH_0_1km, 150, 250),
+            'SRH3', pt.SRH_0_3km.toFixed(0),  _vc(pt.SRH_0_3km, 300, 450))}
+      ${row('EHI',  ehi,  pt.EHI != null ? _vc(pt.EHI, 1.5, 2.5) : '#666',
+            'STP',  stp,  pt.STP != null ? _vc(pt.STP, 1.0, 2.0) : '#666')}
+      ${row('BWD',  `${pt.BWD_0_6km.toFixed(0)}kt`, _vc(pt.BWD_0_6km, 40, 55),
+            'LR',   `${lr}°/km`, pt.lapse_rate != null ? _vc(pt.lapse_rate, 7.0, 9.0) : '#666')}
+      ${row('LCL',  lcl,  '#ccc',
+            'Td',   `${pt.dewpoint_2m_F.toFixed(0)}°F`, _vcDp(pt.dewpoint_2m_F))}
+      <div class="cp-divider"></div>
+      <div class="cp-full">
+        <span class="cp-label">P(cap break)</span>
+        <span style="color:${_vcInitProb(pt.cap_break_prob)};font-weight:600">${initPct}</span>
+      </div>
+    </div>
+  </div>`
 }
 
 function normalizeCountyName(raw: string): string {
