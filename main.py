@@ -2684,72 +2684,81 @@ def analyze_now(station: str, hour: int | None, n_analogues: int, mode: str,
 
     # ── Model predictions ─────────────────────────────────────────────────────
     console.rule("[bold]Forecast Model Predictions[/bold]")
-    try:
-        from ok_weather_model.modeling import SeverityClassifier, BustClassifier, TornadoRegressor, load_model
-        _clf: SeverityClassifier  = load_model("severity_classifier")
-        _bust: BustClassifier     = load_model("bust_classifier")
-        _reg: TornadoRegressor    = load_model("tornado_regressor")
+    _SUPPRESS_OUTLOOK = {None, "NONE", "TSTM", "MRGL"}
+    _outlook_cat = getattr(_spc_outlook, "category", None)
+    if _outlook_cat in _SUPPRESS_OUTLOOK:
+        console.print(
+            "[dim]Suppressed — no significant SPC outlook. "
+            "Classifier trained on tornado-day environments only; "
+            "output is not meaningful on quiet days.[/dim]"
+        )
+    else:
+        try:
+            from ok_weather_model.modeling import SeverityClassifier, BustClassifier, TornadoRegressor, load_model
+            _clf: SeverityClassifier  = load_model("severity_classifier")
+            _bust: BustClassifier     = load_model("bust_classifier")
+            _reg: TornadoRegressor    = load_model("tornado_regressor")
 
-        if _clf is not None and _reg is not None:
-            _ctg = ces.get("convective_temp_gap_12Z") if ces is not None else None
-            _mr_kwargs = {}
-            if moisture_return is not None:
-                _mr_kwargs = {
-                    "surface_dewpoint_f":           moisture_return.state_mean_dewpoint_f,
-                    "moisture_return_gradient_f":   moisture_return.moisture_return_gradient_f,
-                    "gulf_moisture_fraction":       moisture_return.gulf_moisture_fraction,
-                }
-            if modified_indices is not None:
-                _mr_kwargs["modified_MLCAPE"] = modified_indices.MLCAPE
-                _mr_kwargs["modified_MLCIN"]  = modified_indices.MLCIN
+            if _clf is not None and _reg is not None:
+                _ctg = ces.get("convective_temp_gap_12Z") if ces is not None else None
+                _mr_kwargs = {}
+                if moisture_return is not None:
+                    _mr_kwargs = {
+                        "surface_dewpoint_f":           moisture_return.state_mean_dewpoint_f,
+                        "moisture_return_gradient_f":   moisture_return.moisture_return_gradient_f,
+                        "gulf_moisture_fraction":       moisture_return.gulf_moisture_fraction,
+                    }
+                if modified_indices is not None:
+                    _mr_kwargs["modified_MLCAPE"] = modified_indices.MLCAPE
+                    _mr_kwargs["modified_MLCIN"]  = modified_indices.MLCIN
 
-            _clf_result  = _clf.predict_proba(indices, kinematics, _ctg, **_mr_kwargs)
-            _reg_result  = _reg.predict(indices, kinematics, _ctg, **_mr_kwargs)
+                _clf_result  = _clf.predict_proba(indices, kinematics, _ctg, **_mr_kwargs)
+                _reg_result  = _reg.predict(indices, kinematics, _ctg, **_mr_kwargs)
 
-            sig_pct = _clf_result["significant"]
-            sig_color = "red" if sig_pct >= _clf.threshold_ else "yellow" if sig_pct >= _clf.threshold_ * 0.7 else "green"
+                sig_pct = _clf_result["significant"]
+                sig_color = "red" if sig_pct >= _clf.threshold_ else "yellow" if sig_pct >= _clf.threshold_ * 0.7 else "green"
 
-            model_table = Table(show_header=True, header_style="bold", box=None)
-            model_table.add_column("Model")
-            model_table.add_column("Prediction", justify="right")
-            model_table.add_column("Detail")
+                model_table = Table(show_header=True, header_style="bold", box=None)
+                model_table.add_column("Model")
+                model_table.add_column("Prediction", justify="right")
+                model_table.add_column("Detail")
 
-            if _bust is not None:
-                _active_watch = any(
-                    "Watch" in w.event for w in _spc_watches
-                    if "Tornado" in w.event or "Thunderstorm" in w.event
+                if _bust is not None:
+                    _active_watch = any(
+                        "Watch" in w.event for w in _spc_watches
+                        if "Tornado" in w.event or "Thunderstorm" in w.event
+                    )
+                    if _active_watch:
+                        model_table.add_row(
+                            "Cap-hold (bust)",
+                            "[dim]suppressed[/dim]",
+                            "[dim]active watch — cap already broke[/dim]",
+                        )
+                    else:
+                        _bust_result = _bust.predict_proba(indices, kinematics, _ctg, **_mr_kwargs)
+                        bust_pct = _bust_result["bust"]
+                        bust_color = "bright_red" if bust_pct >= _bust.threshold_ else "yellow" if bust_pct >= 0.30 else "green"
+                        model_table.add_row(
+                            "Cap-hold (bust)",
+                            f"[{bust_color}]{bust_pct:.0%} bust[/{bust_color}]",
+                            f"outbreak {_bust_result['outbreak']:.0%}  (n={_bust.n_training_cases_} cases, thr={_bust.threshold_:.2f})",
+                        )
+
+                model_table.add_row(
+                    "Severity",
+                    f"[{sig_color}]{sig_pct:.0%} SIGNIFICANT[/{sig_color}]",
+                    f"WEAK {_clf_result['weak']:.0%}  (n={_clf.n_training_cases_} cases, thr={_clf.threshold_:.2f})",
                 )
-                if _active_watch:
-                    model_table.add_row(
-                        "Cap-hold (bust)",
-                        "[dim]suppressed[/dim]",
-                        "[dim]active watch — cap already broke[/dim]",
-                    )
-                else:
-                    _bust_result = _bust.predict_proba(indices, kinematics, _ctg, **_mr_kwargs)
-                    bust_pct = _bust_result["bust"]
-                    bust_color = "bright_red" if bust_pct >= _bust.threshold_ else "yellow" if bust_pct >= 0.30 else "green"
-                    model_table.add_row(
-                        "Cap-hold (bust)",
-                        f"[{bust_color}]{bust_pct:.0%} bust[/{bust_color}]",
-                        f"outbreak {_bust_result['outbreak']:.0%}  (n={_bust.n_training_cases_} cases, thr={_bust.threshold_:.2f})",
-                    )
-
-            model_table.add_row(
-                "Severity",
-                f"[{sig_color}]{sig_pct:.0%} SIGNIFICANT[/{sig_color}]",
-                f"WEAK {_clf_result['weak']:.0%}  (n={_clf.n_training_cases_} cases, thr={_clf.threshold_:.2f})",
-            )
-            model_table.add_row(
-                "Tornado count",
-                f"{_reg_result['expected_count']:.1f}",
-                f"80% PI: {_reg_result['interval_low']:.0f}–{_reg_result['interval_high']:.0f}",
-            )
-            console.print(model_table)
-        else:
-            console.print("[dim]No trained models found. Run [cyan]train-models[/cyan] to enable predictions.[/dim]")
-    except Exception as _model_exc:
-        logger.debug("Model prediction skipped: %s", _model_exc)
+                model_table.add_row(
+                    "Tornado count",
+                    f"{_reg_result['expected_count']:.1f}",
+                    f"80% PI: {_reg_result['interval_low']:.0f}–{_reg_result['interval_high']:.0f}",
+                )
+                console.print(model_table)
+            else:
+                console.print("[dim]No trained models found. Run [cyan]train-models[/cyan] to enable predictions.[/dim]")
+        except Exception as _model_exc:
+            logger.debug("Model prediction skipped: %s", _model_exc)
 
     # ── Historical analogues ──────────────────────────────────────────────────
     console.rule("[bold]Historical Analogues[/bold]")

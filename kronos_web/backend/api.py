@@ -1147,28 +1147,37 @@ async def _task_environment() -> None:
                     logger.debug("CES error: %s", exc)
 
             # Model predictions
+            # Gate: only meaningful when SPC has a SLGT+ outlook over Oklahoma.
+            # The classifier was trained exclusively on tornado-day environments;
+            # running it on a quiet day produces a misleading number.
             model_pred = None
             _model_error: str | None = None
-            try:
-                from ok_weather_model.modeling.registry import _REGISTRY_DIR as _model_dir
-                clf = load_model("severity_classifier")
-                reg = load_model("tornado_regressor")
-                if clf is None or reg is None:
-                    _missing = [n for n, m in (("severity_classifier", clf), ("tornado_regressor", reg)) if m is None]
-                    _model_error = f"Artifact not found: {', '.join(_missing)} (looked in {_model_dir})"
-                    logger.error("Model artifacts missing: %s", _model_error)
-                else:
-                    proba = clf.predict_proba(idx, kin)
-                    count = reg.predict(idx, kin)
-                    model_pred = {
-                        "sig_pct":      round(proba.get("significant", 0) * 100, 1),
-                        "count_exp":    round(count.get("expected_count", 0), 1),
-                        "count_lo":     round(count.get("interval_low", 0), 1),
-                        "count_hi":     round(count.get("interval_high", 0), 1),
-                    }
-            except Exception as _model_exc:
-                _model_error = f"{type(_model_exc).__name__}: {_model_exc}"
-                logger.warning("Model inference failed: %s", _model_exc, exc_info=True)
+            async with _lock:
+                _spc_cat = ((_state.get("spc") or {}).get("outlook") or {}).get("category")
+            _SUPPRESS_OUTLOOK = {None, "NONE", "TSTM", "MRGL"}
+            if _spc_cat in _SUPPRESS_OUTLOOK:
+                _model_error = "no_outlook"
+            else:
+                try:
+                    from ok_weather_model.modeling.registry import _REGISTRY_DIR as _model_dir
+                    clf = load_model("severity_classifier")
+                    reg = load_model("tornado_regressor")
+                    if clf is None or reg is None:
+                        _missing = [n for n, m in (("severity_classifier", clf), ("tornado_regressor", reg)) if m is None]
+                        _model_error = f"Artifact not found: {', '.join(_missing)} (looked in {_model_dir})"
+                        logger.error("Model artifacts missing: %s", _model_error)
+                    else:
+                        proba = clf.predict_proba(idx, kin)
+                        count = reg.predict(idx, kin)
+                        model_pred = {
+                            "sig_pct":      round(proba.get("significant", 0) * 100, 1),
+                            "count_exp":    round(count.get("expected_count", 0), 1),
+                            "count_lo":     round(count.get("interval_low", 0), 1),
+                            "count_hi":     round(count.get("interval_high", 0), 1),
+                        }
+                except Exception as _model_exc:
+                    _model_error = f"{type(_model_exc).__name__}: {_model_exc}"
+                    logger.warning("Model inference failed: %s", _model_exc, exc_info=True)
 
             env_data = {
                 "oun": _ser_indices(idx, kin),

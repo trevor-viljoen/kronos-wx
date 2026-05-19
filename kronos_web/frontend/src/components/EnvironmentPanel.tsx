@@ -8,6 +8,7 @@ interface Props {
   fwd: SoundingData | null
   ces: CESData | null
   model: ModelForecast | null
+  modelError?: string | null
   hour: number | null
 }
 
@@ -85,7 +86,7 @@ function sigBarColor(pct: number): string {
   return '#44aa44'
 }
 
-export function EnvironmentPanel({ oun, lmn, fwd, ces, model, hour }: Props) {
+export function EnvironmentPanel({ oun, lmn, fwd, ces, model, modelError, hour }: Props) {
   const { collapsed, toggle } = useCollapse('env')
 
   if (!oun) {
@@ -194,7 +195,9 @@ export function EnvironmentPanel({ oun, lmn, fwd, ces, model, hour }: Props) {
             )
           ) : (
             <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 4 }}>
-              Models not trained — run train-models
+              {modelError === 'no_outlook'
+                ? 'No significant SPC outlook — model only applies on active severe days'
+                : 'Models not trained — run train-models'}
             </div>
           )}
         </div>

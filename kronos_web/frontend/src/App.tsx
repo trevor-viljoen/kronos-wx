@@ -123,6 +123,7 @@ function MobileLayout({ state, selectedCounty, setSelectedCounty, selectedPt, se
                   fwd={env?.fwd ?? null}
                   ces={state.ces}
                   model={state.model_forecast}
+                  modelError={state.model_error}
                   hour={env?.fetched_hour ?? null}
                 />
                 <SPCPanel spc={state.spc} />
@@ -208,6 +209,7 @@ function MainDashboard({ state, isMobile, selectedCounty, setSelectedCounty, sel
                 fwd={env?.fwd ?? null}
                 ces={state.ces}
                 model={state.model_forecast}
+                modelError={state.model_error}
                 hour={env?.fetched_hour ?? null}
               />
               <SPCPanel spc={state.spc} />

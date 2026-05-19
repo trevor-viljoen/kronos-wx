@@ -241,6 +241,7 @@ export interface DashboardState {
   hail_geojson: GeoJSON.FeatureCollection | null
   mesonet_obs: StationObs[]
   model_forecast: ModelForecast | null
+  model_error: string | null
   alert_log: AlertLogEntry[]
   analogues: AnalogueEntry[]
   initiation_candidates: string[]
