@@ -30,6 +30,23 @@ Algorithm
 
 A dryline is only reported when at least one vertex clears the gradient threshold.
 
+Cold-front discrimination
+-------------------------
+A cold front produces an identical dewpoint gradient signature — cool/dry post-
+frontal air to the west, warm/moist pre-frontal air to the east. Two additional
+checks suppress cold-front false positives:
+
+  Temperature gate: on a dryline the dry side is typically as warm or warmer
+  due to EML downsloping from elevated terrain. If T_dry < T_moist - 10°F the
+  feature is flagged as cold-frontal and rejected.
+
+  Wind gate: post-frontal winds are from the NW-N-NE sector. If the dry-edge
+  station reports winds in the range 280°–80° (wrapping through north), the
+  feature is suppressed.
+
+Both gates are optional — they fire only when temperature / wind-direction data
+is available. Missing data is treated as "gate not triggered".
+
 The 55°F eastern-station anchor is grounded in NWS guidance: severe thunderstorms
 become significantly more likely when surface Td ≥ 55°F. The dryline is
 operationally the western boundary of this severe-weather-supportive moisture.
@@ -73,6 +90,17 @@ MOIST_SECTOR_TD_MIN_F: float = 55.0
 # Allows skipping one station that has missing/bad data.
 MAX_PAIR_DLON: float = 2.5
 
+# Cold-front temperature discriminator.
+# On a dryline, EML descent keeps the dry side as warm or warmer than the moist
+# side. If T_dry < T_moist - this threshold, the gradient is cold-frontal.
+COLD_FRONT_TEMP_DIFF_F: float = 10.0
+
+# Post-frontal wind sector: NW-N-NE (wraps through north).
+# If the dry-edge station's wind direction falls in [_POST_FRONTAL_WIND_LO, 360)
+# OR [0, _POST_FRONTAL_WIND_HI], it indicates cold-frontal flow, not dryline SW/W flow.
+_POST_FRONTAL_WIND_LO: float = 280.0
+_POST_FRONTAL_WIND_HI: float = 80.0
+
 # Observation matching window (seconds)
 _OBS_WINDOW_S: float = 7 * 60
 
@@ -107,7 +135,8 @@ def _nearest_obs(ts: MesonetTimeSeries, valid_time: datetime):
 
 
 def _max_gradient_pair(
-    stations: list[tuple[float, float, float]],  # (lon, lat, td_F)
+    stations: list[tuple[float, float, float, Optional[float], Optional[float]]],
+    # (lon, lat, td_F, temp_F, wind_dir) — temp_F and wind_dir may be None
 ) -> Optional[tuple[float, float]]:
     """
     Locate the dryline as the eastern edge of the contiguous dry sector.
@@ -118,11 +147,14 @@ def _max_gradient_pair(
          edge. A rain-cooled storm pocket east of the moist sector is ignored
          because moist-sector air between it and the genuine dry sector breaks
          the contiguous run.
-      2. Pair the dry-edge station with the nearest eastern station (within
+      2. Check the dry-edge station's wind direction: if it falls in the post-
+         frontal NW-N-NE sector (280°–80°), the feature is cold-frontal — reject.
+      3. Pair the dry-edge station with the nearest eastern station (within
          MAX_PAIR_DLON) that (a) has Td ≥ MOIST_SECTOR_TD_MIN_F (55°F —
          severe-weather-supportive moisture), (b) produces a gradient ≥
-         MIN_TD_GRADIENT_F_PER_DEG, and (c) has an absolute Td jump ≥
-         MIN_TD_ABSOLUTE_DROP_F.
+         MIN_TD_GRADIENT_F_PER_DEG, (c) has an absolute Td jump ≥
+         MIN_TD_ABSOLUTE_DROP_F, and (d) passes the cold-front temperature gate:
+         T_dry must not be more than COLD_FRONT_TEMP_DIFF_F cooler than T_moist.
 
     Returns (midpoint_lon, gradient_F_per_deg) or None if no dry sector or
     no valid moist-sector pairing is found.
@@ -135,7 +167,7 @@ def _max_gradient_pair(
 
     # ── Step 1: find the eastern edge of the contiguous dry sector ────────────
     dry_edge_idx: Optional[int] = None
-    for i, (lon, _lat, td) in enumerate(srt):
+    for i, (lon, _lat, td, _temp, _wind) in enumerate(srt):
         if td <= DRY_SECTOR_TD_MAX_F:
             dry_edge_idx = i
         else:
@@ -144,14 +176,22 @@ def _max_gradient_pair(
     if dry_edge_idx is None:
         return None  # no dry sector in this window
 
-    lon_w, _, td_w = srt[dry_edge_idx]
+    lon_w, _, td_w, temp_w, wind_w = srt[dry_edge_idx]
+
+    # ── Step 1b: wind direction gate on dry-edge station ─────────────────────
+    # Post-frontal air arrives from NW-N-NE (280°–80° wrapping through north).
+    # A dryline dry sector has SW-W flow; northerly flow flags a cold front.
+    if wind_w is not None:
+        postfrontal = (wind_w >= _POST_FRONTAL_WIND_LO or wind_w <= _POST_FRONTAL_WIND_HI)
+        if postfrontal:
+            return None
 
     # ── Step 2: find the best moist-sector pairing station ────────────────────
     best_gradient = 0.0
     best_lon: Optional[float] = None
 
     for j in range(dry_edge_idx + 1, len(srt)):
-        lon_e, _, td_e = srt[j]
+        lon_e, _, td_e, temp_e, _wind_e = srt[j]
         dlon = abs(lon_e - lon_w)
         if dlon > MAX_PAIR_DLON:
             break
@@ -163,6 +203,11 @@ def _max_gradient_pair(
         dtd = td_e - td_w
         if dtd < MIN_TD_ABSOLUTE_DROP_F:
             continue
+        # Cold-front temperature gate: on a dryline EML keeps the dry side warm;
+        # a large temperature deficit on the dry side signals frontal cold advection.
+        if temp_w is not None and temp_e is not None:
+            if temp_w < temp_e - COLD_FRONT_TEMP_DIFF_F:
+                continue
         gradient = dtd / dlon
         if gradient > best_gradient:
             best_gradient = gradient
@@ -216,22 +261,30 @@ def detect_dryline(
     station_series: dict[str, MesonetTimeSeries],
     valid_time: datetime,
     station_coords: Optional[dict[str, tuple[float, float]]] = None,
-    supplemental_obs: "list[tuple[float, float, float]]" = (),
+    supplemental_obs: "list[tuple[float, float, float, Optional[float], Optional[float]]]" = (),
 ) -> Optional[BoundaryObservation]:
     """
     Detect the dryline position from Mesonet observations at valid_time.
 
+    Each observation is a 5-tuple (lon, lat, td_F, temp_F, wind_dir) where
+    temp_F and wind_dir are Optional — omit or pass None to skip the cold-front
+    discrimination gates for that station.
+
     Args:
-        station_series: dict mapping station_id → MesonetTimeSeries, as
-            returned by MesonetClient.get_historical_case_data().
+        station_series: dict mapping station_id → MesonetTimeSeries.
         valid_time: UTC datetime to analyze.
+        supplemental_obs: extra observations with explicit lat/lon (e.g. TX
+            Mesonet, WTM TTU stations outside the OklahomaCounty enum). Each
+            tuple is (lon, lat, td_F, temp_F, wind_dir); pass None for temp_F
+            or wind_dir if unavailable.
 
     Returns:
         BoundaryObservation with boundary_type=DRYLINE, or None if no clear
         dryline gradient is found in the station network.
     """
     # ── 1. Collect all observations ───────────────────────────────────────────
-    all_obs: list[tuple[float, float, float]] = []  # (lon, lat, td_F)
+    # 5-tuple: (lon, lat, td_F, temp_F, wind_dir); temp and wind may be None.
+    all_obs: list[tuple[float, float, float, Optional[float], Optional[float]]] = []
 
     for ts in station_series.values():
         ob = _nearest_obs(ts, valid_time)
@@ -242,7 +295,7 @@ def detect_dryline(
         else:
             lat = ts.county.lat
             lon = ts.county.lon
-        all_obs.append((lon, lat, ob.dewpoint))
+        all_obs.append((lon, lat, ob.dewpoint, ob.temperature, ob.wind_direction))
 
     # Merge supplemental observations (e.g. Texas Mesonet, WTM TTU stations)
     # that carry their own explicit lat/lon rather than an OklahomaCounty.
@@ -262,8 +315,8 @@ def detect_dryline(
     while rep_lat <= _LAT_OK_NORTH - _POLYLINE_LAT_STEP / 2:
         half = _DETECTION_WINDOW / 2
         window = [
-            (lon, lat, td)
-            for lon, lat, td in all_obs
+            (lon, lat, td, temp, wind)
+            for lon, lat, td, temp, wind in all_obs
             if rep_lat - half <= lat < rep_lat + half
         ]
         if len(window) >= _MIN_STATIONS_PER_WINDOW:

@@ -286,6 +286,114 @@ class TestDetectDryline:
         )
 
 
+    def test_cold_front_suppressed_by_wind_direction(self):
+        """
+        A cold front passing through eastern OK creates the same Td gradient as a
+        dryline, but post-frontal winds are from the NW (310°), which is in the
+        suppression sector. The algorithm must return None.
+        """
+        series = _station_series([
+            # Post-frontal dry/cool side — NW winds signal cold front, not dryline
+            (OklahomaCounty.PITTSBURG, 42.0, 310.0),   # NW wind — post-frontal
+            (OklahomaCounty.LATIMER,   45.0, 320.0),   # NW wind — post-frontal
+            # Pre-frontal moist side — S winds
+            (OklahomaCounty.PUSHMATAHA, 62.0, 175.0),
+            (OklahomaCounty.MCCURTAIN,  65.0, 170.0),
+        ])
+        assert detect_dryline(series, _VT) is None
+
+    def test_cold_front_suppressed_by_temperature(self):
+        """
+        Even with ambiguous wind directions, if the dry-side temperature is
+        significantly colder than the moist side (cold advection signature),
+        the temperature gate should suppress the detection.
+
+        Use SW wind (200°) on the dry side to bypass the wind gate, but with
+        T_dry = 55°F vs T_moist = 80°F — a 25°F deficit indicating cold frontal air.
+        """
+        from ok_weather_model.models.mesonet import MesonetObservation, MesonetTimeSeries
+
+        def _make_temp_obs(county, td, wdir, temp):
+            return MesonetObservation(
+                station_id=county.mesonet_station_id,
+                county=county,
+                valid_time=_VT,
+                temperature=temp,
+                dewpoint=td,
+                relative_humidity=50.0,
+                wind_direction=wdir,
+                wind_speed=15.0,
+                pressure=980.0,
+            )
+
+        def _make_temp_series(county, td, wdir, temp):
+            obs = _make_temp_obs(county, td, wdir, temp)
+            return MesonetTimeSeries(
+                station_id=county.mesonet_station_id,
+                county=county,
+                start_time=_VT,
+                end_time=_VT,
+                observations=[obs],
+            )
+
+        series = {
+            # Dry/cold side: SW wind (passes wind gate), but T=55°F — cold frontal
+            OklahomaCounty.PITTSBURG.mesonet_station_id:
+                _make_temp_series(OklahomaCounty.PITTSBURG, 40.0, 200.0, 55.0),
+            OklahomaCounty.LATIMER.mesonet_station_id:
+                _make_temp_series(OklahomaCounty.LATIMER, 45.0, 210.0, 57.0),
+            # Moist/warm side: T=82°F — T_dry deficit > 10°F triggers temperature gate
+            OklahomaCounty.PUSHMATAHA.mesonet_station_id:
+                _make_temp_series(OklahomaCounty.PUSHMATAHA, 62.0, 175.0, 82.0),
+            OklahomaCounty.MCCURTAIN.mesonet_station_id:
+                _make_temp_series(OklahomaCounty.MCCURTAIN, 65.0, 170.0, 80.0),
+        }
+        assert detect_dryline(series, _VT) is None
+
+    def test_dryline_not_suppressed_when_temperature_similar(self):
+        """
+        On a true dryline the dry side can be as warm as the moist side (EML
+        downsloping). Make sure the temperature gate does NOT fire when the two
+        sides are within 5°F of each other.
+        """
+        from ok_weather_model.models.mesonet import MesonetObservation, MesonetTimeSeries
+
+        def _make_temp_series(county, td, wdir, temp):
+            obs = MesonetObservation(
+                station_id=county.mesonet_station_id,
+                county=county,
+                valid_time=_VT,
+                temperature=temp,
+                dewpoint=td,
+                relative_humidity=50.0,
+                wind_direction=wdir,
+                wind_speed=15.0,
+                pressure=980.0,
+            )
+            return MesonetTimeSeries(
+                station_id=county.mesonet_station_id,
+                county=county,
+                start_time=_VT,
+                end_time=_VT,
+                observations=[obs],
+            )
+
+        series = {
+            # Dry side: T=88°F (hotter — EML warming), SW wind
+            OklahomaCounty.CUSTER.mesonet_station_id:
+                _make_temp_series(OklahomaCounty.CUSTER,   28.0, 250.0, 88.0),
+            OklahomaCounty.CADDO.mesonet_station_id:
+                _make_temp_series(OklahomaCounty.CADDO,    32.0, 240.0, 86.0),
+            # Moist side: T=83°F — only 5°F cooler on dry side → no temperature gate
+            OklahomaCounty.GRADY.mesonet_station_id:
+                _make_temp_series(OklahomaCounty.GRADY,    58.0, 175.0, 83.0),
+            OklahomaCounty.OKLAHOMA.mesonet_station_id:
+                _make_temp_series(OklahomaCounty.OKLAHOMA, 62.0, 170.0, 82.0),
+        }
+        boundary = detect_dryline(series, _VT)
+        assert boundary is not None, "True dryline with warm dry side should be detected"
+
+
 # ── compute_dryline_surge_rate ────────────────────────────────────────────────
 
 class TestComputeDrylineSurgeRate:

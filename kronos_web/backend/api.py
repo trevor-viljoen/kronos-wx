@@ -1264,7 +1264,7 @@ async def _task_surface() -> None:
                 asyncio.to_thread(fetch_wtm_ttu_observations),
             )
             supplemental_dl_obs = [
-                (d["lon"], d["lat"], d["dewpoint_f"])
+                (d["lon"], d["lat"], d["dewpoint_f"], d.get("temp_f"), d.get("wind_dir"))
                 for d in tx_obs + wtm_obs
                 if d.get("lat") is not None
                 and d.get("lon") is not None
